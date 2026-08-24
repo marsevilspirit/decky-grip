@@ -1,7 +1,11 @@
 import { definePlugin } from "@decky/api";
 import { staticClasses } from "@decky/ui";
 
+import { getPositions, savePosition } from "./backend";
 import { GripPanel } from "./components/GripPanel";
+import { GripController } from "./grip-controller";
+import { RuntimeStatusStore } from "./runtime-status";
+import { createSteamGuideRuntime } from "./steam/runtime";
 
 function BookmarkIcon() {
   return (
@@ -17,12 +21,26 @@ function BookmarkIcon() {
   );
 }
 
-export default definePlugin(() => ({
-  name: "GRIP",
-  titleView: <div className={staticClasses.Title}>GRIP</div>,
-  content: <GripPanel />,
-  icon: <BookmarkIcon />,
-  onDismount() {
-    console.info("[GRIP] Unloaded");
-  },
-}));
+export default definePlugin(() => {
+  const status = new RuntimeStatusStore();
+  const controller = new GripController({
+    backend: {
+      getPositions,
+      savePosition,
+    },
+    runtimeFactory: createSteamGuideRuntime,
+    status,
+  });
+  void controller.start();
+
+  return {
+    name: "GRIP",
+    titleView: <div className={staticClasses.Title}>GRIP</div>,
+    content: <GripPanel status={status} />,
+    icon: <BookmarkIcon />,
+    onDismount() {
+      controller.stop();
+      console.info("[GRIP] Unloaded");
+    },
+  };
+});

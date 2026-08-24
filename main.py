@@ -46,6 +46,16 @@ class Plugin:
     async def get_position(self, guide_key: str):
         return await self._run_io(self._store.get, guide_key)
 
+    async def get_positions(self):
+        positions = await self._run_io(self._store.snapshot)
+        return {
+            guide_key: {
+                "scrollTop": position["scroll_top"],
+                "updatedAt": position["updated_at_ms"],
+            }
+            for guide_key, position in positions.items()
+        }
+
     async def save_position(self, guide_key: str, scroll_top: float):
         return await self._run_io(self._store.save, guide_key, scroll_top)
 

@@ -5,9 +5,18 @@ export interface StoredPosition {
   updated_at_ms: number;
 }
 
+export interface PositionSnapshot {
+  scrollTop: number;
+  updatedAt: number;
+}
+
+export type PositionSnapshots = Record<string, PositionSnapshot>;
+
 export const getPosition = callable<[guideKey: string], StoredPosition | null>(
   "get_position",
 );
+
+export const getPositions = callable<[], PositionSnapshots>("get_positions");
 
 export const savePosition = callable<
   [guideKey: string, scrollTop: number],

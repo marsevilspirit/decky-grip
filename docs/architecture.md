@@ -4,9 +4,9 @@
 
 Read-only CEF inspection on 2026-08-24 used Decky Loader `v3.2.8-pre1`.
 
-The native Steam guide was rendered inside the `SharedJSContext` React tree,
-not in a separate community web-page BrowserView. The observed overlay route
-was:
+The Decky plugin executes in `SharedJSContext`, while the native Steam guide DOM
+belongs to `GamepadUIMainWindowInstance.BrowserWindow.document`. The observed
+overlay route was:
 
 ```text
 /app/1113000/overlay/guides
@@ -44,10 +44,30 @@ Python PositionStore
 positions.json
 ```
 
-The first frontend milestone is a read-only probe that can identify the active
-`appId`, `guideId`, and verified history key without relying on minified React
-member names. Only after that probe is repeatable should the route/history
-adapter write restored state.
+The frontend identifies the active guide through the named
+`MainMenuStore.GetSelectedGuide(appId)` API. Opening and closing a detail view
+uses `SetSelectedGuide(appId, guideId | null)` while the route remains unchanged.
+GRIP patches that named setter only to start or stop a guarded restore epoch; it
+does not replace Steam's React tree or navigation methods.
+
+The guide detail ScrollPanel is identified by stable class tokens (`Panel` and
+`Focusable`) plus its `20px / 20px` inline scroll padding. The guide list uses a
+different top padding, so it is excluded. A match is accepted only while a
+valid guide route and selected guide are active, and ambiguous matches fail
+closed.
+
+Steam normally restores in a layout effect before lazy-loaded images have
+necessarily expanded the article. The browser can clamp that early request,
+after which Steam writes the smaller value back to history. GRIP suppresses
+capture during a restore epoch, waits for sufficient and stable content height,
+applies the saved DOM position, verifies it, and only then merges the value into
+Steam's existing location state.
+
+Steam can also reset a guide panel to zero while tearing it down. GRIP treats a
+zero that would replace a nonzero bookmark as provisional: it must originate
+from the real scroll panel after user scroll intent, and the same connected
+panel must remain at the top for 400 ms. History, blur, and teardown snapshots
+cannot authorize that destructive update on their own.
 
 All Steam-specific assumptions must stay under `src/steam/`. Persistence and
 the Decky panel must not depend on React Fiber shapes or minified module names.
@@ -74,10 +94,11 @@ advance.
 - Keep `positions.json` private to the one GRIP backend process; RPC operations
   are serialized before entering the worker executor.
 
-## Planned milestones
+## Runtime lifecycle
 
-1. Build and deploy the inert scaffold.
-2. Add a read-only overlay history probe and log its structured result.
-3. Prove capture across close/reopen without modifying Steam state.
-4. Add guarded restoration for the same `appId` and `guideId`.
-5. Add the QAM controls, recovery fallback, and device regression matrix.
+1. Preload all validated positions from the Python backend.
+2. Attach to the main Steam window's history, selected-guide store, and real DOM.
+3. Debounce ordinary scroll captures and flush on guide close, blur, or unload.
+4. Start a protected restore when a saved guide appears or its DOM is rebuilt.
+5. Wait for a reachable, stable layout; restore and verify within one pixel.
+6. Remove every patch, listener, observer, interval, and timer on dismount.

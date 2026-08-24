@@ -1,54 +1,60 @@
 import { PanelSection, PanelSectionRow } from "@decky/ui";
 import { useEffect, useState } from "react";
 
-import { getPositionCount } from "../backend";
+import type { GripRuntimeStatus, RuntimeStatusStore } from "../runtime-status";
 
-type LoadState =
-  | { kind: "loading" }
-  | { kind: "ready"; count: number }
-  | { kind: "error"; message: string };
+export interface GripPanelProps {
+  status: RuntimeStatusStore;
+}
 
-export function GripPanel() {
-  const [loadState, setLoadState] = useState<LoadState>({ kind: "loading" });
+function describeLastAction(status: GripRuntimeStatus): string | null {
+  if (status.lastRestored) {
+    return `Last restored: guide ${status.lastRestored.guideId} at ${Math.round(status.lastRestored.scrollTop)} px`;
+  }
+  if (status.lastCaptured) {
+    return `Last captured: guide ${status.lastCaptured.guideId} at ${Math.round(status.lastCaptured.scrollTop)} px`;
+  }
+  return null;
+}
+
+export function GripPanel({ status: statusStore }: GripPanelProps) {
+  const [status, setStatus] = useState(statusStore.getSnapshot);
 
   useEffect(() => {
-    let active = true;
+    setStatus(statusStore.getSnapshot());
+    return statusStore.subscribe(() => setStatus(statusStore.getSnapshot()));
+  }, [statusStore]);
 
-    getPositionCount()
-      .then((count) => {
-        if (active) {
-          setLoadState({ kind: "ready", count });
-        }
-      })
-      .catch((error: unknown) => {
-        if (active) {
-          const message =
-            error instanceof Error ? error.message : "Unknown backend error";
-          setLoadState({ kind: "error", message });
-        }
-      });
-
-    return () => {
-      active = false;
-    };
-  }, []);
+  const lastAction = describeLastAction(status);
 
   return (
     <PanelSection title="Guide resume">
       <PanelSectionRow>
-        <div>
-          {loadState.kind === "loading" && "Loading saved positions…"}
-          {loadState.kind === "ready" &&
-            `${loadState.count} saved guide position${loadState.count === 1 ? "" : "s"}`}
-          {loadState.kind === "error" &&
-            `Could not read saved positions: ${loadState.message}`}
+        <div
+          style={{ color: status.phase === "error" ? "#ff6b6b" : undefined }}
+        >
+          {status.message}
         </div>
       </PanelSectionRow>
       <PanelSectionRow>
-        <div style={{ opacity: 0.72 }}>
-          GRIP is being wired to Steam&apos;s native guide scroll history.
+        <div>
+          {status.savedCount} saved guide position
+          {status.savedCount === 1 ? "" : "s"}
         </div>
       </PanelSectionRow>
+      {status.activeGuide && (
+        <PanelSectionRow>
+          <div style={{ opacity: 0.82 }}>
+            Active: app {status.activeGuide.appId}, guide{" "}
+            {status.activeGuide.guideId}
+          </div>
+        </PanelSectionRow>
+      )}
+      {lastAction && (
+        <PanelSectionRow>
+          <div style={{ opacity: 0.72 }}>{lastAction}</div>
+        </PanelSectionRow>
+      )}
     </PanelSection>
   );
 }

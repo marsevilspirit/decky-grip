@@ -26,6 +26,36 @@ import main as plugin_main  # noqa: E402
 
 
 class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_get_positions_returns_frontend_snapshot(self):
+        with tempfile.TemporaryDirectory() as settings_directory:
+            plugin_main.decky.DECKY_PLUGIN_SETTINGS_DIR = settings_directory
+            plugin = plugin_main.Plugin()
+
+            self.assertEqual(await plugin.get_positions(), {})
+
+            first = await plugin.save_position("1:10", 10)
+            second = await plugin.save_position("2:20", 20)
+
+            positions = await plugin.get_positions()
+
+            self.assertEqual(
+                positions,
+                {
+                    "1:10": {
+                        "scrollTop": first["scroll_top"],
+                        "updatedAt": first["updated_at_ms"],
+                    },
+                    "2:20": {
+                        "scrollTop": second["scroll_top"],
+                        "updatedAt": second["updated_at_ms"],
+                    },
+                },
+            )
+            positions["1:10"]["scrollTop"] = 999
+            self.assertEqual(
+                (await plugin.get_positions())["1:10"]["scrollTop"], 10.0
+            )
+
     async def test_run_io_serializes_concurrent_backend_calls(self):
         with tempfile.TemporaryDirectory() as settings_directory:
             plugin_main.decky.DECKY_PLUGIN_SETTINGS_DIR = settings_directory

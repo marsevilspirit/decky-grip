@@ -203,6 +203,12 @@ class PositionStore:
             position = self._read_document()["positions"].get(key)
             return None if position is None else dict(position)
 
+    def snapshot(self) -> Dict[str, Dict[str, Any]]:
+        """Return an independent, validated snapshot of every saved position."""
+        with self._lock:
+            positions = self._read_document()["positions"]
+            return {key: dict(position) for key, position in positions.items()}
+
     def save(self, guide_key: str, scroll_top: float) -> Dict[str, Any]:
         key = self._validate_guide_key(guide_key)
         normalized_scroll_top = self._validate_scroll_top(scroll_top)

@@ -1,6 +1,6 @@
 {
   "name": "decky-grip",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "Resume Steam Community Guides exactly where you left off on Steam Deck.",
   "type": "module",
   "packageManager": "pnpm@9.15.9",

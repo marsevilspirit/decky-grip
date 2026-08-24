@@ -25,6 +25,7 @@ class PositionStoreTests(unittest.TestCase):
 
     def test_missing_file_is_an_empty_store(self):
         self.assertIsNone(self.store.get("1113000:3414883877"))
+        self.assertEqual(self.store.snapshot(), {})
         self.assertEqual(self.store.count(), 0)
 
     def test_save_get_and_overwrite(self):
@@ -51,6 +52,18 @@ class PositionStoreTests(unittest.TestCase):
         self.assertEqual(self.store.get("1:10")["scroll_top"], 10)
         self.assertEqual(self.store.get("1:11")["scroll_top"], 11)
         self.assertEqual(self.store.get("2:10")["scroll_top"], 20)
+
+    def test_snapshot_returns_all_positions_without_exposing_store_state(self):
+        first = self.store.save("1:10", 10)
+        second = self.store.save("2:20", 20)
+
+        snapshot = self.store.snapshot()
+
+        self.assertEqual(snapshot, {"1:10": first, "2:20": second})
+        snapshot["1:10"]["scroll_top"] = 999
+        del snapshot["2:20"]
+        self.assertEqual(self.store.get("1:10"), first)
+        self.assertEqual(self.store.get("2:20"), second)
 
     def test_delete_and_clear_report_what_changed(self):
         self.store.save("1:10", 10)
@@ -135,8 +148,10 @@ class PositionStoreTests(unittest.TestCase):
         for document in documents:
             with self.subTest(document=document):
                 self.path.write_text(json.dumps(document), encoding="utf-8")
-                with self.assertRaises(StorageError):
-                    self.store.count()
+                for operation in (self.store.count, self.store.snapshot):
+                    with self.subTest(operation=operation.__name__):
+                        with self.assertRaises(StorageError):
+                            operation()
 
     def test_oversized_existing_file_is_rejected(self):
         self.path.write_bytes(b" " * (PositionStore.MAX_FILE_BYTES + 1))

@@ -3,14 +3,15 @@
 **Guide Resumes In Place** — resume Steam Community Guides exactly where you
 left off on Steam Deck.
 
-> Project status: foundation and on-device investigation. Automatic capture and
-> restoration are not enabled yet.
+> Project status: working experimental plugin. Automatic capture and delayed
+> restoration are enabled, with on-device regression testing still required for
+> each supported Steam client update.
 
 ## Why GRIP exists
 
 Steam's in-game guide overlay can remember a position while its current history
 entry survives, but reopening the overlay may rebuild that history and return
-the guide to an earlier location. GRIP will persist the exact guide position and
+the guide to an earlier location. GRIP persists the exact guide position and
 restore it when the guide is opened again.
 
 ## Architecture
@@ -18,6 +19,11 @@ restore it when the guide is opened again.
 - **TypeScript/React** integrates with Decky and Steam's Gamepad UI.
 - **Python** persists a small, versioned `positions.json` file using atomic
   replacement.
+- GRIP observes Steam's selected guide and native guide scroll panel without
+  replacing the guide reader or scraping the Community website.
+- Restoration waits for lazy-loaded guide content to reach a stable, usable
+  height before scrolling, preventing Steam's early clamped position from
+  overwriting the saved value.
 - Guide and app ids stay decimal strings so large Steam ids never lose
   precision.
 - The plugin does not need root privileges.
@@ -75,10 +81,10 @@ reordered by the executor thread pool.
 
 ## Publishing
 
-This repository is currently a local-development scaffold, not a store-ready
+This repository is currently an experimental local plugin, not a store-ready
 release. A public repository, stable public listing image, complete third-party
-license review, working guide capture/restore flow, and device regression pass
-are required before adding a `publish` block or submitting to the Decky store.
+license review, and a broader device regression matrix are required before
+adding a `publish` block or submitting to the Decky store.
 
 ## Name
 
