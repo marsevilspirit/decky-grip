@@ -1,0 +1,10 @@
+node_modules/
+dist/
+out/
+coverage/
+.pnpm-store/
+__pycache__/
+*.py[cod]
+*.log
+.DS_Store
+.vscode/settings.json
