@@ -11,6 +11,8 @@ import {
 } from "./steam/location-state";
 import type { GuideSelection, SteamGuideRuntime } from "./steam/runtime";
 import type { GuideScroller } from "./steam/guide-scroll";
+import { captureNativeReaderHandoff } from "./steam/reader-handoff";
+import type { CapturedReaderPosition } from "./reader/anchor";
 import { RuntimeStatusStore } from "./runtime-status";
 
 export const SAVE_DEBOUNCE_MS = 600;
@@ -181,6 +183,22 @@ export class GripController {
     this.runtimeMonitor = setInterval(
       () => this.refreshRuntime(),
       RUNTIME_POLL_MS,
+    );
+  }
+
+  captureReaderHandoff(identity: GuideIdentity): CapturedReaderPosition | null {
+    const runtime = this.runtime;
+    if (!runtime || !sameGuide(this.readActiveGuide(), identity)) {
+      return null;
+    }
+    const scroller = runtime.getGuideScroller();
+    if (!scroller) {
+      return null;
+    }
+    const saved = this.positions.get(makeGuideKey(identity));
+    return captureNativeReaderHandoff(
+      scroller.element,
+      saved?.scrollTop ?? scroller.scrollTop,
     );
   }
 
@@ -369,7 +387,16 @@ export class GripController {
   }
 
   private handleHistoryChange(): void {
+    const previousGuide = this.activeGuide;
+    const previousScrollerElement = this.lastScrollerElement;
     const activeGuide = this.readActiveGuide();
+    const guideChanged = !sameGuide(previousGuide, activeGuide);
+    const enteringGuardedGuide =
+      activeGuide !== null &&
+      this.captureGuardKey === makeGuideKey(activeGuide);
+    if (previousGuide && guideChanged && !enteringGuardedGuide) {
+      this.captureKnownScrollerPosition(previousGuide, previousScrollerElement);
+    }
     this.setActiveGuide(activeGuide);
     if (!activeGuide || !this.runtime) {
       this.flushAll();
@@ -387,6 +414,17 @@ export class GripController {
       return;
     }
 
+    const position = this.positions.get(guideKey);
+    if (guideChanged && position) {
+      this.beginRestore(activeGuide, position.scrollTop, SELECTION_HANDOFF_MS);
+      return;
+    }
+
+    if (position) {
+      this.handleLifecycle();
+      return;
+    }
+
     const snapshot = readGuideScrollSnapshot(
       this.runtime.getLocation().state,
       activeGuide.guideId,
@@ -399,6 +437,13 @@ export class GripController {
   private handleGuideScroll(scrollTop: number): void {
     const activeGuide = this.readActiveGuide();
     if (!activeGuide || !isScrollTop(scrollTop)) {
+      return;
+    }
+    if (!sameGuide(this.activeGuide, activeGuide)) {
+      // Steam can apply its own History scroll value before notifying our
+      // History listener. Reconcile the route first so an existing GRIP
+      // bookmark starts a restore epoch before this stale scroll is observed.
+      this.handleHistoryChange();
       return;
     }
     const guideKey = makeGuideKey(activeGuide);
@@ -470,6 +515,7 @@ export class GripController {
     }
 
     const activeGuide = runtime.getActiveGuide();
+    const guideChanged = !sameGuide(this.activeGuide, activeGuide);
     this.setActiveGuide(activeGuide);
     if (!activeGuide) {
       this.lastScrollerElement = null;
@@ -477,6 +523,9 @@ export class GripController {
     }
 
     const guideKey = makeGuideKey(activeGuide);
+    if (this.captureGuardKey === guideKey) {
+      return;
+    }
     if (this.restore?.guideKey === guideKey) {
       this.scheduleRestoreCheck();
       return;
@@ -492,11 +541,18 @@ export class GripController {
       this.lastScrollerElement = scroller.element;
       const position = this.positions.get(guideKey);
       if (position) {
-        this.beginRestore(activeGuide, position.scrollTop);
+        this.beginRestore(
+          activeGuide,
+          position.scrollTop,
+          guideChanged ? SELECTION_HANDOFF_MS : 0,
+        );
       } else {
         this.captureLocationState(activeGuide);
       }
+      return;
     }
+
+    this.recordPosition(activeGuide, scroller.scrollTop);
   }
 
   private readActiveGuide(): GuideIdentity | null {
@@ -524,7 +580,10 @@ export class GripController {
     if (previous) {
       this.flushKey(makeGuideKey(previous));
     }
-    this.status.update({ activeGuide: identity });
+    this.status.update({
+      activeGuide: identity,
+      ...(identity ? { lastGuide: identity } : {}),
+    });
   }
 
   private beginRestore(
@@ -775,6 +834,23 @@ export class GripController {
     } else {
       this.captureLocationState(identity);
     }
+  }
+
+  private captureKnownScrollerPosition(
+    identity: GuideIdentity,
+    element: HTMLElement | null,
+  ): void {
+    const guideKey = makeGuideKey(identity);
+    if (
+      !element ||
+      this.captureGuardKey === guideKey ||
+      this.restore?.guideKey === guideKey ||
+      !isScrollTop(element.scrollTop)
+    ) {
+      return;
+    }
+
+    this.recordPosition(identity, element.scrollTop);
   }
 
   private recordPosition(

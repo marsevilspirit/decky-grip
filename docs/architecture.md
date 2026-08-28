@@ -26,10 +26,12 @@ value both reported `5561.3335`. This shows that Steam already measures the
 correct location. The likely failure is loss of the relevant React Router
 history entry when the overlay is closed or reconstructed.
 
-## Implementation boundary
+## Native implementation boundary
 
-GRIP should preserve Steam's existing state rather than replace the guide
-reader or scrape the Steam Community website.
+The original GRIP path preserves Steam's existing state. It is now explicitly a
+best-effort compatibility path: physical overlay reactivation also restores
+Steam FocusNav history, whose focused section title may scroll after a pixel
+restore has already been confirmed.
 
 ```text
 Steam overlay location.state
@@ -77,10 +79,43 @@ the Decky panel must not depend on React Fiber shapes or minified module names.
 The storage key is `<appId>:<guideId>`, with both ids represented as positive
 decimal strings. The first schema stores Steam's exact `scrollTop` value.
 
-If image loading or future layout changes prove that pixels alone are
-insufficient, a later schema can add a visible-text anchor and relative offset.
-That complexity should be driven by real device failures rather than added in
-advance.
+The native compatibility store remains pixel-only. Text anchors live in the
+independent reader store because only that renderer can guarantee stable,
+non-focusable content nodes.
+
+## Independent reader
+
+The physical Steam-button failure proved that pixels alone are insufficient:
+Steam restores a focusable section title after route and layout restoration.
+GRIP Reader therefore owns a separate, non-focusable article scroller.
+
+```text
+Steam Community public guide
+          │ HTTPS, bounded response
+          ▼
+Python allowlist parser ──► validated 0600 cache
+          │ structured sections + sanitized HTML
+          ▼
+Decky full-screen reader route
+          │ scrollTop + section/text/viewport offset
+          ▼
+reader_positions.json
+```
+
+The backend accepts only decimal guide ids, Steam HTTPS hosts, bounded UTF-8
+HTML, and known guide page structure. Scriptable elements, event handlers,
+inline styles, unsafe URLs, and non-Steam images are removed. Cached content is
+validated on first use and whenever its on-disk signature changes. Validated
+documents and reader positions stay in a plugin-lifetime memory snapshot, so a
+warm L4 open renders immediately; expired content remains visible until the user
+requests an update. The reader first applies the pixel fallback and then aligns
+the saved text anchor after layout or image-size changes.
+
+For a first-time handoff, the controller uses its native pixel bookmark only to
+probe the still-mounted native Steam DOM and capture the corresponding visible
+text. The independent reader then resolves that text in its own layout and
+saves its own pixel fallback. Native pixels are never applied directly across
+the two renderers.
 
 ## Safety constraints
 

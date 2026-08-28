@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   GripController,
+  LIFECYCLE_POLL_MS,
   SAVE_DEBOUNCE_MS,
   ZERO_SCROLL_CONFIRM_MS,
   type GripBackend,
@@ -32,7 +33,17 @@ class FakeRuntime implements SteamGuideRuntime {
   scrollHeight = 2_000;
   imagesComplete = true;
   scrollerVisible = true;
-  readonly element = { isConnected: true } as HTMLElement;
+  readonly element: HTMLElement;
+
+  constructor() {
+    const runtime = this;
+    this.element = {
+      isConnected: true,
+      get scrollTop() {
+        return runtime.scrollTop;
+      },
+    } as HTMLElement;
+  }
 
   private readonly historyListeners = new Set<() => void>();
   private readonly scrollListeners = new Set<(scrollTop: number) => void>();
@@ -50,7 +61,10 @@ class FakeRuntime implements SteamGuideRuntime {
   }
 
   getActiveGuide(): GuideIdentity | null {
-    return this.selectedGuideId
+    return this.selectedGuideId &&
+      new RegExp(`^/app/${APP_ID}/overlay/guides/?$`).test(
+        this.location.pathname,
+      )
       ? { appId: APP_ID, guideId: this.selectedGuideId }
       : null;
   }
@@ -386,6 +400,112 @@ describe("GRIP controller", () => {
       GUIDE_KEY,
       5561.3335,
     );
+    harness.controller.stop();
+  });
+
+  it("polls the live scroller when a gamepad scroll event is missed", async () => {
+    const harness = makeHarness({
+      [GUIDE_KEY]: { scrollTop: 6_788, updatedAt: 900_000 },
+    });
+    harness.runtime.scrollHeight = 12_000;
+    await harness.controller.start();
+    harness.runtime.selectGuide(GUIDE_ID);
+    await vi.advanceTimersByTimeAsync(1_500);
+
+    harness.runtime.scrollTop = 3_956;
+    await vi.advanceTimersByTimeAsync(LIFECYCLE_POLL_MS + SAVE_DEBOUNCE_MS);
+
+    expect(harness.backend.savePosition).toHaveBeenCalledWith(GUIDE_KEY, 3_956);
+    harness.controller.stop();
+  });
+
+  it("captures the old guide DOM before Steam-key navigation clears its route", async () => {
+    const harness = makeHarness({
+      [GUIDE_KEY]: { scrollTop: 6_788, updatedAt: 900_000 },
+    });
+    harness.runtime.scrollHeight = 12_000;
+    await harness.controller.start();
+    harness.runtime.selectGuide(GUIDE_ID);
+    await vi.advanceTimersByTimeAsync(1_500);
+
+    harness.runtime.scrollTop = 3_956;
+    harness.runtime.location = {
+      pathname: "/apprunning",
+      state: {},
+    };
+    harness.runtime.emitHistory();
+    harness.runtime.emitFocus(false);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(harness.backend.savePosition).toHaveBeenCalledTimes(1);
+    expect(harness.backend.savePosition).toHaveBeenCalledWith(GUIDE_KEY, 3_956);
+    expect(harness.status.getSnapshot().lastGuide).toEqual({
+      appId: APP_ID,
+      guideId: GUIDE_ID,
+    });
+    harness.controller.stop();
+  });
+
+  it("restores GRIP's bookmark instead of importing stale Steam state on reopen", async () => {
+    const harness = makeHarness({
+      [GUIDE_KEY]: { scrollTop: 3_956, updatedAt: 900_000 },
+    });
+    harness.runtime.scrollHeight = 12_000;
+    harness.runtime.location = { pathname: "/apprunning", state: {} };
+    harness.runtime.selectedGuideId = GUIDE_ID;
+    await harness.controller.start();
+
+    harness.runtime.location = {
+      pathname: `/app/${APP_ID}/overlay/guides`,
+      state: {
+        [`OverlayGuide_${GUIDE_ID}ScrollTop_HistoryValue`]: 2_100,
+      },
+    };
+    harness.runtime.emitHistory();
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(harness.runtime.scrollTop).toBe(3_956);
+    expect(harness.runtime.location.state).toMatchObject({
+      [`OverlayGuide_${GUIDE_ID}ScrollTop_HistoryValue`]: 3_956,
+    });
+    expect(harness.backend.savePosition).not.toHaveBeenCalledWith(
+      GUIDE_KEY,
+      2_100,
+    );
+    harness.controller.stop();
+  });
+
+  it("blocks Steam's stale entry scroll even when it fires before History", async () => {
+    const harness = makeHarness({
+      [GUIDE_KEY]: { scrollTop: 4_040, updatedAt: 900_000 },
+    });
+    harness.runtime.scrollHeight = 12_000;
+    harness.runtime.location = { pathname: "/apprunning", state: {} };
+    harness.runtime.selectedGuideId = GUIDE_ID;
+    await harness.controller.start();
+
+    harness.runtime.location = {
+      pathname: `/app/${APP_ID}/overlay/guides`,
+      state: {
+        [`OverlayGuide_${GUIDE_ID}ScrollTop_HistoryValue`]: 2_100,
+      },
+    };
+    harness.runtime.scrollTop = 2_100;
+    harness.runtime.emitScroll();
+    expect(harness.status.getSnapshot().lastCaptured).toBeNull();
+    harness.runtime.emitHistory();
+    await vi.advanceTimersByTimeAsync(1_500);
+
+    expect(harness.runtime.scrollTop).toBe(4_040);
+    expect(harness.runtime.location.state).toMatchObject({
+      [`OverlayGuide_${GUIDE_ID}ScrollTop_HistoryValue`]: 4_040,
+    });
+    expect(harness.backend.savePosition).not.toHaveBeenCalled();
+    expect(harness.status.getSnapshot().lastRestored).toEqual({
+      appId: APP_ID,
+      guideId: GUIDE_ID,
+      scrollTop: 4_040,
+    });
     harness.controller.stop();
   });
 

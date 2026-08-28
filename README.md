@@ -3,9 +3,9 @@
 **Guide Resumes In Place** — resume Steam Community Guides exactly where you
 left off on Steam Deck.
 
-> Project status: working experimental plugin. Automatic capture and delayed
-> restoration are enabled, with on-device regression testing still required for
-> each supported Steam client update.
+> Project status: experimental plugin. GRIP Reader is the reliable path for
+> exact resume; native Steam guide restoration remains best-effort because
+> Steam's FocusNav can move the article back to a focused section title.
 
 ## Why GRIP exists
 
@@ -19,8 +19,17 @@ restore it when the guide is opened again.
 - **TypeScript/React** integrates with Decky and Steam's Gamepad UI.
 - **Python** persists a small, versioned `positions.json` file using atomic
   replacement.
-- GRIP observes Steam's selected guide and native guide scroll panel without
-  replacing the guide reader or scraping the Community website.
+- **GRIP Reader** downloads a public Community guide through the Python
+  backend, sanitizes it with a strict HTML allowlist, caches it locally, and
+  renders it in a dedicated Decky route.
+- Reader positions include both a pixel fallback and the visible text anchor,
+  section id, and viewport offset. The reader content itself has no focusable
+  headings, so Steam's title-focused history cannot move the article.
+- On the first handoff, GRIP resolves the saved native Steam pixel inside the
+  still-mounted native DOM and transfers the matching text, not that pixel, to
+  the independently laid-out reader.
+- GRIP still observes Steam's selected guide and native guide scroll panel as a
+  best-effort compatibility path.
 - Restoration waits for lazy-loaded guide content to reach a stable, usable
   height before scrolling, preventing Steam's early clamped position from
   overwriting the saved value.
@@ -55,10 +64,29 @@ just build
 The frontend bundle is written to `dist/index.js`. Python tests use only the
 standard library.
 
+## Using GRIP Reader
+
+1. Open a Steam Community guide and leave it on the paragraph you want. For the
+   first handoff, keep the guide visible and open Decky with the Quick Access
+   button.
+2. Select **GRIP**, then choose **在 GRIP 阅读器中继续**.
+3. Scroll normally in the full-screen reader. GRIP saves the first visible text
+   and its exact viewport offset automatically.
+4. For instant in-game access after that first handoff, map the upper-left
+   rear button **L4** to **Scroll Lock** in the game's Steam Input layout. Press
+   L4 once to open GRIP and press it again to return to the game. GRIP reads the
+   physical L4 button directly; the Scroll Lock mapping simply prevents the
+   button from also performing a common game action.
+
+The first open downloads the public guide. After that, GRIP preloads the most
+recent guide and keeps its validated document and reader position in memory for
+the lifetime of the plugin. A cache older than six hours still opens immediately;
+use **更新** when you want to fetch the newest version.
+
 ## Storage
 
-Guide positions are stored under Decky's plugin settings directory as
-`positions.json`. The initial schema stores:
+Native Steam guide positions are stored under Decky's plugin settings directory
+as `positions.json`. The initial schema stores:
 
 ```json
 {
@@ -74,6 +102,11 @@ Guide positions are stored under Decky's plugin settings directory as
 
 The file is written with mode `0600`. Invalid or unsupported data is reported
 instead of being silently replaced.
+
+GRIP Reader uses separate `reader_positions.json` and `guides/<guide-id>.json`
+files. Reader bookmarks include `section_id`, `anchor_text`, and
+`anchor_offset`; downloaded HTML is revalidated on the first process read and
+again whenever the cache file's identity or metadata changes.
 
 `positions.json` is private to GRIP's single backend process. Backend RPC calls
 are serialized before entering the file store, so their arrival order is not

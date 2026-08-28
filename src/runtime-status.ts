@@ -11,6 +11,7 @@ export interface GripRuntimeStatus {
   message: string;
   savedCount: number;
   activeGuide: GuideIdentity | null;
+  lastGuide: GuideIdentity | null;
   lastCaptured: GuidePositionStatus | null;
   lastRestored: GuidePositionStatus | null;
 }
@@ -21,6 +22,7 @@ export class RuntimeStatusStore {
     message: "Connecting to Steam's guide reader…",
     savedCount: 0,
     activeGuide: null,
+    lastGuide: null,
     lastCaptured: null,
     lastRestored: null,
   };
