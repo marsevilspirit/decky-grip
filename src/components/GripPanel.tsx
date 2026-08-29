@@ -251,7 +251,7 @@ export function GripPanel({
             layout="below"
             onClick={() => void runCacheAction(clearImages, "图片缓存已清除")}
           >
-            清除 Python 内存 LRU 与磁盘图片；正文不受影响
+            清除 Rust 内存 LRU 与磁盘图片；正文不受影响
           </ButtonItem>
         </PanelSectionRow>
         {cacheMessage && (

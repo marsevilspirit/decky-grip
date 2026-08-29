@@ -17,11 +17,11 @@ restore it when the guide is opened again.
 ## Architecture
 
 - **TypeScript/React** integrates with Decky and Steam's Gamepad UI.
-- **Python** persists a small, versioned `positions.json` file using atomic
-  replacement.
-- **GRIP Reader** downloads a public Community guide through the Python
-  backend, sanitizes it with a strict HTML allowlist, caches it locally, and
-  renders it in a dedicated Decky route.
+- A resident **Rust sidecar** owns positions, public-guide download and
+  sanitization, body/image caches, and physical L4 input. The thin Python Decky
+  bridge keeps only the RPC and lifecycle contract.
+- **GRIP Reader** renders the validated Rust response in a dedicated Decky
+  route.
 - Guide images never load directly in the Steam browser. The backend validates,
   bounds, and caches trusted Steam-hosted raster images, then the reader exposes
   them through local Blob URLs for offline reuse.
@@ -52,6 +52,7 @@ Requirements follow the current official Decky template:
 - Node.js 20.19+, 22.12+, or 24+
 - pnpm 9
 - Python 3.9 or newer
+- Rust 1.85 or newer
 
 ```bash
 just install
@@ -66,8 +67,9 @@ just test
 just build
 ```
 
-The frontend bundle is written to `dist/index.js`. Python tests use only the
-standard library.
+The frontend bundle is written to `dist/index.js`. Decky's custom-backend build
+places `backend/out/grip-sidecar` in the packaged plugin's `bin/` directory.
+Python tests use only the standard library.
 
 ## Using GRIP Reader
 
@@ -129,7 +131,7 @@ again whenever the cache file's identity or metadata changes.
 
 Images live under the guide cache's `images/` directory. Each image is limited
 to 8 MiB and a validated 8192-pixel / 16-megapixel canvas, the disk LRU to
-128 MiB, and the Python memory LRU to 24 MiB. The reader downloads only images
+128 MiB, and the Rust memory LRU to 24 MiB. The reader downloads only images
 near the viewport and keeps at most 32 MiB / 64 entries of estimated decoded
 frontend image residency. Animated image payloads are rejected, and the reader
 observes at most 512 inert image nodes while staging no more than 48 distinct
@@ -137,9 +139,10 @@ image URLs at once. The panel shows cache usage and provides separate
 controls for clearing guide bodies or images; clearing images also invalidates
 in-flight frontend work, and neither control deletes saved reading positions.
 
-`positions.json` is private to GRIP's single backend process. Backend RPC calls
-are serialized before entering the file store, so their arrival order is not
-reordered by the executor thread pool.
+`positions.json` has exactly one owner: the Rust sidecar. Backend RPC calls are
+serialized before entering the file store, so their arrival order is not
+reordered by the executor thread pool. A running sidecar failure is surfaced;
+the bridge never switches writers.
 
 ## Publishing
 

@@ -3,15 +3,12 @@
 import asyncio
 import concurrent.futures
 import functools
-import threading
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 import decky
 
-from guide_reader import GuideReader, ReaderPositionStore
-from grip_hotkey import L4HotkeyMonitor
-from grip_store import PositionStore
+from rust_sidecar import RustSidecar
 
 
 class _ExecutorUnavailable(RuntimeError):
@@ -22,24 +19,23 @@ class Plugin:
     def __init__(self) -> None:
         settings_directory = Path(decky.DECKY_PLUGIN_SETTINGS_DIR)
         positions_path = settings_directory / "positions.json"
-        self._store = PositionStore(positions_path)
-        self._guide_reader = GuideReader(settings_directory / "guides")
-        self._reader_positions = ReaderPositionStore(
-            settings_directory / "reader_positions.json"
-        )
-        self._io_lock = asyncio.Lock()
-        self._preload_executor: Optional[
-            concurrent.futures.ThreadPoolExecutor
-        ] = concurrent.futures.ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="grip-preload"
-        )
-        self._event_loop: Optional[asyncio.AbstractEventLoop] = None
-        self._hotkey_sequence = 0
-        self._hotkey_sequence_lock = threading.Lock()
-        self._hotkey_monitor = L4HotkeyMonitor(
-            self._schedule_hotkey_emit,
+        self._sidecar = RustSidecar.start(
+            Path(__file__).resolve().parent / "bin" / "grip-sidecar",
+            positions_path,
             decky.logger,
         )
+        self._store = self._sidecar.positions
+        self._reader_positions = self._sidecar.reader_positions
+        self._guide_reader = self._sidecar.guides
+        self._guide_images = self._sidecar.images
+        self._io_lock = asyncio.Lock()
+        self._preload_executor: Optional[concurrent.futures.ThreadPoolExecutor] = (
+            concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="grip-preload"
+            )
+        )
+        self._event_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._sidecar.set_event_callback(self._handle_sidecar_event)
 
     @staticmethod
     async def _run_executor_io(
@@ -84,16 +80,12 @@ class Plugin:
         cls, lock: asyncio.Lock, function: Callable[..., Any], *args: Any
     ) -> Any:
         async with lock:
-            return await cls._run_executor_io(
-                function, *args, wait_on_cancel=True
-            )
+            return await cls._run_executor_io(function, *args, wait_on_cancel=True)
 
     async def _run_io(self, function: Callable[..., Any], *args: Any) -> Any:
         return await self._run_locked_io(self._io_lock, function, *args)
 
-    async def _run_guide_io(
-        self, function: Callable[..., Any], *args: Any
-    ) -> Any:
+    async def _run_guide_io(self, function: Callable[..., Any], *args: Any) -> Any:
         # GuideReader serializes only operations for the same guide id. Keeping
         # a second global asyncio lock here would let one slow Steam request
         # delay an unrelated, already-cached guide.
@@ -101,21 +93,22 @@ class Plugin:
 
     async def _main(self) -> None:
         self._event_loop = asyncio.get_running_loop()
-        self._hotkey_monitor.start()
         decky.logger.info("GRIP backend ready")
 
     async def _unload(self) -> None:
         self._stop_hotkey()
         self._stop_preloading()
+        await self._stop_sidecar()
         decky.logger.info("GRIP backend stopped")
 
     async def _uninstall(self) -> None:
         self._stop_hotkey()
         self._stop_preloading()
+        await self._stop_sidecar()
 
     def _stop_hotkey(self) -> None:
         self._event_loop = None
-        self._hotkey_monitor.stop()
+        self._sidecar.set_event_callback(None)
 
     def _stop_preloading(self) -> None:
         executor = self._preload_executor
@@ -123,19 +116,25 @@ class Plugin:
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
 
-    def _schedule_hotkey_emit(self, detected_at_ms: int) -> None:
-        loop = self._event_loop
-        if loop is None or loop.is_closed():
+    async def _stop_sidecar(self) -> None:
+        await self._run_io(self._sidecar.close)
+
+    def _handle_sidecar_event(self, name: str, payload: Any) -> None:
+        if (
+            name != "grip_hotkey"
+            or not isinstance(payload, dict)
+            or set(payload) != {"version", "button", "sequence", "detectedAtUnixMs"}
+            or payload["version"] != 1
+            or payload["button"] != "L4"
+            or type(payload["sequence"]) is not int
+            or payload["sequence"] <= 0
+            or type(payload["detectedAtUnixMs"]) is not int
+            or not 0 <= payload["detectedAtUnixMs"] <= (1 << 53) - 1
+        ):
             return
-        with self._hotkey_sequence_lock:
-            self._hotkey_sequence += 1
-            event = {
-                "version": 1,
-                "button": "L4",
-                "sequence": self._hotkey_sequence,
-                "detectedAtUnixMs": detected_at_ms,
-            }
-        loop.call_soon_threadsafe(self._emit_hotkey, event)
+        loop = self._event_loop
+        if loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(self._emit_hotkey, payload)
 
     @staticmethod
     def _report_emit_result(task: asyncio.Task) -> None:
@@ -154,7 +153,7 @@ class Plugin:
         task.add_done_callback(self._report_emit_result)
 
     async def get_hotkey_status(self):
-        return self._hotkey_monitor.status()
+        return await self._run_io(self._sidecar.hotkey_status)
 
     async def get_position(self, guide_key: str):
         return await self._run_io(self._store.get, guide_key)
@@ -182,9 +181,7 @@ class Plugin:
         return await self._run_io(self._store.count)
 
     async def get_guide(self, guide_id: str, force_refresh: bool = False):
-        return await self._run_guide_io(
-            self._guide_reader.get, guide_id, force_refresh
-        )
+        return await self._run_guide_io(self._guide_reader.get, guide_id, force_refresh)
 
     async def get_cached_guide(self, guide_id: str):
         # Cache-only warming has its own single worker, so even a large cache
@@ -201,25 +198,17 @@ class Plugin:
         except _ExecutorUnavailable:
             return None
 
-    async def get_guide_image(
-        self, url: str, allow_download: bool = True
-    ):
-        return await self._run_guide_io(
-            self._guide_reader.get_guide_image, url, allow_download
-        )
+    async def get_guide_image(self, url: str, allow_download: bool = True):
+        return await self._run_guide_io(self._guide_images.get, url, allow_download)
 
     async def clear_guide_cache(self):
-        return await self._run_guide_io(
-            self._guide_reader.clear_guide_cache
-        )
+        return await self._run_guide_io(self._guide_reader.clear)
 
     async def clear_image_cache(self):
-        return await self._run_guide_io(
-            self._guide_reader.clear_image_cache
-        )
+        return await self._run_guide_io(self._guide_images.clear)
 
     async def get_reader_cache_stats(self):
-        return await self._run_guide_io(self._guide_reader.cache_stats)
+        return await self._run_guide_io(self._sidecar.cache_stats)
 
     def _repair_position_stores(self):
         return {

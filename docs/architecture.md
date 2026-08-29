@@ -40,7 +40,10 @@ Steam overlay location.state
 TypeScript capture / restore adapter
           │ debounced RPC
           ▼
-Python PositionStore
+Python Decky RPC shim
+          │ JSON lines
+          ▼
+Rust sidecar
           │ atomic replace
           ▼
 positions.json
@@ -93,7 +96,7 @@ GRIP Reader therefore owns a separate, non-focusable article scroller.
 Steam Community public guide
           │ HTTPS, bounded response
           ▼
-Python allowlist parser ──► validated 0600 cache
+Rust allowlist parser ──► validated 0600 cache
           │ structured sections + inert image keys
           ├──► bounded image disk/memory LRU ──► local Blob URLs
           ▼
@@ -114,7 +117,7 @@ stable file snapshot without taking the foreground lock; network and write I/O
 is serialized per guide id, so one slow Steam request cannot block another guide.
 Remote image URLs are removed from returned HTML. Only trusted Steam HTTPS
 static PNG/JPEG/GIF/WebP content with bounded encoded bytes and decoded
-dimensions can enter the bounded Python cache. The frontend assigns only local
+dimensions can enter the bounded Rust cache. The frontend assigns only local
 Blob URLs to a capped IntersectionObserver working set, deduplicates URLs,
 stages at most 48 distinct requests, pins near-viewport blobs, and applies its
 own decoded-residency LRU. Clearing the image cache synchronously acquires a
@@ -152,12 +155,12 @@ the two renderers.
 - Verify the active guide id again before applying an asynchronous restore.
 - Remove every route patch, observer, and timer from `onDismount()`.
 - Preserve corrupt or unknown storage files and surface an error.
-- Keep `positions.json` private to the one GRIP backend process; RPC operations
-  are serialized before entering the worker executor.
+- Keep `positions.json` private to the Rust sidecar. RPC operations are
+  serialized before entering its storage worker.
 
 ## Runtime lifecycle
 
-1. Preload all validated positions from the Python backend.
+1. Preload all validated positions through the Decky backend bridge.
 2. Attach to the main Steam window's history, selected-guide store, and real DOM.
 3. Debounce ordinary scroll captures and flush on guide close, blur, or unload.
 4. Start a protected restore when a saved guide appears or its DOM is rebuilt.

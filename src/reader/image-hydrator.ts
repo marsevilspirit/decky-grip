@@ -103,7 +103,7 @@ export function isImageNearViewport(
 }
 
 /**
- * Resolves only caller-selected inert image nodes through the Python cache.
+ * Resolves only caller-selected inert image nodes through the backend cache.
  * Requests and Blob URLs are shared per canonical URL, while a frontend LRU
  * bounds CEF-resident blobs independently of the backend disk/memory quotas.
  */
