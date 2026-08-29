@@ -16,10 +16,17 @@ from typing import List, Optional, Tuple
 Attributes = List[Tuple[str, Optional[str]]]
 
 
+class HTMLParseLimitError(ValueError):
+    """Raised before a single malformed token can consume unbounded work."""
+
+
 class HTMLParser:
     """Tolerant, incremental tokenizer with the subset of ``HTMLParser`` GRIP uses."""
 
     _TAG_NAME = re.compile(r"[A-Za-z][A-Za-z0-9._:-]*")
+    MAX_MARKUP_CHARS = 16_384
+    MAX_ATTRIBUTES = 256
+    MAX_CHARACTER_REFERENCE_CHARS = 64
     _RAWTEXT_TAGS = {"script", "style"}
     _RAWTEXT_END = {
         tag: re.compile(
@@ -35,6 +42,7 @@ class HTMLParser:
         self._tokenizer_buffer = ""
         self._tokenizer_offset = 0
         self._tokenizer_rawtext_tag: Optional[str] = None
+        self._tokenizer_deferred_data: List[str] = []
 
     def feed(self, data: str) -> None:
         if not isinstance(data, str):
@@ -44,6 +52,7 @@ class HTMLParser:
 
     def close(self) -> None:
         self._parse_available(final=True)
+        self._emit_data("")
 
     def handle_starttag(self, tag: str, attrs: Attributes) -> None:
         pass
@@ -59,16 +68,25 @@ class HTMLParser:
         pass
 
     def _emit_data(self, data: str) -> None:
+        if self._tokenizer_deferred_data:
+            self._tokenizer_deferred_data.append(data)
+            data = "".join(self._tokenizer_deferred_data)
+            self._tokenizer_deferred_data.clear()
         if not data:
             return
         if self._convert_charrefs:
             data = html.unescape(data)
         self.handle_data(data)
 
-    @staticmethod
-    def _tag_end(source: str, start: int) -> Optional[int]:
+    def _defer_data(self, data: str) -> None:
+        if data:
+            self._tokenizer_deferred_data.append(data)
+
+    @classmethod
+    def _tag_end(cls, source: str, start: int) -> Optional[int]:
         quote: Optional[str] = None
-        for index in range(start, len(source)):
+        scan_end = min(len(source), start + cls.MAX_MARKUP_CHARS + 1)
+        for index in range(start, scan_end):
             character = source[index]
             if quote is not None:
                 if character == quote:
@@ -77,10 +95,14 @@ class HTMLParser:
                 quote = character
             elif character == ">":
                 return index
+        if len(source) - start > cls.MAX_MARKUP_CHARS:
+            raise HTMLParseLimitError("HTML tag exceeds the size limit")
         return None
 
-    @staticmethod
-    def _parse_attributes(source: str) -> Attributes:
+    @classmethod
+    def _parse_attributes(cls, source: str) -> Attributes:
+        if len(source) > cls.MAX_MARKUP_CHARS:
+            raise HTMLParseLimitError("HTML tag exceeds the size limit")
         attributes: Attributes = []
         index = 0
         while index < len(source):
@@ -127,7 +149,37 @@ class HTMLParser:
                     value = source[value_start:index]
                 value = html.unescape(value)
             attributes.append((name, value))
+            if len(attributes) > cls.MAX_ATTRIBUTES:
+                raise HTMLParseLimitError("HTML tag contains too many attributes")
         return attributes
+
+    @classmethod
+    def _safe_text_end(cls, source: str, start: int) -> int:
+        """Return text that cannot be part of a split character reference."""
+
+        ampersand = source.rfind("&", start)
+        if ampersand < 0:
+            return len(source)
+        candidate = source[ampersand:]
+        if (
+            len(candidate) <= cls.MAX_CHARACTER_REFERENCE_CHARS
+            and re.fullmatch(
+                r"&(?:#[xX]?[0-9A-Fa-f]*|[A-Za-z0-9]*)?", candidate
+            )
+        ):
+            return ampersand
+        return len(source)
+
+    @staticmethod
+    def _rawtext_safe_end(source: str, start: int, tag: str) -> int:
+        """Keep only a suffix that can become a split raw-text closing tag."""
+
+        closing = f"</{tag}"
+        available = source[start:].lower()
+        for size in range(min(len(closing), len(available)), 0, -1):
+            if closing.startswith(available[-size:]):
+                return len(source) - size
+        return len(source)
 
     @classmethod
     def _find_rawtext_end(
@@ -153,6 +205,8 @@ class HTMLParser:
         if source.startswith("<!--", start):
             end = source.find("-->", start + 4)
             if end < 0:
+                if len(source) - start > self.MAX_MARKUP_CHARS:
+                    raise HTMLParseLimitError("HTML comment exceeds the size limit")
                 if final:
                     return len(source)
                 return None
@@ -246,6 +300,14 @@ class HTMLParser:
                     if final:
                         self._emit_data(source[offset:])
                         offset = len(source)
+                    else:
+                        safe_end = self._rawtext_safe_end(
+                            source,
+                            offset,
+                            self._tokenizer_rawtext_tag,
+                        )
+                        self._defer_data(source[offset:safe_end])
+                        offset = safe_end
                     break
                 self._emit_data(source[offset:end])
                 offset = end
@@ -257,10 +319,16 @@ class HTMLParser:
                 if final:
                     self._emit_data(source[offset:])
                     offset = len(source)
+                else:
+                    safe_end = self._safe_text_end(source, offset)
+                    self._defer_data(source[offset:safe_end])
+                    offset = safe_end
                 break
             if markup > offset:
                 self._emit_data(source[offset:markup])
                 offset = markup
+            elif self._tokenizer_deferred_data:
+                self._emit_data("")
             consumed = self._consume_markup(source, offset, final=final)
             if consumed is None:
                 break

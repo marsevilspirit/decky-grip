@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { CapturedReaderPosition } from "../../src/reader/anchor";
 import {
   ReaderSessionCache,
+  retainGuideForStaleRefresh,
   type ReaderSessionBackend,
 } from "../../src/reader/session-cache";
 import type { DownloadedGuide, ReaderPosition } from "../../src/reader/types";
@@ -55,6 +56,7 @@ function deferred<T>() {
 
 function backend(overrides: Partial<ReaderSessionBackend> = {}) {
   const defaults: ReaderSessionBackend = {
+    getCachedGuide: vi.fn(async () => guide("Preloaded guide")),
     getGuide: vi.fn(async () => guide("Cached guide")),
     getReaderPosition: vi.fn(async () => readerPosition(120)),
     saveReaderPosition: vi.fn(async (_key, scrollTop) =>
@@ -65,6 +67,28 @@ function backend(overrides: Partial<ReaderSessionBackend> = {}) {
 }
 
 describe("ReaderSessionCache", () => {
+  it("retains the mounted guide object for a stale force-refresh fallback", () => {
+    const existing = {
+      guide: guide("Mounted guide"),
+      position: readerPosition(120),
+      positionWarning: null,
+    };
+    const refreshed = {
+      guide: { ...guide("Stale backend copy"), stale: true },
+      position: readerPosition(900),
+      positionWarning: "position warning",
+    };
+
+    const displayed = retainGuideForStaleRefresh(existing, refreshed, true);
+
+    expect(displayed.guide).toBe(existing.guide);
+    expect(displayed.position).toBe(refreshed.position);
+    expect(displayed.positionWarning).toBe("position warning");
+    expect(retainGuideForStaleRefresh(existing, refreshed, false)).toBe(
+      refreshed,
+    );
+  });
+
   it("provides a synchronous peek after loading a guide and position", async () => {
     const injected = backend();
     const cache = new ReaderSessionCache(injected);
@@ -99,7 +123,273 @@ describe("ReaderSessionCache", () => {
     await expect(first).resolves.toEqual({
       guide: expect.objectContaining({ title: "Loaded once" }),
       position: expect.objectContaining({ scrollTop: 220 }),
+      positionWarning: null,
     });
+  });
+
+  it("preloads only through the cache-only backend endpoint", async () => {
+    const injected = backend({
+      getCachedGuide: vi.fn(async () => guide("Preloaded guide")),
+    });
+    const cache = new ReaderSessionCache(injected);
+
+    const preloaded = await cache.preload(identity);
+
+    expect(preloaded?.guide.title).toBe("Preloaded guide");
+    expect(cache.peek(identity)).toBe(preloaded);
+    expect(injected.getCachedGuide).toHaveBeenCalledWith(identity.guideId);
+    expect(injected.getGuide).not.toHaveBeenCalled();
+    expect(injected.getReaderPosition).toHaveBeenCalledWith(guideKey);
+  });
+
+  it("keeps guide content usable when the reader position is corrupt", async () => {
+    const injected = backend({
+      getReaderPosition: vi.fn(async () => {
+        throw new Error("reader_positions.json is malformed");
+      }),
+    });
+    const cache = new ReaderSessionCache(injected);
+
+    const loaded = await cache.load(identity);
+
+    expect(loaded.guide.title).toBe("Cached guide");
+    expect(loaded.position).toBeNull();
+    expect(loaded.positionWarning).toBe(
+      "阅读位置加载失败，正文仍可使用：reader_positions.json is malformed",
+    );
+    expect(cache.peek(identity)).toBe(loaded);
+  });
+
+  it("keeps a cache-only preload usable when its position read fails", async () => {
+    const injected = backend({
+      getReaderPosition: vi.fn(async () => {
+        throw new Error("position unavailable");
+      }),
+    });
+    const cache = new ReaderSessionCache(injected);
+
+    const preloaded = await cache.preload(identity);
+
+    expect(preloaded?.guide.title).toBe("Preloaded guide");
+    expect(preloaded?.position).toBeNull();
+    expect(preloaded?.positionWarning).toContain("position unavailable");
+  });
+
+  it("keeps a staged handoff without writing into a corrupt position store", async () => {
+    const injected = backend({
+      getReaderPosition: vi.fn(async () => {
+        throw new Error("corrupt position store");
+      }),
+    });
+    const cache = new ReaderSessionCache(injected);
+    cache.stageHandoff(identity, capturedPosition(444));
+
+    const loaded = await cache.load(identity);
+
+    expect(loaded.position?.scrollTop).toBe(444);
+    expect(loaded.positionWarning).toContain("corrupt position store");
+    expect(injected.saveReaderPosition).not.toHaveBeenCalled();
+  });
+
+  it("keeps the last known position when a refresh position read fails", async () => {
+    const getReaderPosition = vi
+      .fn<ReaderSessionBackend["getReaderPosition"]>()
+      .mockResolvedValueOnce(readerPosition(120))
+      .mockRejectedValueOnce(new Error("temporary read failure"));
+    const cache = new ReaderSessionCache(backend({ getReaderPosition }));
+    const first = await cache.load(identity);
+
+    const refreshed = await cache.load(identity, { forceRefresh: true });
+
+    expect(refreshed.position).toBe(first.position);
+    expect(refreshed.positionWarning).toContain("temporary read failure");
+  });
+
+  it("retries only the failed position without refetching guide content", async () => {
+    const getReaderPosition = vi
+      .fn<ReaderSessionBackend["getReaderPosition"]>()
+      .mockRejectedValueOnce(new Error("corrupt position"))
+      .mockResolvedValueOnce(readerPosition(321));
+    const injected = backend({ getReaderPosition });
+    const cache = new ReaderSessionCache(injected);
+    const first = await cache.load(identity);
+
+    const retried = await cache.retryPosition(identity);
+
+    expect(first.guide).toBe(retried.guide);
+    expect(retried.position?.scrollTop).toBe(321);
+    expect(retried.positionWarning).toBeNull();
+    expect(injected.getGuide).toHaveBeenCalledOnce();
+    expect(getReaderPosition).toHaveBeenCalledTimes(2);
+  });
+
+  it("reuses a completed preload for a normal foreground load", async () => {
+    const injected = backend();
+    const cache = new ReaderSessionCache(injected);
+    const preloaded = await cache.preload(identity);
+
+    const loaded = await cache.load(identity);
+
+    expect(loaded).toBe(preloaded);
+    expect(injected.getGuide).not.toHaveBeenCalled();
+  });
+
+  it("coalesces concurrent cache-only preloads", async () => {
+    const pendingPreload = deferred<DownloadedGuide | null>();
+    const injected = backend({
+      getCachedGuide: vi.fn(() => pendingPreload.promise),
+    });
+    const cache = new ReaderSessionCache(injected);
+
+    const first = cache.preload(identity);
+    const second = cache.preload(identity);
+
+    expect(second).toBe(first);
+    expect(injected.getCachedGuide).toHaveBeenCalledOnce();
+    pendingPreload.resolve(guide("Preloaded once"));
+    await first;
+  });
+
+  it("does not fetch or remember a cache-only preload miss", async () => {
+    const injected = backend({
+      getCachedGuide: vi.fn(async () => null),
+    });
+    const cache = new ReaderSessionCache(injected);
+
+    await expect(cache.preload(identity)).resolves.toBeNull();
+
+    expect(cache.peek(identity)).toBeNull();
+    expect(injected.getGuide).not.toHaveBeenCalled();
+    expect(injected.getReaderPosition).not.toHaveBeenCalled();
+  });
+
+  it("starts a foreground load without waiting for an active preload", async () => {
+    const pendingPreload = deferred<DownloadedGuide | null>();
+    const injected = backend({
+      getCachedGuide: vi.fn(() => pendingPreload.promise),
+      getGuide: vi.fn(async () => guide("Foreground guide")),
+    });
+    const cache = new ReaderSessionCache(injected);
+    const preloading = cache.preload(identity);
+
+    const foreground = await cache.load(identity);
+
+    expect(foreground.guide.title).toBe("Foreground guide");
+    expect(injected.getGuide).toHaveBeenCalledWith(identity.guideId, false);
+    pendingPreload.resolve(guide("Late preload"));
+    await expect(preloading).resolves.toBe(foreground);
+    expect(cache.peek(identity)).toBe(foreground);
+  });
+
+  it("loads another guide without waiting for an active preload", async () => {
+    const pendingPreload = deferred<DownloadedGuide | null>();
+    const secondIdentity = { appId: "1113000", guideId: "3414883878" };
+    const injected = backend({
+      getCachedGuide: vi.fn(() => pendingPreload.promise),
+      getGuide: vi.fn(async () => guide("Foreground B")),
+    });
+    const cache = new ReaderSessionCache(injected);
+    const preloading = cache.preload(identity);
+
+    const foreground = await cache.load(secondIdentity);
+
+    expect(foreground.guide.title).toBe("Foreground B");
+    expect(injected.getGuide).toHaveBeenCalledWith(
+      secondIdentity.guideId,
+      false,
+    );
+    pendingPreload.resolve(null);
+    await preloading;
+  });
+
+  it("never resurrects a late preload after a newer snapshot is evicted", async () => {
+    const pendingPreload = deferred<DownloadedGuide | null>();
+    const secondIdentity = { appId: "1113000", guideId: "3414883878" };
+    const thirdIdentity = { appId: "1113000", guideId: "3414883879" };
+    const injected = backend({
+      getCachedGuide: vi.fn(() => pendingPreload.promise),
+      getGuide: vi.fn(async (guideId) => guide(`Foreground ${guideId}`)),
+    });
+    const cache = new ReaderSessionCache(injected);
+    const oldPreload = cache.preload(identity);
+
+    await cache.load(identity);
+    await cache.load(secondIdentity);
+    await cache.load(thirdIdentity);
+    expect(cache.peek(identity)).toBeNull();
+
+    pendingPreload.resolve(guide("Old A"));
+    await oldPreload;
+
+    expect(cache.peek(identity)).toBeNull();
+    expect(cache.peek(secondIdentity)).not.toBeNull();
+    expect(cache.peek(thirdIdentity)).not.toBeNull();
+  });
+
+  it("force refreshes a cache-only preloaded snapshot", async () => {
+    const injected = backend();
+    const cache = new ReaderSessionCache(injected);
+    await cache.preload(identity);
+
+    await cache.load(identity, { forceRefresh: true });
+
+    expect(injected.getGuide).toHaveBeenCalledOnce();
+    expect(injected.getGuide).toHaveBeenCalledWith(identity.guideId, true);
+  });
+
+  it("does not persist a staged handoff during background preloading", async () => {
+    const injected = backend({
+      getReaderPosition: vi.fn(async () => null),
+    });
+    const cache = new ReaderSessionCache(injected);
+    cache.stageHandoff(identity, capturedPosition(640));
+
+    const preloaded = await cache.preload(identity);
+    await Promise.resolve();
+
+    expect(preloaded?.position?.scrollTop).toBe(640);
+    expect(injected.saveReaderPosition).not.toHaveBeenCalled();
+
+    const loaded = await cache.load(identity);
+    await Promise.resolve();
+
+    expect(loaded.position?.scrollTop).toBe(640);
+    expect(injected.saveReaderPosition).toHaveBeenCalledOnce();
+  });
+
+  it("does not repopulate after clear when a preload finishes late", async () => {
+    const pendingPreload = deferred<DownloadedGuide | null>();
+    const cache = new ReaderSessionCache(
+      backend({ getCachedGuide: vi.fn(() => pendingPreload.promise) }),
+    );
+    const preloading = cache.preload(identity);
+
+    cache.clear();
+    pendingPreload.resolve(guide("Late preload"));
+    await preloading;
+
+    expect(cache.peek(identity)).toBeNull();
+  });
+
+  it("does not let an old preload clear a newer same-key preload", async () => {
+    const oldGuide = deferred<DownloadedGuide | null>();
+    const newGuide = deferred<DownloadedGuide | null>();
+    const getCachedGuide = vi
+      .fn<ReaderSessionBackend["getCachedGuide"]>()
+      .mockImplementationOnce(() => oldGuide.promise)
+      .mockImplementationOnce(() => newGuide.promise);
+    const cache = new ReaderSessionCache(backend({ getCachedGuide }));
+    const oldPreload = cache.preload(identity);
+
+    cache.clear();
+    const newPreload = cache.preload(identity);
+    oldGuide.resolve(guide("Old preload"));
+    await oldPreload;
+
+    expect(cache.preload(identity)).toBe(newPreload);
+    newGuide.resolve(guide("New preload"));
+    await newPreload;
+    expect(cache.peek(identity)?.guide.title).toBe("New preload");
   });
 
   it("keeps the previous peek visible until a force refresh succeeds", async () => {

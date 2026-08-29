@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import stat
 import tempfile
 import threading
 import time
@@ -18,6 +19,14 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from grip_html_parser import HTMLParser
+from guide_images import GuideImageCache, canonical_image_url
+from store_repair import (
+    FileSignature,
+    ManagedFileChangedError,
+    ManagedFileTooLargeError,
+    backup_corrupt_file,
+    read_bounded_regular_file,
+)
 
 
 GUIDE_ID_PATTERN = re.compile(r"^[1-9][0-9]{0,19}$")
@@ -27,6 +36,7 @@ CONTROL_CHARACTER_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 GUIDE_CACHE_SCHEMA_VERSION = 1
 READER_POSITION_SCHEMA_VERSION = 1
+JAVASCRIPT_MAX_SAFE_INTEGER = (1 << 53) - 1
 
 
 class GuideReaderError(RuntimeError):
@@ -72,6 +82,11 @@ def _is_allowed_host(hostname: Optional[str], suffixes: Sequence[str]) -> bool:
 
 
 def _safe_url(value: str, *, image: bool) -> Optional[str]:
+    if image:
+        try:
+            return canonical_image_url(value)
+        except ValueError:
+            return None
     try:
         parsed = urllib.parse.urlsplit(value)
         port = parsed.port
@@ -85,14 +100,10 @@ def _safe_url(value: str, *, image: bool) -> Optional[str]:
     ):
         return None
     allowed_hosts = (
-        ("steamstatic.com", "steamusercontent.com")
-        if image
-        else (
-            "steamcommunity.com",
-            "steampowered.com",
-            "steamstatic.com",
-            "steamusercontent.com",
-        )
+        "steamcommunity.com",
+        "steampowered.com",
+        "steamstatic.com",
+        "steamusercontent.com",
     )
     if not _is_allowed_host(parsed.hostname, allowed_hosts):
         return None
@@ -101,6 +112,14 @@ def _safe_url(value: str, *, image: bool) -> Optional[str]:
 
 class _FragmentSanitizer(HTMLParser):
     """Canonical allowlist sanitizer for the small HTML subset guides use."""
+
+    # One sanitizer instance represents one guide section. Keep its limits well
+    # below the whole-page budgets because the first rendered section is parsed
+    # and mounted synchronously before progressive rendering can yield.
+    MAX_NODES = 8_000
+    MAX_DEPTH = 128
+    MAX_TEXT_CHARS = 1 * 1024 * 1024
+    MAX_OUTPUT_BYTES = 2 * 1024 * 1024
 
     VOID_TAGS = {
         "area",
@@ -187,7 +206,54 @@ class _FragmentSanitizer(HTMLParser):
         super().__init__(convert_charrefs=True)
         self._parts: List[str] = []
         self._stack: List[Tuple[str, bool]] = []
+        self._open_counts: Dict[str, int] = {}
         self._drop_depth = 0
+        self._node_count = 0
+        self._text_chars = 0
+        self._output_bytes = 0
+
+    @property
+    def node_count(self) -> int:
+        return self._node_count
+
+    @property
+    def text_chars(self) -> int:
+        return self._text_chars
+
+    @property
+    def output_bytes(self) -> int:
+        return self._output_bytes
+
+    def _record_node(self) -> None:
+        self._node_count += 1
+        if self._node_count > self.MAX_NODES:
+            raise GuideParseError("guide HTML exceeds the node budget")
+
+    def _record_text(self, data: str) -> None:
+        self._text_chars += len(data)
+        if self._text_chars > self.MAX_TEXT_CHARS:
+            raise GuideParseError("guide HTML exceeds the text budget")
+
+    def _append(self, part: str) -> None:
+        self._output_bytes += len(part.encode("utf-8"))
+        if self._output_bytes > self.MAX_OUTPUT_BYTES:
+            raise GuideParseError("guide HTML exceeds the output budget")
+        self._parts.append(part)
+
+    def _push(self, tag: str, emitted: bool) -> None:
+        if len(self._stack) >= self.MAX_DEPTH:
+            raise GuideParseError("guide HTML exceeds the nesting depth budget")
+        self._stack.append((tag, emitted))
+        self._open_counts[tag] = self._open_counts.get(tag, 0) + 1
+
+    def _pop(self) -> Tuple[str, bool]:
+        tag, emitted = self._stack.pop()
+        remaining = self._open_counts[tag] - 1
+        if remaining:
+            self._open_counts[tag] = remaining
+        else:
+            del self._open_counts[tag]
+        return tag, emitted
 
     @staticmethod
     def _serialize_attributes(
@@ -233,6 +299,7 @@ class _FragmentSanitizer(HTMLParser):
     def handle_starttag(
         self, tag: str, attrs: List[Tuple[str, Optional[str]]]
     ) -> None:
+        self._record_node()
         normalized = tag.lower()
         if self._drop_depth:
             if (
@@ -241,23 +308,23 @@ class _FragmentSanitizer(HTMLParser):
             ):
                 self._drop_depth += 1
             if normalized not in self.VOID_TAGS:
-                self._stack.append((normalized, False))
+                self._push(normalized, False)
             return
         if normalized in self.DROP_CONTENT_TAGS:
             if normalized in self.VOID_TAGS:
                 return
             self._drop_depth = 1
-            self._stack.append((normalized, False))
+            self._push(normalized, False)
             return
 
         emitted = normalized in self.ALLOWED_TAGS
         serialized = self._serialize_attributes(normalized, attrs) if emitted else ""
         if emitted and serialized is not None:
-            self._parts.append(f"<{normalized}{serialized}>")
+            self._append(f"<{normalized}{serialized}>")
         else:
             emitted = False
         if normalized not in self.VOID_TAGS:
-            self._stack.append((normalized, emitted))
+            self._push(normalized, emitted)
 
     def handle_startendtag(
         self, tag: str, attrs: List[Tuple[str, Optional[str]]]
@@ -269,61 +336,207 @@ class _FragmentSanitizer(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         normalized = tag.lower()
-        match_index = next(
-            (
-                index
-                for index in range(len(self._stack) - 1, -1, -1)
-                if self._stack[index][0] == normalized
-            ),
-            None,
-        )
-        if match_index is None:
+        if self._open_counts.get(normalized, 0) == 0:
             return
-        unwound = self._stack[match_index:]
-        del self._stack[match_index:]
-        if self._drop_depth:
-            self._drop_depth = max(
-                0,
-                self._drop_depth
-                - sum(1 for open_tag, _emitted in unwound if open_tag in self.DROP_CONTENT_TAGS),
-            )
-            return
-        for open_tag, emitted in reversed(unwound):
-            if emitted:
-                self._parts.append(f"</{open_tag}>")
+        while self._stack:
+            open_tag, emitted = self._pop()
+            if self._drop_depth:
+                if open_tag in self.DROP_CONTENT_TAGS:
+                    self._drop_depth -= 1
+            elif emitted:
+                self._append(f"</{open_tag}>")
+            if open_tag == normalized:
+                return
 
     def handle_data(self, data: str) -> None:
+        if not data:
+            return
+        self._record_node()
+        self._record_text(data)
         if not self._drop_depth:
-            self._parts.append(html.escape(data, quote=False))
+            self._append(html.escape(data, quote=False))
 
     def finish(self) -> str:
-        if not self._drop_depth:
-            for tag, emitted in reversed(self._stack):
-                if emitted:
-                    self._parts.append(f"</{tag}>")
-        self._stack.clear()
+        while self._stack:
+            tag, emitted = self._pop()
+            if self._drop_depth:
+                if tag in self.DROP_CONTENT_TAGS:
+                    self._drop_depth -= 1
+            elif emitted:
+                self._append(f"</{tag}>")
         self._drop_depth = 0
         return "".join(self._parts).strip()
 
 
-def sanitize_fragment(fragment: str) -> str:
+def _sanitize_fragment_with_stats(
+    fragment: str,
+) -> Tuple[str, int, int, int]:
     if not isinstance(fragment, str):
         raise TypeError("guide HTML fragment must be a string")
     sanitizer = _FragmentSanitizer()
     try:
         sanitizer.feed(fragment)
         sanitizer.close()
+    except GuideParseError:
+        raise
     except Exception as error:  # pragma: no cover - tokenizer is deliberately tolerant
         raise GuideParseError("guide contains malformed HTML") from error
-    return sanitizer.finish()
+    result = sanitizer.finish()
+    return (
+        result,
+        sanitizer.node_count,
+        sanitizer.text_chars,
+        sanitizer.output_bytes,
+    )
+
+
+def sanitize_fragment(fragment: str) -> str:
+    return _sanitize_fragment_with_stats(fragment)[0]
+
+
+class _ImageTagParser(HTMLParser):
+    """Parse exactly one image tag before it is made network-inert."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.attributes: Optional[List[Tuple[str, Optional[str]]]] = None
+        self.invalid = False
+
+    def handle_starttag(
+        self, tag: str, attrs: List[Tuple[str, Optional[str]]]
+    ) -> None:
+        if tag != "img" or self.attributes is not None:
+            self.invalid = True
+            return
+        self.attributes = attrs
+
+    def handle_startendtag(
+        self, tag: str, attrs: List[Tuple[str, Optional[str]]]
+    ) -> None:
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, _tag: str) -> None:
+        self.invalid = True
+
+    def handle_data(self, data: str) -> None:
+        if data:
+            self.invalid = True
+
+
+_IMAGE_TAG_START_PATTERN = re.compile(r"<img(?=\s|/?>)", re.IGNORECASE)
+_LOCALIZED_IMAGE_ATTRIBUTES = {
+    "alt",
+    "class",
+    "height",
+    "loading",
+    "src",
+    "title",
+    "width",
+}
+
+
+def _localized_image_tag(source: str) -> str:
+    parser = _ImageTagParser()
+    try:
+        parser.feed(source)
+        parser.close()
+    except Exception:
+        return ""
+    attributes = parser.attributes
+    if parser.invalid or attributes is None:
+        return ""
+
+    values: Dict[str, str] = {}
+    for name, value in attributes:
+        normalized_name = name.lower()
+        if (
+            normalized_name not in _LOCALIZED_IMAGE_ATTRIBUTES
+            or normalized_name in values
+            or value is None
+        ):
+            return ""
+        values[normalized_name] = value
+    if values.get("loading") != "lazy":
+        return ""
+    try:
+        safe_source = canonical_image_url(values.get("src"))
+    except ValueError:
+        return ""
+
+    classes = values.get("class")
+    if classes is not None:
+        tokens = classes.split()
+        if (
+            not tokens
+            or any(
+                token not in _FragmentSanitizer.ALLOWED_CLASSES
+                for token in tokens
+            )
+        ):
+            return ""
+        values["class"] = " ".join(sorted(set(tokens)))
+    for name in ("title", "alt"):
+        if name in values and len(values[name]) > 1_024:
+            return ""
+    for name in ("width", "height"):
+        value = values.get(name)
+        if value is not None:
+            if not value.isdecimal() or not 0 < int(value) <= 16_384:
+                return ""
+            values[name] = str(int(value))
+
+    del values["src"]
+    values["data-grip-image-url"] = safe_source
+    return "<img" + "".join(
+        f' {name}="{html.escape(value, quote=True)}"'
+        for name, value in sorted(values.items())
+    ) + ">"
+
+
+def localize_guide_images(fragment: str) -> str:
+    """Replace validated remote image sources with inert local-cache keys."""
+
+    if not isinstance(fragment, str):
+        raise TypeError("guide HTML fragment must be a string")
+    parts: List[str] = []
+    offset = 0
+    while True:
+        match = _IMAGE_TAG_START_PATTERN.search(fragment, offset)
+        if match is None:
+            parts.append(fragment[offset:])
+            break
+        parts.append(fragment[offset : match.start()])
+        quote: Optional[str] = None
+        end: Optional[int] = None
+        for index in range(match.end(), len(fragment)):
+            character = fragment[index]
+            if quote is not None:
+                if character == quote:
+                    quote = None
+            elif character in ('"', "'"):
+                quote = character
+            elif character == ">":
+                end = index + 1
+                break
+        if end is None:
+            break
+        parts.append(_localized_image_tag(fragment[match.start() : end]))
+        offset = end
+    return "".join(parts)
 
 
 class _GuidePageParser(HTMLParser):
     MAX_SECTIONS = 512
+    MAX_NODES = 200_000
+    MAX_DEPTH = 128
+    MAX_TEXT_CHARS = 8 * 1024 * 1024
+    MAX_LABEL_CHARS = 4_096
+    MAX_SANITIZED_HTML_BYTES = 12 * 1024 * 1024
 
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self._stack: List[str] = []
+        self._open_counts: Dict[str, int] = {}
         self._title_depth: Optional[int] = None
         self._author_depth: Optional[int] = None
         self._section_root_depth: Optional[int] = None
@@ -331,12 +544,56 @@ class _GuidePageParser(HTMLParser):
         self._section_description_depth: Optional[int] = None
         self._title_parts: List[str] = []
         self._author_parts: List[str] = []
+        self._title_chars = 0
+        self._author_chars = 0
         self._section: Optional[Dict[str, Any]] = None
         self._section_title_parts: List[str] = []
+        self._section_title_chars = 0
         self._sanitizer: Optional[_FragmentSanitizer] = None
+        self._node_count = 0
+        self._text_chars = 0
+        self._sanitized_html_bytes = 0
         self.title = ""
         self.author = ""
         self.sections: List[Dict[str, str]] = []
+
+    def _record_node(self) -> None:
+        self._node_count += 1
+        if self._node_count > self.MAX_NODES:
+            raise GuideParseError("guide exceeds the node budget")
+
+    def _record_text(self, data: str) -> None:
+        self._text_chars += len(data)
+        if self._text_chars > self.MAX_TEXT_CHARS:
+            raise GuideParseError("guide exceeds the text budget")
+
+    def _push(self, tag: str) -> None:
+        if len(self._stack) >= self.MAX_DEPTH:
+            raise GuideParseError("guide exceeds the nesting depth budget")
+        self._stack.append(tag)
+        self._open_counts[tag] = self._open_counts.get(tag, 0) + 1
+
+    def _pop(self) -> str:
+        tag = self._stack.pop()
+        remaining = self._open_counts[tag] - 1
+        if remaining:
+            self._open_counts[tag] = remaining
+        else:
+            del self._open_counts[tag]
+        return tag
+
+    def _append_label(
+        self,
+        parts: List[str],
+        current_chars: int,
+        data: str,
+        label: str,
+    ) -> int:
+        next_chars = current_chars + len(data)
+        if next_chars > self.MAX_LABEL_CHARS:
+            raise GuideParseError(f"guide {label} exceeds the text budget")
+        parts.append(data)
+        return next_chars
 
     @staticmethod
     def _attribute_map(
@@ -359,8 +616,14 @@ class _GuidePageParser(HTMLParser):
     def handle_starttag(
         self, tag: str, attrs: List[Tuple[str, Optional[str]]]
     ) -> None:
+        self._record_node()
         normalized = tag.lower()
         depth = len(self._stack)
+        if (
+            normalized not in _FragmentSanitizer.VOID_TAGS
+            and depth >= self.MAX_DEPTH
+        ):
+            raise GuideParseError("guide exceeds the nesting depth budget")
         attributes = self._attribute_map(attrs)
         classes = self._classes(attributes)
 
@@ -378,9 +641,11 @@ class _GuidePageParser(HTMLParser):
         if self._title_depth is None and "workshopItemTitle" in classes:
             self._title_depth = depth
             self._title_parts = []
+            self._title_chars = 0
         if self._author_depth is None and "guideAuthors" in classes:
             self._author_depth = depth
             self._author_parts = []
+            self._author_chars = 0
 
         if self._section is not None:
             if (
@@ -389,6 +654,7 @@ class _GuidePageParser(HTMLParser):
             ):
                 self._section_title_depth = depth
                 self._section_title_parts = []
+                self._section_title_chars = 0
             elif (
                 self._section_description_depth is None
                 and "subSectionDesc" in classes
@@ -403,7 +669,7 @@ class _GuidePageParser(HTMLParser):
                 self._sanitizer.handle_starttag(normalized, attrs)
 
         if normalized not in _FragmentSanitizer.VOID_TAGS:
-            self._stack.append(normalized)
+            self._push(normalized)
 
     def handle_startendtag(
         self, tag: str, attrs: List[Tuple[str, Optional[str]]]
@@ -417,28 +683,31 @@ class _GuidePageParser(HTMLParser):
         normalized = tag.lower()
         if normalized in _FragmentSanitizer.VOID_TAGS:
             return
-        match_index = next(
-            (
-                index
-                for index in range(len(self._stack) - 1, -1, -1)
-                if self._stack[index] == normalized
-            ),
-            None,
-        )
-        if match_index is None:
+        if self._open_counts.get(normalized, 0) == 0:
             return
-        depth = match_index
+        while self._stack:
+            depth = len(self._stack) - 1
+            open_tag = self._pop()
+            self._close_at_depth(open_tag, depth)
+            if open_tag == normalized:
+                return
+
+    def _close_at_depth(self, tag: str, depth: int) -> None:
 
         if (
             self._section_description_depth is not None
             and depth > self._section_description_depth
             and self._sanitizer is not None
         ):
-            self._sanitizer.handle_endtag(normalized)
+            self._sanitizer.handle_endtag(tag)
         elif depth == self._section_description_depth:
             assert self._section is not None
             assert self._sanitizer is not None
-            self._section["html"] = self._sanitizer.finish()
+            sanitizer = self._sanitizer
+            self._section["html"] = sanitizer.finish()
+            self._sanitized_html_bytes += sanitizer.output_bytes
+            if self._sanitized_html_bytes > self.MAX_SANITIZED_HTML_BYTES:
+                raise GuideParseError("guide exceeds the sanitized HTML budget")
             self._sanitizer = None
             self._section_description_depth = None
 
@@ -446,15 +715,18 @@ class _GuidePageParser(HTMLParser):
             assert self._section is not None
             self._section["title"] = self._normalize_text(self._section_title_parts)
             self._section_title_parts = []
+            self._section_title_chars = 0
             self._section_title_depth = None
         if depth == self._title_depth:
             self.title = self._normalize_text(self._title_parts)
             self._title_parts = []
+            self._title_chars = 0
             self._title_depth = None
         if depth == self._author_depth:
             author = self._normalize_text(self._author_parts)
             self.author = re.sub(r"^By\s+", "", author, flags=re.IGNORECASE)
             self._author_parts = []
+            self._author_chars = 0
             self._author_depth = None
 
         if depth == self._section_root_depth:
@@ -474,21 +746,43 @@ class _GuidePageParser(HTMLParser):
             self._section_description_depth = None
             self._sanitizer = None
 
-        del self._stack[match_index:]
-
     def handle_data(self, data: str) -> None:
+        if not data:
+            return
+        self._record_node()
+        self._record_text(data)
         depth = len(self._stack) - 1
         if self._title_depth is not None and depth >= self._title_depth:
-            self._title_parts.append(data)
+            self._title_chars = self._append_label(
+                self._title_parts,
+                self._title_chars,
+                data,
+                "title",
+            )
         if self._author_depth is not None and depth >= self._author_depth:
-            self._author_parts.append(data)
+            self._author_chars = self._append_label(
+                self._author_parts,
+                self._author_chars,
+                data,
+                "author",
+            )
         if (
             self._section_title_depth is not None
             and depth >= self._section_title_depth
         ):
-            self._section_title_parts.append(data)
+            self._section_title_chars = self._append_label(
+                self._section_title_parts,
+                self._section_title_chars,
+                data,
+                "section title",
+            )
         if self._section_description_depth is not None and self._sanitizer:
             self._sanitizer.handle_data(data)
+
+    def finish(self) -> None:
+        while self._stack:
+            depth = len(self._stack) - 1
+            self._close_at_depth(self._pop(), depth)
 
 
 def parse_guide_html(guide_id: str, source: str) -> Dict[str, Any]:
@@ -499,6 +793,7 @@ def parse_guide_html(guide_id: str, source: str) -> Dict[str, Any]:
     try:
         parser.feed(source)
         parser.close()
+        parser.finish()
     except GuideParseError:
         raise
     except Exception as error:
@@ -537,7 +832,39 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 Fetcher = Callable[[str, float, int], bytes]
-CacheFileSignature = Tuple[int, int, int, int, int]
+CacheFileSignature = FileSignature
+
+
+class _GuideLockEntry:
+    def __init__(self) -> None:
+        self.lock = threading.RLock()
+        self.users = 0
+
+
+class _GuideLockPool:
+    """Retain one lock per guide only while an operation is using it."""
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._entries: Dict[str, _GuideLockEntry] = {}
+
+    def retain(self, guide_id: str) -> _GuideLockEntry:
+        with self._guard:
+            entry = self._entries.get(guide_id)
+            if entry is None:
+                entry = _GuideLockEntry()
+                self._entries[guide_id] = entry
+            entry.users += 1
+            return entry
+
+    def release(self, guide_id: str, entry: _GuideLockEntry) -> None:
+        with self._guard:
+            current = self._entries.get(guide_id)
+            if current is not entry or entry.users <= 0:
+                raise RuntimeError("guide lock pool state is inconsistent")
+            entry.users -= 1
+            if entry.users == 0:
+                del self._entries[guide_id]
 
 
 class GuideReader:
@@ -552,14 +879,41 @@ class GuideReader:
         *,
         fetcher: Optional[Fetcher] = None,
         now_ms: Optional[Callable[[], int]] = None,
+        image_cache: Optional[GuideImageCache] = None,
     ) -> None:
         self.cache_directory = Path(cache_directory)
         self._fetcher = fetcher or self._download
         self._now_ms = now_ms or (lambda: time.time_ns() // 1_000_000)
-        self._lock = threading.RLock()
+        self._image_cache = image_cache or GuideImageCache(
+            self.cache_directory.parent / "images"
+        )
+        self._guide_locks = _GuideLockPool()
+        self._memo_lock = threading.Lock()
+        self._guide_cache_disk_lock = threading.RLock()
+        self._guide_cache_state_lock = threading.Lock()
+        self._guide_cache_generation = 0
         self._cache_memo: Dict[
             str, Tuple[CacheFileSignature, Dict[str, Any]]
         ] = {}
+
+    def _memo_get(
+        self, guide_id: str
+    ) -> Optional[Tuple[CacheFileSignature, Dict[str, Any]]]:
+        with self._memo_lock:
+            return self._cache_memo.get(guide_id)
+
+    def _memo_remove(self, guide_id: str) -> None:
+        with self._memo_lock:
+            self._cache_memo.pop(guide_id, None)
+
+    def _memo_store(
+        self,
+        guide_id: str,
+        signature: CacheFileSignature,
+        document: Mapping[str, Any],
+    ) -> None:
+        with self._memo_lock:
+            self._cache_memo[guide_id] = (signature, dict(document))
 
     @staticmethod
     def source_url(guide_id: str) -> str:
@@ -643,11 +997,13 @@ class GuideReader:
 
     def _stat_cache_file(self, path: Path) -> Optional[CacheFileSignature]:
         try:
-            metadata = path.stat()
+            metadata = os.stat(path, follow_symlinks=False)
         except FileNotFoundError:
             return None
         except OSError as error:
             raise GuideCacheError("cached guide could not be inspected") from error
+        if not stat.S_ISREG(metadata.st_mode):
+            raise GuideCacheError("cached guide is not a regular file")
         if metadata.st_size > self.MAX_CACHE_BYTES:
             raise GuideCacheError("cached guide exceeds the size limit")
         return self._cache_file_signature(metadata)
@@ -690,6 +1046,9 @@ class GuideReader:
             raise GuideCacheError("cached guide contains invalid sections")
         normalized_sections: List[Dict[str, str]] = []
         identifiers: set[str] = set()
+        total_html_nodes = 0
+        total_text_chars = 0
+        total_html_bytes = 0
         for section in sections:
             if not isinstance(section, dict) or set(section) != {"id", "title", "html"}:
                 raise GuideCacheError("cached guide contains an invalid section")
@@ -706,7 +1065,27 @@ class GuideReader:
                 raise GuideCacheError("cached guide contains an invalid section title")
             if not isinstance(fragment, str) or len(fragment.encode("utf-8")) > self.MAX_DOWNLOAD_BYTES:
                 raise GuideCacheError("cached guide contains invalid section HTML")
-            if sanitize_fragment(fragment) != fragment:
+            try:
+                (
+                    sanitized,
+                    fragment_nodes,
+                    fragment_text_chars,
+                    fragment_bytes,
+                ) = _sanitize_fragment_with_stats(fragment)
+            except GuideParseError as error:
+                raise GuideCacheError(
+                    "cached guide exceeds the HTML parsing budget"
+                ) from error
+            total_html_nodes += fragment_nodes
+            total_text_chars += fragment_text_chars
+            total_html_bytes += fragment_bytes
+            if (
+                total_html_nodes > _GuidePageParser.MAX_NODES
+                or total_text_chars > _GuidePageParser.MAX_TEXT_CHARS
+                or total_html_bytes > _GuidePageParser.MAX_SANITIZED_HTML_BYTES
+            ):
+                raise GuideCacheError("cached guide exceeds the HTML parsing budget")
+            if sanitized != fragment:
                 raise GuideCacheError("cached guide contains unsafe section HTML")
             identifiers.add(section_id)
             normalized_sections.append(
@@ -725,38 +1104,58 @@ class GuideReader:
     def _read_cache(self, guide_id: str) -> Optional[Dict[str, Any]]:
         path = self._cache_path(guide_id)
         for attempt in range(2):
-            signature = self._stat_cache_file(path)
-            if signature is None:
-                self._cache_memo.pop(guide_id, None)
+            memoized = self._memo_get(guide_id)
+            try:
+                payload, signature = read_bounded_regular_file(
+                    path,
+                    self.MAX_CACHE_BYTES,
+                    known_signature=(
+                        memoized[0] if memoized is not None else None
+                    ),
+                )
+            except FileNotFoundError:
+                self._memo_remove(guide_id)
                 return None
+            except ManagedFileTooLargeError as error:
+                self._memo_remove(guide_id)
+                raise GuideCacheError(
+                    "cached guide exceeds the size limit"
+                ) from error
+            except ManagedFileChangedError as error:
+                self._memo_remove(guide_id)
+                if attempt == 0:
+                    continue
+                raise GuideCacheError(
+                    "cached guide changed while being read"
+                ) from error
+            except OSError as error:
+                self._memo_remove(guide_id)
+                raise GuideCacheError(
+                    "cached guide could not be read safely"
+                ) from error
 
-            memoized = self._cache_memo.get(guide_id)
-            if memoized is not None and memoized[0] == signature:
+            if payload is None:
+                assert memoized is not None and memoized[0] == signature
                 return memoized[1]
 
             try:
-                with path.open("r", encoding="utf-8") as stream:
-                    document = self._validate_cached_document(
-                        guide_id, json.load(stream)
-                    )
+                document = self._validate_cached_document(
+                    guide_id,
+                    json.loads(payload.decode("utf-8")),
+                )
             except GuideCacheError:
-                self._cache_memo.pop(guide_id, None)
+                self._memo_remove(guide_id)
                 raise
-            except (OSError, UnicodeError, json.JSONDecodeError) as error:
-                self._cache_memo.pop(guide_id, None)
+            except (UnicodeError, json.JSONDecodeError) as error:
+                self._memo_remove(guide_id)
                 raise GuideCacheError("cached guide could not be read") from error
 
-            final_signature = self._stat_cache_file(path)
-            if final_signature == signature:
-                self._cache_memo[guide_id] = (signature, document)
-                return document
-            self._cache_memo.pop(guide_id, None)
-            if attempt == 1:
-                raise GuideCacheError("cached guide changed while being read")
+            self._memo_store(guide_id, signature, document)
+            return document
 
         raise AssertionError("unreachable cache read state")
 
-    def _write_cache(self, document: Mapping[str, Any]) -> None:
+    def _write_cache_unlocked(self, document: Mapping[str, Any]) -> None:
         payload = json.dumps(
             document,
             ensure_ascii=False,
@@ -816,88 +1215,219 @@ class GuideReader:
         try:
             signature = self._stat_cache_file(cache_path)
         except GuideCacheError:
-            self._cache_memo.pop(document["guideId"], None)
+            self._memo_remove(document["guideId"])
         else:
             if signature is not None:
-                self._cache_memo[document["guideId"]] = (signature, dict(document))
+                self._memo_store(document["guideId"], signature, document)
 
-    @staticmethod
+    def _write_cache(
+        self, document: Mapping[str, Any], expected_generation: int
+    ) -> None:
+        with self._guide_cache_disk_lock:
+            with self._guide_cache_state_lock:
+                if self._guide_cache_generation != expected_generation:
+                    return
+            self._write_cache_unlocked(document)
+
     def _with_cache_status(
-        document: Mapping[str, Any], *, from_cache: bool, stale: bool
+        self,
+        document: Mapping[str, Any],
+        *,
+        from_cache: bool,
+        stale: bool,
     ) -> Dict[str, Any]:
         result = {
             key: value
             for key, value in document.items()
             if key not in {"schemaVersion", "sections"}
         }
-        result["sections"] = [dict(section) for section in document["sections"]]
+        result["sections"] = [
+            {
+                **section,
+                "html": localize_guide_images(section["html"]),
+            }
+            for section in document["sections"]
+        ]
         result["fromCache"] = from_cache
         result["stale"] = stale
         return result
+
+    def get_guide_image(
+        self, url: str, allow_download: bool = True
+    ) -> Optional[Dict[str, Any]]:
+        return self._image_cache.get(url, allow_download)
+
+    def clear_image_cache(self) -> Dict[str, int]:
+        return self._image_cache.clear()
+
+    def clear_guide_cache(self) -> Dict[str, int]:
+        with self._guide_cache_state_lock:
+            self._guide_cache_generation += 1
+        files_removed = 0
+        bytes_removed = 0
+        with self._guide_cache_disk_lock:
+            try:
+                iterator = os.scandir(self.cache_directory)
+            except (FileNotFoundError, NotADirectoryError):
+                iterator = None
+            except OSError as error:
+                raise GuideCacheError(
+                    "guide cache could not be inspected"
+                ) from error
+            if iterator is not None:
+                with iterator:
+                    for entry in iterator:
+                        name = entry.name
+                        if not name.endswith(".json"):
+                            continue
+                        guide_id = name[:-5]
+                        if GUIDE_ID_PATTERN.fullmatch(guide_id) is None:
+                            continue
+                        try:
+                            metadata = entry.stat(follow_symlinks=False)
+                        except OSError:
+                            continue
+                        try:
+                            if stat.S_ISDIR(metadata.st_mode):
+                                os.rmdir(entry.path)
+                            else:
+                                os.unlink(entry.path)
+                        except OSError as error:
+                            raise GuideCacheError(
+                                "guide cache could not be cleared"
+                            ) from error
+                        files_removed += 1
+                        if stat.S_ISREG(metadata.st_mode):
+                            bytes_removed += metadata.st_size
+            with self._memo_lock:
+                self._cache_memo.clear()
+        return {
+            "filesRemoved": files_removed,
+            "bytesRemoved": bytes_removed,
+        }
+
+    def cache_stats(self) -> Dict[str, Any]:
+        guide_files = 0
+        guide_bytes = 0
+        with self._guide_cache_disk_lock:
+            try:
+                iterator = os.scandir(self.cache_directory)
+            except (FileNotFoundError, NotADirectoryError):
+                iterator = None
+            except OSError as error:
+                raise GuideCacheError(
+                    "guide cache could not be inspected"
+                ) from error
+            if iterator is not None:
+                with iterator:
+                    for entry in iterator:
+                        name = entry.name
+                        if not name.endswith(".json"):
+                            continue
+                        if GUIDE_ID_PATTERN.fullmatch(name[:-5]) is None:
+                            continue
+                        try:
+                            metadata = entry.stat(follow_symlinks=False)
+                        except OSError:
+                            continue
+                        if not stat.S_ISREG(metadata.st_mode):
+                            continue
+                        guide_files += 1
+                        guide_bytes += metadata.st_size
+        return {
+            "guides": {"files": guide_files, "bytes": guide_bytes},
+            "images": self._image_cache.stats(),
+        }
+
+    def get_cached(self, guide_id: str) -> Optional[Dict[str, Any]]:
+        normalized_guide_id = _validate_guide_id(guide_id)
+        # Cache files are atomically replaced, and _read_cache verifies the file
+        # signature before and after validation. A best-effort preload can read
+        # that stable snapshot without taking the foreground guide lock.
+        cached = self._read_cache(normalized_guide_id)
+        if cached is None:
+            return None
+        now = self._now_ms()
+        return self._with_cache_status(
+            cached,
+            from_cache=True,
+            stale=now - cached["fetchedAt"] > self.CACHE_MAX_AGE_MS,
+        )
 
     def get(self, guide_id: str, force_refresh: bool = False) -> Dict[str, Any]:
         normalized_guide_id = _validate_guide_id(guide_id)
         if type(force_refresh) is not bool:
             raise ValueError("force_refresh must be a boolean")
-        with self._lock:
-            try:
-                cached = self._read_cache(normalized_guide_id)
-            except GuideCacheError:
-                if not force_refresh:
-                    raise
-                cached = None
-            now = self._now_ms()
-            if cached is not None and not force_refresh:
-                return self._with_cache_status(
-                    cached,
-                    from_cache=True,
-                    stale=now - cached["fetchedAt"] > self.CACHE_MAX_AGE_MS,
-                )
+        entry = self._guide_locks.retain(normalized_guide_id)
+        try:
+            with entry.lock:
+                return self._get_locked(normalized_guide_id, force_refresh)
+        finally:
+            self._guide_locks.release(normalized_guide_id, entry)
 
+    def _get_locked(
+        self, normalized_guide_id: str, force_refresh: bool
+    ) -> Dict[str, Any]:
+        with self._guide_cache_state_lock:
+            cache_generation = self._guide_cache_generation
+        try:
+            cached = self._read_cache(normalized_guide_id)
+        except GuideCacheError:
+            if not force_refresh:
+                raise
+            cached = None
+        now = self._now_ms()
+        if cached is not None and not force_refresh:
+            return self._with_cache_status(
+                cached,
+                from_cache=True,
+                stale=now - cached["fetchedAt"] > self.CACHE_MAX_AGE_MS,
+            )
+
+        try:
             try:
-                try:
-                    body = self._fetcher(
-                        self.source_url(normalized_guide_id),
-                        self.REQUEST_TIMEOUT_SECONDS,
-                        self.MAX_DOWNLOAD_BYTES,
-                    )
-                except (GuideDownloadError, GuideParseError):
-                    raise
-                except (
-                    OSError,
-                    urllib.error.URLError,
-                    http.client.HTTPException,
-                ) as error:
-                    raise GuideDownloadError(
-                        "Could not download the Steam guide"
-                    ) from error
-                if not isinstance(body, bytes) or len(body) > self.MAX_DOWNLOAD_BYTES:
-                    raise GuideDownloadError("Steam returned an invalid response body")
-                try:
-                    source = body.decode("utf-8")
-                except UnicodeDecodeError as error:
-                    raise GuideDownloadError(
-                        "Steam returned guide HTML that was not UTF-8"
-                    ) from error
-                parsed = parse_guide_html(normalized_guide_id, source)
-                document = {
-                    "schemaVersion": GUIDE_CACHE_SCHEMA_VERSION,
-                    **parsed,
-                    "fetchedAt": now,
-                }
-                validated = self._validate_cached_document(
-                    normalized_guide_id, document
-                )
-                self._write_cache(validated)
-                return self._with_cache_status(
-                    validated, from_cache=False, stale=False
+                body = self._fetcher(
+                    self.source_url(normalized_guide_id),
+                    self.REQUEST_TIMEOUT_SECONDS,
+                    self.MAX_DOWNLOAD_BYTES,
                 )
             except (GuideDownloadError, GuideParseError):
-                if cached is not None:
-                    return self._with_cache_status(
-                        cached, from_cache=True, stale=True
-                    )
                 raise
+            except (
+                OSError,
+                urllib.error.URLError,
+                http.client.HTTPException,
+            ) as error:
+                raise GuideDownloadError(
+                    "Could not download the Steam guide"
+                ) from error
+            if not isinstance(body, bytes) or len(body) > self.MAX_DOWNLOAD_BYTES:
+                raise GuideDownloadError("Steam returned an invalid response body")
+            try:
+                source = body.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise GuideDownloadError(
+                    "Steam returned guide HTML that was not UTF-8"
+                ) from error
+            parsed = parse_guide_html(normalized_guide_id, source)
+            document = {
+                "schemaVersion": GUIDE_CACHE_SCHEMA_VERSION,
+                **parsed,
+                "fetchedAt": now,
+            }
+            validated = self._validate_cached_document(
+                normalized_guide_id, document
+            )
+            self._write_cache(validated, cache_generation)
+            return self._with_cache_status(
+                validated, from_cache=False, stale=False
+            )
+        except (GuideDownloadError, GuideParseError):
+            if cached is not None:
+                return self._with_cache_status(
+                    cached, from_cache=True, stale=True
+                )
+            raise
 
 
 class ReaderPositionStore:
@@ -948,6 +1478,10 @@ class ReaderPositionStore:
             or CONTROL_CHARACTER_PATTERN.search(value)
         ):
             raise ValueError("anchor_text is invalid")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise ValueError("anchor_text is invalid") from error
         return value
 
     def _validate_position(self, value: Any, *, stored: bool) -> Dict[str, Any]:
@@ -980,7 +1514,11 @@ class ReaderPositionStore:
                 raise ReaderPositionError("stored reader position is invalid") from error
             raise
         timestamp = value["updated_at_ms"]
-        if type(timestamp) is not int or timestamp < 0:
+        if (
+            type(timestamp) is not int
+            or timestamp < 0
+            or timestamp > JAVASCRIPT_MAX_SAFE_INTEGER
+        ):
             if stored:
                 raise ReaderPositionError("stored reader timestamp is invalid")
             raise ValueError("updated_at_ms is invalid")
@@ -988,16 +1526,26 @@ class ReaderPositionStore:
         return normalized
 
     def _read_document(self) -> Dict[str, Any]:
-        if not self.path.exists():
-            return self._empty_document()
         try:
-            if self.path.stat().st_size > self.MAX_FILE_BYTES:
-                raise ReaderPositionError("reader_positions.json exceeds the size limit")
-            with self.path.open("r", encoding="utf-8") as stream:
-                value = json.load(stream)
+            payload, _signature = read_bounded_regular_file(
+                self.path, self.MAX_FILE_BYTES
+            )
+        except FileNotFoundError:
+            return self._empty_document()
+        except ManagedFileTooLargeError as error:
+            raise ReaderPositionError(
+                "reader_positions.json exceeds the size limit"
+            ) from error
+        except OSError as error:
+            raise ReaderPositionError(
+                "reader_positions.json could not be read safely"
+            ) from error
+        assert payload is not None
+        try:
+            value = json.loads(payload.decode("utf-8"))
         except ReaderPositionError:
             raise
-        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        except (UnicodeError, json.JSONDecodeError) as error:
             raise ReaderPositionError("reader_positions.json could not be read") from error
         if not isinstance(value, dict) or set(value) != {"schema_version", "positions"}:
             raise ReaderPositionError(
@@ -1109,3 +1657,20 @@ class ReaderPositionStore:
                 raise ReaderPositionError("reader position limit reached")
             self._write_document(document)
             return dict(position)
+
+    def repair(self) -> Dict[str, Any]:
+        """Back up and reset this store only when validation fails."""
+
+        with self._lock:
+            try:
+                self._read_document()
+            except ReaderPositionError:
+                try:
+                    backup = backup_corrupt_file(self.path)
+                except OSError as error:
+                    raise ReaderPositionError(
+                        "could not back up corrupt reader_positions.json"
+                    ) from error
+                self._write_document(self._empty_document())
+                return {"repaired": True, "backup": str(backup)}
+            return {"repaired": False, "backup": None}

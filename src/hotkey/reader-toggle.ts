@@ -1,3 +1,5 @@
+import type { InstrumentedHotkeyPress } from "../reader/performance";
+
 export const READER_ROUTE_PREFIX = "/decky-grip/reader/";
 
 export type HotkeyToggleResult =
@@ -7,7 +9,7 @@ export interface ReaderHotkeyToggleOptions {
   currentPath: () => string | null;
   gameIsRunning: () => boolean;
   openingIsBlocked?: () => boolean;
-  openReader: () => Promise<void>;
+  openReader: (event?: InstrumentedHotkeyPress) => Promise<void>;
   closeReader: () => void | Promise<void>;
   onError: (error: unknown) => void;
 }
@@ -39,7 +41,7 @@ export class ReaderHotkeyToggle {
     this.disposed = true;
   }
 
-  async trigger(): Promise<HotkeyToggleResult> {
+  async trigger(event?: InstrumentedHotkeyPress): Promise<HotkeyToggleResult> {
     if (this.disposed) {
       return "ignored";
     }
@@ -59,7 +61,7 @@ export class ReaderHotkeyToggle {
       if (shouldClose) {
         await this.options.closeReader();
       } else {
-        await this.options.openReader();
+        await this.options.openReader(event);
       }
       return this.disposed ? "ignored" : shouldClose ? "closed" : "opened";
     } catch (error: unknown) {

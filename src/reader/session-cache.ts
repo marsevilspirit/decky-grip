@@ -3,6 +3,7 @@ import type { DownloadedGuide, ReaderPosition } from "./types";
 import { makeGuideKey, type GuideIdentity } from "../steam/guide-key";
 
 export interface ReaderSessionBackend {
+  getCachedGuide(guideId: string): Promise<DownloadedGuide | null>;
   getGuide(guideId: string, forceRefresh?: boolean): Promise<DownloadedGuide>;
   getReaderPosition(guideKey: string): Promise<ReaderPosition | null>;
   saveReaderPosition(
@@ -17,15 +18,37 @@ export interface ReaderSessionBackend {
 export interface ReaderSessionSnapshot {
   guide: DownloadedGuide;
   position: ReaderPosition | null;
+  positionWarning: string | null;
 }
 
 export interface ReaderSessionLoadOptions {
   forceRefresh?: boolean;
 }
 
+export function retainGuideForStaleRefresh(
+  existing: ReaderSessionSnapshot | null,
+  refreshed: ReaderSessionSnapshot,
+  forceRefresh: boolean,
+): ReaderSessionSnapshot {
+  if (
+    !forceRefresh ||
+    !refreshed.guide.stale ||
+    !existing ||
+    existing.guide.guideId !== refreshed.guide.guideId
+  ) {
+    return refreshed;
+  }
+  return { ...refreshed, guide: existing.guide };
+}
+
 interface ActiveLoad {
   forceRefresh: boolean;
   promise: Promise<ReaderSessionSnapshot>;
+}
+
+interface ActivePreload {
+  promise: Promise<ReaderSessionSnapshot | null>;
+  token: object;
 }
 
 interface StagedHandoff {
@@ -35,6 +58,15 @@ interface StagedHandoff {
 
 const STAGED_POSITION_UPDATED_AT = 0;
 const MAX_RETAINED_SESSIONS = 2;
+
+interface PositionLoadResult {
+  position: ReaderPosition | null;
+  warning: string | null;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 function stagedReaderPosition(
   position: CapturedReaderPosition,
@@ -50,6 +82,7 @@ function stagedReaderPosition(
 export class ReaderSessionCache {
   private readonly snapshots = new Map<string, ReaderSessionSnapshot>();
   private readonly activeLoads = new Map<string, ActiveLoad>();
+  private readonly activePreloads = new Map<string, ActivePreload>();
   private readonly stagedHandoffs = new Map<string, StagedHandoff>();
   private readonly stagedSaves = new Map<string, Promise<void>>();
   private generation = 0;
@@ -73,12 +106,15 @@ export class ReaderSessionCache {
     options: ReaderSessionLoadOptions = {},
   ): Promise<ReaderSessionSnapshot> {
     const guideKey = makeGuideKey(identity);
+    // A foreground request permanently revokes the write token of any older
+    // preload, even if its newer snapshot is later evicted by the LRU.
+    this.activePreloads.delete(guideKey);
     const forceRefresh = options.forceRefresh ?? false;
     const cached = this.snapshots.get(guideKey);
     if (cached && !forceRefresh) {
       this.rememberSnapshot(guideKey, cached);
       const staged = this.stagedHandoffs.get(guideKey);
-      if (staged) {
+      if (staged && cached.positionWarning === null) {
         this.persistStagedHandoff(guideKey, staged, this.generation);
       }
       return Promise.resolve(cached);
@@ -113,6 +149,42 @@ export class ReaderSessionCache {
     return promise;
   }
 
+  preload(identity: GuideIdentity): Promise<ReaderSessionSnapshot | null> {
+    const guideKey = makeGuideKey(identity);
+    const cached = this.snapshots.get(guideKey);
+    if (cached) {
+      this.rememberSnapshot(guideKey, cached);
+      return Promise.resolve(cached);
+    }
+
+    // Foreground loads always win. A preload may join one, but load() never
+    // waits for an active preload before starting its foreground request.
+    const activeLoad = this.activeLoads.get(guideKey);
+    if (activeLoad) {
+      return activeLoad.promise;
+    }
+    const activePreload = this.activePreloads.get(guideKey);
+    if (activePreload) {
+      return activePreload.promise;
+    }
+
+    const generation = this.generation;
+    const record = { token: {} } as ActivePreload;
+    const promise = this.fetchCached(
+      identity,
+      guideKey,
+      generation,
+      record.token,
+    ).finally(() => {
+      if (this.activePreloads.get(guideKey) === record) {
+        this.activePreloads.delete(guideKey);
+      }
+    });
+    record.promise = promise;
+    this.activePreloads.set(guideKey, record);
+    return promise;
+  }
+
   stageHandoff(
     identity: GuideIdentity,
     position: CapturedReaderPosition,
@@ -136,9 +208,12 @@ export class ReaderSessionCache {
       const next = {
         guide: cached.guide,
         position: stagedReaderPosition(staged.position),
+        positionWarning: cached.positionWarning,
       };
       this.rememberSnapshot(guideKey, next);
-      this.persistStagedHandoff(guideKey, staged, this.generation);
+      if (cached.positionWarning === null) {
+        this.persistStagedHandoff(guideKey, staged, this.generation);
+      }
     }
   }
 
@@ -168,7 +243,11 @@ export class ReaderSessionCache {
       if (generation === this.generation) {
         const cached = this.snapshots.get(guideKey);
         if (cached?.position === optimisticPosition) {
-          this.rememberSnapshot(guideKey, { ...cached, position: saved });
+          this.rememberSnapshot(guideKey, {
+            ...cached,
+            position: saved,
+            positionWarning: null,
+          });
         }
       }
       return saved;
@@ -184,10 +263,44 @@ export class ReaderSessionCache {
     }
   }
 
+  async retryPosition(identity: GuideIdentity): Promise<ReaderSessionSnapshot> {
+    const guideKey = makeGuideKey(identity);
+    const existing = this.snapshots.get(guideKey);
+    if (!existing) {
+      return this.load(identity);
+    }
+    const generation = this.generation;
+    const positionResult = await this.loadPosition(guideKey);
+    const staged = this.stagedHandoffs.get(guideKey);
+    const adoptedHandoff =
+      positionResult.position === null && positionResult.warning === null
+        ? staged
+        : undefined;
+    const current = this.snapshots.get(guideKey) ?? existing;
+    const snapshot: ReaderSessionSnapshot = {
+      ...current,
+      position:
+        positionResult.warning !== null
+          ? current.position
+          : adoptedHandoff
+            ? stagedReaderPosition(adoptedHandoff.position)
+            : positionResult.position,
+      positionWarning: positionResult.warning,
+    };
+    if (generation === this.generation) {
+      this.rememberSnapshot(guideKey, snapshot);
+      if (adoptedHandoff) {
+        this.persistStagedHandoff(guideKey, adoptedHandoff, generation);
+      }
+    }
+    return snapshot;
+  }
+
   clear(): void {
     this.generation += 1;
     this.snapshots.clear();
     this.activeLoads.clear();
+    this.activePreloads.clear();
     this.stagedHandoffs.clear();
     this.stagedSaves.clear();
   }
@@ -198,17 +311,26 @@ export class ReaderSessionCache {
     forceRefresh: boolean,
     generation: number,
   ): Promise<ReaderSessionSnapshot> {
-    const [guide, backendPosition] = await Promise.all([
+    const [guide, positionResult] = await Promise.all([
       this.backend.getGuide(identity.guideId, forceRefresh),
-      this.backend.getReaderPosition(guideKey),
+      this.loadPosition(guideKey),
     ]);
+    const backendPosition = positionResult.position;
+    const previousPosition = this.snapshots.get(guideKey)?.position ?? null;
     const staged = this.stagedHandoffs.get(guideKey);
     const adoptedHandoff = backendPosition === null ? staged : undefined;
     const snapshot = {
       guide,
-      position: adoptedHandoff
-        ? stagedReaderPosition(adoptedHandoff.position)
-        : backendPosition,
+      position:
+        positionResult.warning !== null
+          ? (previousPosition ??
+            (adoptedHandoff
+              ? stagedReaderPosition(adoptedHandoff.position)
+              : null))
+          : adoptedHandoff
+            ? stagedReaderPosition(adoptedHandoff.position)
+            : backendPosition,
+      positionWarning: positionResult.warning,
     };
 
     if (generation === this.generation) {
@@ -216,9 +338,57 @@ export class ReaderSessionCache {
         this.stagedHandoffs.delete(guideKey);
       }
       this.rememberSnapshot(guideKey, snapshot);
-      if (adoptedHandoff) {
+      if (adoptedHandoff && positionResult.warning === null) {
         this.persistStagedHandoff(guideKey, adoptedHandoff, generation);
       }
+    }
+    return snapshot;
+  }
+
+  private async fetchCached(
+    identity: GuideIdentity,
+    guideKey: string,
+    generation: number,
+    token: object,
+  ): Promise<ReaderSessionSnapshot | null> {
+    const guide = await this.backend.getCachedGuide(identity.guideId);
+    if (guide === null) {
+      return null;
+    }
+    const positionResult = await this.loadPosition(guideKey);
+    const backendPosition = positionResult.position;
+    const previousPosition = this.snapshots.get(guideKey)?.position ?? null;
+    const staged = this.stagedHandoffs.get(guideKey);
+    const adoptedHandoff = backendPosition === null ? staged : undefined;
+    const snapshot = {
+      guide,
+      position:
+        positionResult.warning !== null
+          ? (previousPosition ??
+            (adoptedHandoff
+              ? stagedReaderPosition(adoptedHandoff.position)
+              : null))
+          : adoptedHandoff
+            ? stagedReaderPosition(adoptedHandoff.position)
+            : backendPosition,
+      positionWarning: positionResult.warning,
+    };
+
+    if (generation === this.generation) {
+      const foregroundSnapshot = this.snapshots.get(guideKey);
+      if (foregroundSnapshot) {
+        this.rememberSnapshot(guideKey, foregroundSnapshot);
+        return foregroundSnapshot;
+      }
+      if (this.activePreloads.get(guideKey)?.token !== token) {
+        return snapshot;
+      }
+      if (backendPosition !== null && staged) {
+        this.stagedHandoffs.delete(guideKey);
+      }
+      this.rememberSnapshot(guideKey, snapshot);
+      // Preloading remains read-only. A later foreground load will persist an
+      // adopted handoff through the normal cached-snapshot path.
     }
     return snapshot;
   }
@@ -254,7 +424,11 @@ export class ReaderSessionCache {
         this.stagedHandoffs.delete(guideKey);
         const cached = this.snapshots.get(guideKey);
         if (cached) {
-          this.rememberSnapshot(guideKey, { ...cached, position: saved });
+          this.rememberSnapshot(guideKey, {
+            ...cached,
+            position: saved,
+            positionWarning: null,
+          });
         }
       })
       .catch((error: unknown) => {
@@ -285,6 +459,20 @@ export class ReaderSessionCache {
         return;
       }
       this.snapshots.delete(oldestKey);
+    }
+  }
+
+  private async loadPosition(guideKey: string): Promise<PositionLoadResult> {
+    try {
+      return {
+        position: await this.backend.getReaderPosition(guideKey),
+        warning: null,
+      };
+    } catch (error: unknown) {
+      return {
+        position: null,
+        warning: `阅读位置加载失败，正文仍可使用：${errorMessage(error)}`,
+      };
     }
   }
 }

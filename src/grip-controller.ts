@@ -13,6 +13,7 @@ import type { GuideSelection, SteamGuideRuntime } from "./steam/runtime";
 import type { GuideScroller } from "./steam/guide-scroll";
 import { captureNativeReaderHandoff } from "./steam/reader-handoff";
 import type { CapturedReaderPosition } from "./reader/anchor";
+import type { RecentGuideSeed } from "./reader/recent-guide";
 import { RuntimeStatusStore } from "./runtime-status";
 
 export const SAVE_DEBOUNCE_MS = 600;
@@ -65,6 +66,7 @@ interface RestoreEpoch {
 interface QueuedSave {
   guideKey: string;
   scrollTop: number;
+  generation: number;
 }
 
 interface PendingZeroCapture {
@@ -134,6 +136,7 @@ export class GripController {
   >();
   private readonly saveQueue: QueuedSave[] = [];
   private saveInFlight = false;
+  private positionGeneration = 0;
 
   private runtime: SteamGuideRuntime | null = null;
   private runtimeCleanups: Array<() => void> = [];
@@ -164,15 +167,7 @@ export class GripController {
     }
     this.started = true;
 
-    try {
-      this.positions = readPositionSnapshots(await this.backend.getPositions());
-      for (const guideKey of this.positions.keys()) {
-        this.persistedKeys.add(guideKey);
-      }
-    } catch (error: unknown) {
-      this.reportError("Could not load saved guide positions", error);
-      return;
-    }
+    await this.retryPositions();
 
     if (this.disposed) {
       return;
@@ -184,6 +179,84 @@ export class GripController {
       () => this.refreshRuntime(),
       RUNTIME_POLL_MS,
     );
+  }
+
+  async retryPositions(): Promise<boolean> {
+    return this.loadPositions(true);
+  }
+
+  async reloadPositionsAfterRepair(): Promise<boolean> {
+    return this.loadPositions(false);
+  }
+
+  private async loadPositions(
+    preserveNewerInMemory: boolean,
+  ): Promise<boolean> {
+    if (this.disposed) {
+      return false;
+    }
+    if (!preserveNewerInMemory) {
+      this.resetPositionMemory();
+    }
+    try {
+      const loaded = readPositionSnapshots(await this.backend.getPositions());
+      const recentGuides: RecentGuideSeed[] = [];
+      this.persistedKeys.clear();
+      for (const [guideKey, position] of loaded) {
+        this.persistedKeys.add(guideKey);
+        recentGuides.push({
+          identity: splitGuideKey(guideKey),
+          updatedAt: position.updatedAt,
+        });
+      }
+      if (preserveNewerInMemory) {
+        // A retry can happen after the runtime has already captured new scroll
+        // positions. Preserve the newer in-memory value rather than replacing
+        // it with an older recovered snapshot.
+        for (const [guideKey, position] of this.positions) {
+          const recovered = loaded.get(guideKey);
+          if (!recovered || position.updatedAt > recovered.updatedAt) {
+            loaded.set(guideKey, position);
+          }
+        }
+      }
+      this.positions = loaded;
+      this.status.seedRecentGuides(recentGuides);
+      this.status.update({
+        positionWarning: null,
+        savedCount: this.persistedKeys.size,
+      });
+      return true;
+    } catch (error: unknown) {
+      const detail = error instanceof Error ? error.message : String(error);
+      console.error("[GRIP] Could not load saved guide positions", error);
+      this.status.update({
+        positionWarning: `阅读位置加载失败，GRIP 已继续运行：${detail}`,
+      });
+      return false;
+    }
+  }
+
+  private resetPositionMemory(): void {
+    this.positionGeneration += 1;
+    for (const timer of this.saveTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.saveTimers.clear();
+    this.pendingScrollTops.clear();
+    this.saveRetries.clear();
+    this.failedSaves.clear();
+    this.saveQueue.length = 0;
+    this.positions.clear();
+    this.persistedKeys.clear();
+    this.clearPendingZeroCapture();
+    this.clearGuideActivity();
+    this.cancelRestore();
+    this.status.update({
+      savedCount: 0,
+      lastCaptured: null,
+      lastRestored: null,
+    });
   }
 
   captureReaderHandoff(identity: GuideIdentity): CapturedReaderPosition | null {
@@ -579,6 +652,9 @@ export class GripController {
     this.clearGuideActivity();
     if (previous) {
       this.flushKey(makeGuideKey(previous));
+    }
+    if (identity) {
+      this.status.rememberGuide(identity);
     }
     this.status.update({
       activeGuide: identity,
@@ -1005,7 +1081,11 @@ export class GripController {
     }
     this.pendingScrollTops.delete(guideKey);
 
-    this.saveQueue.push({ guideKey, scrollTop });
+    this.saveQueue.push({
+      guideKey,
+      scrollTop,
+      generation: this.positionGeneration,
+    });
     this.pumpSaveQueue();
   }
 
@@ -1028,9 +1108,13 @@ export class GripController {
   private async persistPosition({
     guideKey,
     scrollTop,
+    generation,
   }: QueuedSave): Promise<void> {
     try {
       await this.backend.savePosition(guideKey, scrollTop);
+      if (generation !== this.positionGeneration) {
+        return;
+      }
       this.persistedKeys.add(guideKey);
       this.saveRetries.delete(guideKey);
       this.failedSaves.delete(guideKey);
@@ -1045,6 +1129,9 @@ export class GripController {
             : currentStatus.message,
       });
     } catch (error: unknown) {
+      if (generation !== this.positionGeneration) {
+        return;
+      }
       this.reportError("Could not save the guide position", error);
       const current = this.positions.get(guideKey)?.scrollTop;
       const retryCount = this.saveRetries.get(guideKey) ?? 0;

@@ -8,12 +8,17 @@ import {
 import { Router, staticClasses } from "@decky/ui";
 
 import {
+  clearGuideCache,
+  clearImageCache,
+  getCachedGuide,
   getGuide,
+  getGuideImage,
   getPositions,
+  getReaderCacheStats,
   getReaderPosition,
+  repairPositionStores,
   savePosition,
   saveReaderPosition,
-  type PositionSnapshots,
 } from "./backend";
 import { GuideReaderPage } from "./components/GuideReaderPage";
 import { GripPanel } from "./components/GripPanel";
@@ -25,10 +30,13 @@ import {
   readerRouteAppId,
   ReaderHotkeyToggle,
 } from "./hotkey/reader-toggle";
+import { chooseObservedGuide } from "./reader/recent-guide";
+import { ReaderImageCacheControl } from "./reader/image-cache-control";
 import {
-  chooseObservedGuide,
-  findMostRecentGuide,
-} from "./reader/recent-guide";
+  parseInstrumentedHotkeyPress,
+  ReaderPerformanceTracker,
+  type InstrumentedHotkeyPress,
+} from "./reader/performance";
 import { ReaderSessionCache } from "./reader/session-cache";
 import { RuntimeStatusStore } from "./runtime-status";
 import { makeGuideKey, type GuideIdentity } from "./steam/guide-key";
@@ -77,13 +85,11 @@ function BookmarkIcon() {
 export default definePlugin(() => {
   let mounted = true;
   const status = new RuntimeStatusStore();
-  let positionSnapshots: PositionSnapshots | null = null;
-  const positionsReady = getPositions().then((positions) => {
-    positionSnapshots = positions;
-    return positions;
-  });
+  const readerPerformance = new ReaderPerformanceTracker();
+  const imageCacheControl = new ReaderImageCacheControl();
   const readerCache = new ReaderSessionCache(
     {
+      getCachedGuide,
       getGuide,
       getReaderPosition,
       saveReaderPosition,
@@ -94,7 +100,7 @@ export default definePlugin(() => {
   );
   const controller = new GripController({
     backend: {
-      getPositions: () => positionsReady,
+      getPositions,
       savePosition,
     },
     runtimeFactory: createSteamGuideRuntime,
@@ -106,12 +112,10 @@ export default definePlugin(() => {
     targetAppId: string | undefined,
   ): GuideIdentity | null => {
     const runtimeStatus = status.getSnapshot();
-    return (
-      chooseObservedGuide(
-        runtimeStatus.activeGuide,
-        runtimeStatus.lastGuide,
-        targetAppId,
-      ) ?? findMostRecentGuide(positionSnapshots ?? {}, targetAppId)
+    return chooseObservedGuide(
+      runtimeStatus.activeGuide,
+      status.getRecentGuide(targetAppId),
+      targetAppId,
     );
   };
 
@@ -132,7 +136,7 @@ export default definePlugin(() => {
     }
     lastPreloadKey = guideKey;
     lastPreloadAt = now;
-    void readerCache.load(identity).catch((error: unknown) => {
+    void readerCache.preload(identity).catch((error: unknown) => {
       console.warn("[GRIP] Could not preload the current guide", error);
     });
   };
@@ -142,7 +146,12 @@ export default definePlugin(() => {
   );
   void controllerReady.then(() => preloadReaderFor(currentRunningAppId()));
 
-  const openReader = async (): Promise<void> => {
+  const openReader = async (
+    hotkeyPress?: InstrumentedHotkeyPress,
+  ): Promise<void> => {
+    const performanceTrace = hotkeyPress
+      ? readerPerformance.begin(hotkeyPress)
+      : null;
     const targetAppId = currentRunningAppId();
     const canContinue = (): boolean => {
       if (!mounted) {
@@ -154,34 +163,110 @@ export default definePlugin(() => {
       return true;
     };
 
-    await controllerReady;
-    if (!canContinue()) {
-      return;
-    }
+    try {
+      await controllerReady;
+      if (!canContinue()) {
+        if (performanceTrace) {
+          readerPerformance.abandon(performanceTrace);
+        }
+        return;
+      }
 
-    const identity = resolveReaderIdentity(targetAppId);
-    if (!identity) {
+      const identity = resolveReaderIdentity(targetAppId);
+      if (!identity) {
+        throw new Error(
+          targetAppId === undefined
+            ? "请先打开一次 Steam 指南，再使用 GRIP 阅读器"
+            : "当前游戏还没有可继续的指南，请先打开一次该游戏的 Steam 指南",
+        );
+      }
+      if (performanceTrace) {
+        readerPerformance.bind(performanceTrace, identity);
+      }
+
+      const warmSnapshot = readerCache.peek(identity);
+      if (performanceTrace && warmSnapshot) {
+        readerPerformance.markCacheReady(identity, "memory");
+      }
+      if (!warmSnapshot?.position) {
+        const handoff = controller.captureReaderHandoff(identity);
+        if (handoff) {
+          readerCache.stageHandoff(identity, handoff);
+        }
+      }
+
+      if (!canContinue()) {
+        if (performanceTrace) {
+          readerPerformance.abandon(performanceTrace);
+        }
+        return;
+      }
+      if (performanceTrace) {
+        readerPerformance.markRouteRequested(performanceTrace);
+      }
+      navigateMainWindow(getMainWindow(), readerPath(identity), true);
+      void readerCache
+        .load(identity)
+        .then((snapshot) => {
+          if (performanceTrace) {
+            readerPerformance.markCacheReady(
+              identity,
+              snapshot.guide.fromCache ? "disk" : "network",
+            );
+          }
+        })
+        .catch((error: unknown) => {
+          readerPerformance.failIdentity(
+            identity,
+            `指南正文加载失败：${errorMessage(error)}`,
+          );
+          console.warn("[GRIP] Reader content load failed", error);
+        });
+    } catch (error: unknown) {
+      if (performanceTrace) {
+        readerPerformance.fail(performanceTrace, errorMessage(error));
+      }
+      throw error;
+    }
+  };
+
+  const repairPositions = async (): Promise<string> => {
+    const result = await repairPositionStores();
+    const positionsReloaded = result.positions.repaired
+      ? await controller.reloadPositionsAfterRepair()
+      : await controller.retryPositions();
+    if (!positionsReloaded) {
       throw new Error(
-        targetAppId === undefined
-          ? "请先打开一次 Steam 指南，再使用 GRIP 阅读器"
-          : "当前游戏还没有可继续的指南，请先打开一次该游戏的 Steam 指南",
+        status.getSnapshot().positionWarning ?? "位置文件重读失败",
       );
     }
+    const backups = [
+      result.positions.backup ? `原生位置：${result.positions.backup}` : null,
+      result.readerPositions.backup
+        ? `阅读器位置：${result.readerPositions.backup}`
+        : null,
+    ].filter((value): value is string => value !== null);
+    return backups.length > 0
+      ? `损坏位置已备份并重置。${backups.join("；")}`
+      : "位置文件校验正常，无需重置。";
+  };
 
-    if (!readerCache.peek(identity)?.position) {
-      const handoff = controller.captureReaderHandoff(identity);
-      if (handoff) {
-        readerCache.stageHandoff(identity, handoff);
-      }
-    }
+  const clearGuides = async () => {
+    const result = await clearGuideCache();
+    readerCache.clear();
+    return result;
+  };
 
-    if (!canContinue()) {
-      return;
+  const clearImages = async () => {
+    const token = imageCacheControl.beginClear();
+    try {
+      const result = await clearImageCache();
+      imageCacheControl.finishClear(token, true);
+      return result;
+    } catch (error: unknown) {
+      imageCacheControl.finishClear(token, false);
+      throw error;
     }
-    navigateMainWindow(getMainWindow(), readerPath(identity), true);
-    void readerCache.load(identity).catch((error: unknown) => {
-      console.warn("[GRIP] Reader content load failed", error);
-    });
   };
 
   const closeReader = (
@@ -202,7 +287,14 @@ export default definePlugin(() => {
   };
 
   const ReaderRoute = () => (
-    <GuideReaderPage cache={readerCache} onClose={closeReader} />
+    <GuideReaderPage
+      cache={readerCache}
+      fetchImage={getGuideImage}
+      imageCacheControl={imageCacheControl}
+      onClose={closeReader}
+      onRepairPositions={repairPositions}
+      performance={readerPerformance}
+    />
   );
   routerHook.addRoute(READER_ROUTE, ReaderRoute);
 
@@ -250,11 +342,12 @@ export default definePlugin(() => {
       });
     },
   });
-  const hotkeyListener = addEventListener<[button: string]>(
+  const hotkeyListener = addEventListener<[payload: unknown]>(
     "grip_hotkey",
-    (button) => {
-      if (button === "L4") {
-        void hotkeyToggle.trigger();
+    (payload) => {
+      const instrumented = parseInstrumentedHotkeyPress(payload);
+      if (payload === "L4" || instrumented) {
+        void hotkeyToggle.trigger(instrumented ?? undefined);
       }
     },
   );
@@ -262,11 +355,23 @@ export default definePlugin(() => {
   return {
     name: "GRIP",
     titleView: <div className={staticClasses.Title}>GRIP</div>,
-    content: <GripPanel openReader={openReader} status={status} />,
+    content: (
+      <GripPanel
+        clearGuides={clearGuides}
+        clearImages={clearImages}
+        getCacheStats={getReaderCacheStats}
+        openReader={openReader}
+        performance={readerPerformance}
+        repairPositions={repairPositions}
+        retryPositions={() => controller.retryPositions()}
+        status={status}
+      />
+    ),
     icon: <BookmarkIcon />,
     onDismount() {
       mounted = false;
       stopPreloading();
+      readerPerformance.clear();
       readerCache.clear();
       try {
         lifetimeRegistration?.unregister();

@@ -9,7 +9,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "py_modules"))
 
-from grip_html_parser import HTMLParser  # noqa: E402
+from grip_html_parser import HTMLParseLimitError, HTMLParser  # noqa: E402
 
 
 class RecordingParser(HTMLParser):
@@ -149,6 +149,24 @@ class HTMLParserLinearScanTests(unittest.TestCase):
         ]
 
         self.assertEqual(buffer_writes, [])
+
+    def test_incremental_plain_text_is_buffered_as_chunks_not_one_growing_string(self):
+        parser = RecordingParser()
+        maximum_buffer = 0
+
+        for character in "x" * 20_000:
+            parser.feed(character)
+            maximum_buffer = max(maximum_buffer, len(parser._tokenizer_buffer))
+        parser.close()
+
+        self.assertEqual(maximum_buffer, 0)
+        self.assertEqual(parser.events, [("data", "x" * 20_000)])
+
+    def test_one_malformed_markup_token_has_a_hard_size_limit(self):
+        parser = RecordingParser()
+
+        with self.assertRaisesRegex(HTMLParseLimitError, "size limit"):
+            parser.feed("<div title='" + "x" * (HTMLParser.MAX_MARKUP_CHARS + 1))
 
 
 if __name__ == "__main__":

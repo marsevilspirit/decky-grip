@@ -12,9 +12,16 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from store_repair import (
+    ManagedFileTooLargeError,
+    backup_corrupt_file,
+    read_bounded_regular_file,
+)
+
 
 SCHEMA_VERSION = 1
 GUIDE_KEY_PATTERN = re.compile(r"^[1-9][0-9]{0,19}:[1-9][0-9]{0,19}$")
+JAVASCRIPT_MAX_SAFE_INTEGER = (1 << 53) - 1
 
 
 class StorageError(RuntimeError):
@@ -67,6 +74,7 @@ class PositionStore:
             isinstance(updated_at_ms, bool)
             or not isinstance(updated_at_ms, int)
             or updated_at_ms < 0
+            or updated_at_ms > JAVASCRIPT_MAX_SAFE_INTEGER
         ):
             raise StorageError("positions.json contains an invalid timestamp")
         return updated_at_ms
@@ -119,17 +127,26 @@ class PositionStore:
         return {"schema_version": SCHEMA_VERSION, "positions": normalized}
 
     def _read_document(self) -> Dict[str, Any]:
-        if not self.path.exists():
-            return self._empty_document()
-
         try:
-            if self.path.stat().st_size > self.MAX_FILE_BYTES:
-                raise StorageError("positions.json is larger than the safety limit")
-            with self.path.open("r", encoding="utf-8") as stream:
-                return self._validate_document(json.load(stream))
+            payload, _signature = read_bounded_regular_file(
+                self.path, self.MAX_FILE_BYTES
+            )
+        except FileNotFoundError:
+            return self._empty_document()
+        except ManagedFileTooLargeError as error:
+            raise StorageError(
+                "positions.json is larger than the safety limit"
+            ) from error
+        except OSError as error:
+            raise StorageError("positions.json could not be read safely") from error
+        assert payload is not None
+        try:
+            return self._validate_document(
+                json.loads(payload.decode("utf-8"))
+            )
         except StorageError:
             raise
-        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        except (UnicodeError, json.JSONDecodeError) as error:
             raise StorageError("positions.json could not be read") from error
 
     def _write_atomic(self, document: Dict[str, Any]) -> None:
@@ -245,3 +262,20 @@ class PositionStore:
     def count(self) -> int:
         with self._lock:
             return len(self._read_document()["positions"])
+
+    def repair(self) -> Dict[str, Any]:
+        """Back up and reset this store only when validation fails."""
+
+        with self._lock:
+            try:
+                self._read_document()
+            except StorageError:
+                try:
+                    backup = backup_corrupt_file(self.path)
+                except OSError as error:
+                    raise StorageError(
+                        "could not back up corrupt positions.json"
+                    ) from error
+                self._write_atomic(self._empty_document())
+                return {"repaired": True, "backup": str(backup)}
+            return {"repaired": False, "backup": None}

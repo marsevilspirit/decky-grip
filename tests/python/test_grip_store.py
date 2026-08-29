@@ -28,6 +28,30 @@ class PositionStoreTests(unittest.TestCase):
         self.assertEqual(self.store.snapshot(), {})
         self.assertEqual(self.store.count(), 0)
 
+    def test_special_store_paths_are_rejected_without_following_or_blocking(self):
+        outside = self.path.parent / "outside.json"
+        outside.write_text(
+            json.dumps(PositionStore._empty_document()), encoding="utf-8"
+        )
+        self.path.symlink_to(outside)
+        with self.assertRaisesRegex(StorageError, "safely"):
+            self.store.count()
+        self.path.unlink()
+
+        os.mkfifo(self.path)
+        real_open = os.open
+
+        def require_safe_flags(path, flags, *args, **kwargs):
+            self.assertTrue(flags & os.O_NOFOLLOW)
+            self.assertTrue(flags & os.O_NONBLOCK)
+            return real_open(path, flags, *args, **kwargs)
+
+        with mock.patch(
+            "store_repair.os.open", side_effect=require_safe_flags
+        ):
+            with self.assertRaisesRegex(StorageError, "safely"):
+                self.store.count()
+
     def test_save_get_and_overwrite(self):
         first = self.store.save("1113000:3414883877", 5561.3335)
         second = self.store.save("1113000:3414883877", 42)
@@ -153,6 +177,33 @@ class PositionStoreTests(unittest.TestCase):
                         with self.assertRaises(StorageError):
                             operation()
 
+    def test_timestamp_must_fit_a_javascript_safe_integer(self):
+        document = {
+            "schema_version": 1,
+            "positions": {
+                "1:2": {
+                    "scroll_top": 3,
+                    "updated_at_ms": (1 << 53) - 1,
+                }
+            },
+        }
+        self.path.write_text(json.dumps(document), encoding="utf-8")
+        self.assertEqual(
+            self.store.get("1:2")["updated_at_ms"],
+            (1 << 53) - 1,
+        )
+
+        document["positions"]["1:2"]["updated_at_ms"] = 1 << 53
+        original = json.dumps(document).encode("utf-8")
+        self.path.write_bytes(original)
+        with self.assertRaisesRegex(StorageError, "invalid timestamp"):
+            self.store.snapshot()
+
+        result = self.store.repair()
+        self.assertTrue(result["repaired"])
+        self.assertEqual(Path(result["backup"]).read_bytes(), original)
+        self.assertEqual(self.store.snapshot(), {})
+
     def test_oversized_existing_file_is_rejected(self):
         self.path.write_bytes(b" " * (PositionStore.MAX_FILE_BYTES + 1))
 
@@ -229,6 +280,32 @@ class PositionStoreTests(unittest.TestCase):
         self.store.save("1:2", 3)
         mode = stat.S_IMODE(self.path.stat().st_mode)
         self.assertEqual(mode, 0o600)
+
+    def test_repair_backs_up_corruption_then_atomically_resets(self):
+        original = b"{ definitely not json"
+        self.path.write_bytes(original)
+
+        result = self.store.repair()
+
+        backup = Path(result["backup"])
+        self.assertTrue(result["repaired"])
+        self.assertEqual(backup.parent, self.path.parent)
+        self.assertEqual(backup.read_bytes(), original)
+        self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o600)
+        self.assertEqual(self.store.snapshot(), {})
+        self.assertEqual(
+            self.store.repair(), {"repaired": False, "backup": None}
+        )
+
+    def test_repair_does_not_touch_a_valid_store(self):
+        self.store.save("1:2", 3)
+        original = self.path.read_bytes()
+
+        result = self.store.repair()
+
+        self.assertEqual(result, {"repaired": False, "backup": None})
+        self.assertEqual(self.path.read_bytes(), original)
+        self.assertEqual(list(self.path.parent.glob("*.corrupt-*.bak")), [])
 
 
 if __name__ == "__main__":

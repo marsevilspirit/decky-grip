@@ -17,6 +17,10 @@ from pathlib import Path
 from typing import Callable, Optional
 
 
+def _unix_time_ms() -> int:
+    return time.time_ns() // 1_000_000
+
+
 class L4HotkeyMonitor:
     REPORT_SIZE = 64
     REPORT_HEADER = b"\x01\x00\x09\x40"
@@ -26,13 +30,14 @@ class L4HotkeyMonitor:
 
     def __init__(
         self,
-        on_press: Callable[[], None],
+        on_press: Callable[[int], None],
         logger=None,
         *,
         device_root: Path = Path("/dev"),
         sysfs_root: Path = Path("/sys/class/hidraw"),
         proc_root: Path = Path("/proc"),
         clock: Callable[[], float] = time.monotonic,
+        wall_clock_ms: Callable[[], int] = _unix_time_ms,
     ) -> None:
         self._on_press = on_press
         self._logger = logger
@@ -40,6 +45,7 @@ class L4HotkeyMonitor:
         self._sysfs_root = sysfs_root
         self._proc_root = proc_root
         self._clock = clock
+        self._wall_clock_ms = wall_clock_ms
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._descriptor: Optional[int] = None
@@ -199,7 +205,10 @@ class L4HotkeyMonitor:
                 return False
             self._last_emit_at = now
 
-        self._on_press()
+        # Capture wall time on the HID reader thread at the rising edge.  The
+        # frontend uses the same Unix epoch to include bridge and route latency
+        # in the physical-L4 end-to-end measurement.
+        self._on_press(self._wall_clock_ms())
         return True
 
     @staticmethod

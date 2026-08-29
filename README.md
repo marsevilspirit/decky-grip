@@ -22,6 +22,9 @@ restore it when the guide is opened again.
 - **GRIP Reader** downloads a public Community guide through the Python
   backend, sanitizes it with a strict HTML allowlist, caches it locally, and
   renders it in a dedicated Decky route.
+- Guide images never load directly in the Steam browser. The backend validates,
+  bounds, and caches trusted Steam-hosted raster images, then the reader exposes
+  them through local Blob URLs for offline reuse.
 - Reader positions include both a pixel fallback and the visible text anchor,
   section id, and viewport offset. The reader content itself has no focusable
   headings, so Steam's title-focused history cannot move the article.
@@ -35,6 +38,8 @@ restore it when the guide is opened again.
   overwriting the saved value.
 - Guide and app ids stay decimal strings so large Steam ids never lose
   precision.
+- Recently observed guides are indexed per app, so switching A → B → A keeps
+  each game's own continuation target.
 - The plugin does not need root privileges.
 
 The current Steam UI findings and implementation boundaries are recorded in
@@ -78,10 +83,22 @@ standard library.
    physical L4 button directly; the Scroll Lock mapping simply prevents the
    button from also performing a common game action.
 
-The first open downloads the public guide. After that, GRIP preloads the most
-recent guide and keeps its validated document and reader position in memory for
-the lifetime of the plugin. A cache older than six hours still opens immediately;
-use **更新** when you want to fetch the newest version.
+The first foreground open downloads the public guide. After that, GRIP preloads
+the most recent guide only when its validated local cache already exists, and
+keeps that document and reader position in memory for the lifetime of the plugin.
+Background preloading never starts a network request. A cache older than six
+hours still opens immediately; use **更新** when you want to fetch the newest
+version. Large guides mount one bounded section first and append bounded batches
+on later frames; each section has its own parser budget, and text anchors are
+indexed incrementally rather than rescanning the whole article on every save or
+restore.
+
+The panel records only real, versioned physical-L4 opens. It reports the route,
+cache, first-content-frame, and position-restoration timings, then evaluates a
+20-attempt warm-cache gate: first-screen P95 must be at most 300 ms with no
+spinner, position failure, canceled open, or load timeout. Failed physical opens
+remain in the same rolling 50-attempt window instead of disappearing from the
+measurement.
 
 ## Storage
 
@@ -101,12 +118,24 @@ as `positions.json`. The initial schema stores:
 ```
 
 The file is written with mode `0600`. Invalid or unsupported data is reported
-instead of being silently replaced.
+without stopping guide observation or cached-body reading. The panel can retry
+the read; an explicit repair first writes a same-directory `0600` backup and
+only then atomically resets a store that still fails validation.
 
 GRIP Reader uses separate `reader_positions.json` and `guides/<guide-id>.json`
 files. Reader bookmarks include `section_id`, `anchor_text`, and
 `anchor_offset`; downloaded HTML is revalidated on the first process read and
 again whenever the cache file's identity or metadata changes.
+
+Images live under the guide cache's `images/` directory. Each image is limited
+to 8 MiB and a validated 8192-pixel / 16-megapixel canvas, the disk LRU to
+128 MiB, and the Python memory LRU to 24 MiB. The reader downloads only images
+near the viewport and keeps at most 32 MiB / 64 entries of estimated decoded
+frontend image residency. Animated image payloads are rejected, and the reader
+observes at most 512 inert image nodes while staging no more than 48 distinct
+image URLs at once. The panel shows cache usage and provides separate
+controls for clearing guide bodies or images; clearing images also invalidates
+in-flight frontend work, and neither control deletes saved reading positions.
 
 `positions.json` is private to GRIP's single backend process. Backend RPC calls
 are serialized before entering the file store, so their arrival order is not

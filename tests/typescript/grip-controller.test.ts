@@ -22,6 +22,7 @@ const GUIDE_KEY = `${APP_ID}:${GUIDE_ID}`;
 
 class FakeRuntime implements SteamGuideRuntime {
   readonly identity = {};
+  appId = APP_ID;
   location: SteamLocation = {
     pathname: `/app/${APP_ID}/overlay/guides`,
     key: "route-key",
@@ -62,10 +63,10 @@ class FakeRuntime implements SteamGuideRuntime {
 
   getActiveGuide(): GuideIdentity | null {
     return this.selectedGuideId &&
-      new RegExp(`^/app/${APP_ID}/overlay/guides/?$`).test(
+      new RegExp(`^/app/${this.appId}/overlay/guides/?$`).test(
         this.location.pathname,
       )
-      ? { appId: APP_ID, guideId: this.selectedGuideId }
+      ? { appId: this.appId, guideId: this.selectedGuideId }
       : null;
   }
 
@@ -138,11 +139,22 @@ class FakeRuntime implements SteamGuideRuntime {
   }
 
   selectGuide(guideId: string | null): void {
-    const selection = { appId: APP_ID, guideId };
+    const selection = { appId: this.appId, guideId };
     for (const listener of this.selectionListeners) {
       listener(selection);
     }
     this.selectedGuideId = guideId;
+  }
+
+  switchApp(appId: string): void {
+    this.selectedGuideId = null;
+    this.appId = appId;
+    this.location = {
+      pathname: `/app/${appId}/overlay/guides`,
+      key: `route-${appId}`,
+      state: {},
+    };
+    this.emitHistory();
   }
 
   emitHistory(): void {
@@ -243,6 +255,151 @@ describe("GRIP controller", () => {
 
     harness.controller.stop();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("retains each app's runtime guide while switching games", async () => {
+    const secondAppId = "222";
+    const secondGuideId = "2002";
+    const harness = makeHarness({});
+    await harness.controller.start();
+
+    harness.runtime.selectGuide(GUIDE_ID);
+    await vi.advanceTimersByTimeAsync(0);
+    harness.runtime.switchApp(secondAppId);
+    harness.runtime.selectGuide(secondGuideId);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(harness.status.getRecentGuide(APP_ID)).toEqual({
+      appId: APP_ID,
+      guideId: GUIDE_ID,
+    });
+    expect(harness.status.getRecentGuide(secondAppId)).toEqual({
+      appId: secondAppId,
+      guideId: secondGuideId,
+    });
+
+    harness.runtime.switchApp(APP_ID);
+    expect(harness.status.getSnapshot().activeGuide).toBeNull();
+    expect(harness.status.getRecentGuide(APP_ID)).toEqual({
+      appId: APP_ID,
+      guideId: GUIDE_ID,
+    });
+    harness.controller.stop();
+  });
+
+  it("keeps watching when positions fail and can retry them later", async () => {
+    const failure = new Error("positions.json is malformed");
+    const harness = makeHarness({});
+    vi.mocked(harness.backend.getPositions)
+      .mockRejectedValueOnce(failure)
+      .mockResolvedValueOnce({
+        [GUIDE_KEY]: { scrollTop: 1_200, updatedAt: 900_000 },
+      });
+
+    await expect(harness.controller.start()).resolves.toBeUndefined();
+    expect(harness.runtime.listenerCount()).toBeGreaterThan(0);
+    expect(harness.status.getSnapshot()).toMatchObject({
+      phase: "watching",
+      positionWarning:
+        "阅读位置加载失败，GRIP 已继续运行：positions.json is malformed",
+      savedCount: 0,
+    });
+
+    await expect(harness.controller.retryPositions()).resolves.toBe(true);
+    expect(harness.backend.getPositions).toHaveBeenCalledTimes(2);
+    expect(harness.status.getSnapshot()).toMatchObject({
+      positionWarning: null,
+      savedCount: 1,
+    });
+    expect(harness.status.getRecentGuide(APP_ID)).toEqual({
+      appId: APP_ID,
+      guideId: GUIDE_ID,
+    });
+    harness.controller.stop();
+  });
+
+  it("preserves the newer in-memory bookmark during an ordinary retry", async () => {
+    const harness = makeHarness({
+      [GUIDE_KEY]: { scrollTop: 1_200, updatedAt: 900_000 },
+    });
+    await harness.controller.start();
+    harness.runtime.selectGuide(GUIDE_ID);
+    await vi.advanceTimersByTimeAsync(1_000);
+    harness.runtime.emitInteraction();
+    harness.runtime.scrollTop = 1_500;
+    harness.runtime.emitScroll();
+    vi.mocked(harness.backend.getPositions).mockResolvedValueOnce({
+      [GUIDE_KEY]: { scrollTop: 100, updatedAt: 1_000_500 },
+    });
+
+    await expect(harness.controller.retryPositions()).resolves.toBe(true);
+    harness.runtime.selectGuide(null);
+    await vi.advanceTimersByTimeAsync(0);
+    harness.runtime.scrollTop = 0;
+    harness.runtime.selectGuide(GUIDE_ID);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(harness.runtime.scrollTop).toBe(1_500);
+    harness.controller.stop();
+  });
+
+  it("drops old in-memory bookmarks when reloading after repair", async () => {
+    const harness = makeHarness({
+      [GUIDE_KEY]: { scrollTop: 1_200, updatedAt: 900_000 },
+    });
+    await harness.controller.start();
+    vi.mocked(harness.backend.getPositions).mockResolvedValueOnce({});
+
+    await expect(harness.controller.reloadPositionsAfterRepair()).resolves.toBe(
+      true,
+    );
+    harness.runtime.selectGuide(GUIDE_ID);
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(harness.runtime.scrollTop).toBe(0);
+    expect(harness.status.getSnapshot().savedCount).toBe(0);
+    harness.controller.stop();
+  });
+
+  it("ignores an old in-flight save after a repair reset", async () => {
+    let finishSave!: () => void;
+    const savePosition = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishSave = resolve;
+        }),
+    );
+    const runtime = new FakeRuntime();
+    const backend: GripBackend = {
+      getPositions: vi.fn().mockResolvedValue({}),
+      savePosition,
+    };
+    const status = new RuntimeStatusStore();
+    const controller = new GripController({
+      backend,
+      runtimeFactory: () => runtime,
+      status,
+    });
+    await controller.start();
+    runtime.selectGuide(GUIDE_ID);
+    await vi.advanceTimersByTimeAsync(0);
+    runtime.emitInteraction();
+    runtime.scrollTop = 333;
+    runtime.emitScroll();
+    await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS);
+    expect(savePosition).toHaveBeenCalledTimes(1);
+
+    await expect(controller.reloadPositionsAfterRepair()).resolves.toBe(true);
+    runtime.selectedGuideId = null;
+    finishSave();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(status.getSnapshot()).toMatchObject({
+      savedCount: 0,
+      lastCaptured: null,
+      lastRestored: null,
+    });
+    controller.stop();
   });
 
   it("does not persist Steam's temporary clamped value during restoration", async () => {
@@ -683,13 +840,20 @@ describe("GRIP controller", () => {
     harness.controller.stop();
   });
 
-  it("fails closed without attaching when the backend snapshot is invalid", async () => {
+  it("ignores an invalid snapshot but still attaches the runtime", async () => {
     const harness = makeHarness({
       [GUIDE_KEY]: { scrollTop: Number.NaN, updatedAt: 1 },
     });
     await harness.controller.start();
 
-    expect(harness.status.getSnapshot().phase).toBe("error");
+    expect(harness.status.getSnapshot()).toMatchObject({
+      phase: "watching",
+      savedCount: 0,
+    });
+    expect(harness.status.getSnapshot().positionWarning).toContain(
+      "阅读位置加载失败，GRIP 已继续运行",
+    );
+    expect(harness.runtime.listenerCount()).toBeGreaterThan(0);
     harness.runtime.selectGuide(GUIDE_ID);
     await vi.advanceTimersByTimeAsync(1_000);
     expect(harness.backend.savePosition).not.toHaveBeenCalled();

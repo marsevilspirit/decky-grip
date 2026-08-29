@@ -26,8 +26,9 @@ class L4HotkeyMonitorTests(unittest.TestCase):
         presses = []
         now = [10.0]
         monitor = L4HotkeyMonitor(
-            lambda: presses.append("L4"),
+            lambda detected_at_ms: presses.append(detected_at_ms),
             clock=lambda: now[0],
+            wall_clock_ms=lambda: 1_234,
         )
 
         self.assertFalse(monitor.process_report(report(l4=False)))
@@ -37,14 +38,15 @@ class L4HotkeyMonitorTests(unittest.TestCase):
         now[0] += 1
         self.assertTrue(monitor.process_report(report(l4=True)))
 
-        self.assertEqual(presses, ["L4", "L4"])
+        self.assertEqual(presses, [1_234, 1_234])
 
     def test_ignores_an_initially_held_button_and_debounces_reconnect_noise(self):
         presses = []
         now = [20.0]
         monitor = L4HotkeyMonitor(
-            lambda: presses.append("L4"),
+            lambda detected_at_ms: presses.append(detected_at_ms),
             clock=lambda: now[0],
+            wall_clock_ms=lambda: 5_678,
         )
 
         self.assertFalse(monitor.process_report(report(l4=True)))
@@ -54,15 +56,20 @@ class L4HotkeyMonitorTests(unittest.TestCase):
         now[0] += 0.1
         self.assertFalse(monitor.process_report(report(l4=True)))
 
-        self.assertEqual(presses, ["L4"])
+        self.assertEqual(presses, [5_678])
 
     def test_rejects_short_reports(self):
-        monitor = L4HotkeyMonitor(lambda: self.fail("unexpected hotkey"))
+        monitor = L4HotkeyMonitor(
+            lambda _detected_at_ms: self.fail("unexpected hotkey")
+        )
         self.assertFalse(monitor.process_report(b"short"))
 
     def test_rejects_other_64_byte_report_types(self):
         presses = []
-        monitor = L4HotkeyMonitor(lambda: presses.append("L4"))
+        monitor = L4HotkeyMonitor(
+            lambda detected_at_ms: presses.append(detected_at_ms),
+            wall_clock_ms=lambda: 1,
+        )
         invalid = bytearray(report(l4=True))
         invalid[2] = 8
 
@@ -72,7 +79,10 @@ class L4HotkeyMonitorTests(unittest.TestCase):
 
     def test_ignores_neighboring_grip_buttons_and_only_emits_l4(self):
         presses = []
-        monitor = L4HotkeyMonitor(lambda: presses.append("L4"))
+        monitor = L4HotkeyMonitor(
+            lambda detected_at_ms: presses.append(detected_at_ms),
+            wall_clock_ms=lambda: 1,
+        )
         idle = bytearray(report(l4=False))
         r5 = bytearray(idle)
         r5[10] = 1
@@ -83,7 +93,7 @@ class L4HotkeyMonitorTests(unittest.TestCase):
         self.assertFalse(monitor.process_report(bytes(r5)))
         self.assertFalse(monitor.process_report(bytes(r4)))
         self.assertTrue(monitor.process_report(report(l4=True)))
-        self.assertEqual(presses, ["L4"])
+        self.assertEqual(presses, [1])
 
     def test_treats_an_empty_read_as_a_disconnect(self):
         with mock.patch("grip_hotkey.os.read", return_value=b""):
@@ -105,7 +115,7 @@ class L4HotkeyMonitorTests(unittest.TestCase):
                 encoding="utf-8",
             )
             monitor = L4HotkeyMonitor(
-                lambda: None,
+                lambda _detected_at_ms: None,
                 device_root=device_root,
                 sysfs_root=sysfs_root,
             )
@@ -128,7 +138,7 @@ class L4HotkeyMonitorTests(unittest.TestCase):
             other_fd.touch()
             self_fd.touch()
             monitor = L4HotkeyMonitor(
-                lambda: None,
+                lambda _detected_at_ms: None,
                 proc_root=root / "proc",
             )
             char_device = SimpleNamespace(
@@ -150,7 +160,7 @@ class L4HotkeyMonitorTests(unittest.TestCase):
                 self.assertFalse(monitor._other_process_has_device_open(device))
 
     def test_peer_scan_fails_closed_and_connect_rechecks_after_open(self):
-        monitor = L4HotkeyMonitor(lambda: None)
+        monitor = L4HotkeyMonitor(lambda _detected_at_ms: None)
         device = Path("/dev/hidraw2")
 
         with mock.patch("grip_hotkey.os.stat", side_effect=PermissionError):

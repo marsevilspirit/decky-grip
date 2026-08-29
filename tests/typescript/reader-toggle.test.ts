@@ -48,6 +48,30 @@ describe("L4 reader hotkey", () => {
     expect(closeReader).toHaveBeenCalledOnce();
   });
 
+  it("passes the instrumented physical detection event only to an open", async () => {
+    let path = "/apprunning";
+    const openReader = vi.fn(async () => {
+      path = "/decky-grip/reader/1113000/3414883877";
+    });
+    const event = {
+      version: 1 as const,
+      button: "L4" as const,
+      sequence: 12,
+      detectedAtUnixMs: 123_456,
+    };
+    const toggle = new ReaderHotkeyToggle({
+      currentPath: () => path,
+      gameIsRunning: () => true,
+      openReader,
+      closeReader: vi.fn(),
+      onError: vi.fn(),
+    });
+
+    await expect(toggle.trigger(event)).resolves.toBe("opened");
+    await expect(toggle.trigger(event)).resolves.toBe("closed");
+    expect(openReader).toHaveBeenCalledExactlyOnceWith(event);
+  });
+
   it("ignores presses outside a game and suppresses overlapping opens", async () => {
     let resolveOpen: (() => void) | undefined;
     const openReader = vi.fn(
