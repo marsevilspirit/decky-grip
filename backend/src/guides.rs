@@ -3,16 +3,15 @@ use crate::guide_html::{
     localize_guide_images, parse_guide_html, sanitize_fragment_with_stats,
     source_url as guide_source_url, valid_guide_id,
 };
+use crate::{FileSignature, create_temp, make_private, signature, sync_directory};
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
-use std::fs::{self, File, Metadata, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::fd::AsRawFd;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
@@ -25,7 +24,6 @@ pub const CACHE_MAX_AGE_MS: u64 = 6 * 60 * 60 * 1_000;
 const CACHE_SCHEMA_VERSION: u64 = 1;
 const MAX_FUTURE_TIMESTAMP_MS: u64 = 24 * 60 * 60 * 1_000;
 const MAX_REDIRECTS: usize = 10;
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 type Fetcher = dyn Fn(&str, Duration, usize) -> Result<Vec<u8>, GuideError> + Send + Sync;
 type Clock = dyn Fn() -> u64 + Send + Sync;
@@ -42,7 +40,6 @@ pub enum GuideErrorKind {
 pub struct GuideError {
     kind: GuideErrorKind,
     message: String,
-    source: Option<Box<dyn Error + Send + Sync>>,
 }
 
 impl GuideError {
@@ -50,19 +47,6 @@ impl GuideError {
         Self {
             kind,
             message: message.into(),
-            source: None,
-        }
-    }
-
-    fn with_source(
-        kind: GuideErrorKind,
-        message: impl Into<String>,
-        source: impl Error + Send + Sync + 'static,
-    ) -> Self {
-        Self {
-            kind,
-            message: message.into(),
-            source: Some(Box::new(source)),
         }
     }
 
@@ -82,19 +66,12 @@ impl GuideError {
         Self::new(GuideErrorKind::Validation, message)
     }
 
-    fn parse(source: impl Error + Send + Sync + 'static) -> Self {
-        Self::with_source(GuideErrorKind::Parse, source.to_string(), source)
+    fn parse(source: impl Error) -> Self {
+        Self::new(GuideErrorKind::Parse, source.to_string())
     }
 
     fn cache(message: impl Into<String>) -> Self {
         Self::new(GuideErrorKind::Cache, message)
-    }
-
-    fn cache_with_source(
-        message: impl Into<String>,
-        source: impl Error + Send + Sync + 'static,
-    ) -> Self {
-        Self::with_source(GuideErrorKind::Cache, message, source)
     }
 }
 
@@ -104,38 +81,7 @@ impl fmt::Display for GuideError {
     }
 }
 
-impl Error for GuideError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        self.source
-            .as_deref()
-            .map(|source| source as &(dyn Error + 'static))
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct FileSignature {
-    device: u64,
-    inode: u64,
-    size: u64,
-    modified_seconds: i64,
-    modified_nanoseconds: i64,
-    changed_seconds: i64,
-    changed_nanoseconds: i64,
-}
-
-impl FileSignature {
-    fn of(metadata: &Metadata) -> Self {
-        Self {
-            device: metadata.dev(),
-            inode: metadata.ino(),
-            size: metadata.len(),
-            modified_seconds: metadata.mtime(),
-            modified_nanoseconds: metadata.mtime_nsec(),
-            changed_seconds: metadata.ctime(),
-            changed_nanoseconds: metadata.ctime_nsec(),
-        }
-    }
-}
+impl Error for GuideError {}
 
 #[derive(Clone)]
 struct MemoEntry {
@@ -208,11 +154,6 @@ impl GuideReader {
         }
     }
 
-    pub fn source_url(guide_id: &str) -> Result<String, GuideError> {
-        validate_guide_id(guide_id)?;
-        Ok(guide_source_url(guide_id))
-    }
-
     pub fn get(&self, guide_id: &str, force_refresh: bool) -> Result<Value, GuideError> {
         validate_guide_id(guide_id)?;
         let guide_lock = self.guide_locks.retain(guide_id);
@@ -247,9 +188,8 @@ impl GuideReader {
         let mut bytes_removed = 0_u64;
         if let Some(entries) = read_cache_directory(&self.cache_directory)? {
             for entry in entries {
-                let entry = entry.map_err(|error| {
-                    GuideError::cache_with_source("guide cache could not be inspected", error)
-                })?;
+                let entry =
+                    entry.map_err(|_| GuideError::cache("guide cache could not be inspected"))?;
                 let name = entry.file_name();
                 let Some(name) = name.to_str() else {
                     continue;
@@ -266,9 +206,7 @@ impl GuideReader {
                 } else {
                     fs::remove_file(entry.path())
                 };
-                result.map_err(|error| {
-                    GuideError::cache_with_source("guide cache could not be cleared", error)
-                })?;
+                result.map_err(|_| GuideError::cache("guide cache could not be cleared"))?;
                 files_removed += 1;
                 if metadata.is_file() {
                     bytes_removed = bytes_removed.saturating_add(metadata.len());
@@ -356,13 +294,8 @@ impl GuideReader {
                 "Steam returned an invalid response body",
             ));
         }
-        let source = std::str::from_utf8(&body).map_err(|error| {
-            GuideError::with_source(
-                GuideErrorKind::Download,
-                "Steam returned guide HTML that was not UTF-8",
-                error,
-            )
-        })?;
+        let source = std::str::from_utf8(&body)
+            .map_err(|_| GuideError::download("Steam returned guide HTML that was not UTF-8"))?;
         let mut document = parse_guide_html(guide_id, source).map_err(GuideError::parse)?;
         let object = document
             .as_object_mut()
@@ -408,9 +341,9 @@ impl GuideReader {
                 ));
             }
             let parsed: Value =
-                serde_json::from_slice(payload.as_ref().unwrap()).map_err(|error| {
+                serde_json::from_slice(payload.as_ref().unwrap()).map_err(|_| {
                     lock(&self.memo).remove(guide_id);
-                    GuideError::cache_with_source("cached guide could not be read", error)
+                    GuideError::cache("cached guide could not be read")
                 })?;
             let document = match self.validate_cached_document(guide_id, &parsed) {
                 Ok(document) => document,
@@ -518,9 +451,8 @@ impl GuideReader {
                 .and_then(Value::as_str)
                 .filter(|fragment| fragment.len() <= MAX_DOWNLOAD_BYTES)
                 .ok_or_else(|| GuideError::cache("cached guide contains invalid section HTML"))?;
-            let (sanitized, stats) = sanitize_fragment_with_stats(fragment).map_err(|error| {
-                GuideError::cache_with_source("cached guide exceeds the HTML parsing budget", error)
-            })?;
+            let (sanitized, stats) = sanitize_fragment_with_stats(fragment)
+                .map_err(|_| GuideError::cache("cached guide exceeds the HTML parsing budget"))?;
             total_nodes = total_nodes.saturating_add(stats.nodes);
             total_text_chars = total_text_chars.saturating_add(stats.text_chars);
             total_html_bytes = total_html_bytes.saturating_add(stats.output_bytes);
@@ -567,22 +499,18 @@ impl GuideReader {
     }
 
     fn write_cache_unlocked(&self, document: &Value) -> Result<(), GuideError> {
-        let mut payload = serde_json::to_vec(document).map_err(|error| {
-            GuideError::cache_with_source("cached guide could not be encoded", error)
-        })?;
+        let mut payload = serde_json::to_vec(document)
+            .map_err(|_| GuideError::cache("cached guide could not be encoded"))?;
         payload.push(b'\n');
         if payload.len() as u64 > MAX_CACHE_BYTES {
             return Err(GuideError::cache(
                 "cached guide would exceed the size limit",
             ));
         }
-        fs::create_dir_all(&self.cache_directory).map_err(|error| {
-            GuideError::cache_with_source("could not create a guide cache file", error)
-        })?;
-        let (mut temporary, temporary_path) =
-            create_temp(&self.cache_directory).map_err(|error| {
-                GuideError::cache_with_source("could not create a guide cache file", error)
-            })?;
+        fs::create_dir_all(&self.cache_directory)
+            .map_err(|_| GuideError::cache("could not create a guide cache file"))?;
+        let (mut temporary, temporary_path) = create_temp(&self.cache_directory, ".guide-", ".tmp")
+            .map_err(|_| GuideError::cache("could not create a guide cache file"))?;
         let cache_path = self.cache_path(
             document["guideId"]
                 .as_str()
@@ -595,25 +523,21 @@ impl GuideReader {
             drop(temporary);
             fs::rename(&temporary_path, &cache_path)
         })();
-        if let Err(error) = replace_result {
+        if replace_result.is_err() {
             let _ = fs::remove_file(&temporary_path);
-            return Err(GuideError::cache_with_source(
+            return Err(GuideError::cache(
                 "could not atomically replace guide cache",
-                error,
             ));
         }
-        sync_directory(&self.cache_directory).map_err(|error| {
-            GuideError::cache_with_source(
-                "guide cache was replaced but its directory could not be synced",
-                error,
-            )
+        sync_directory(&self.cache_directory).map_err(|_| {
+            GuideError::cache("guide cache was replaced but its directory could not be synced")
         })?;
         match fs::symlink_metadata(&cache_path) {
             Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_CACHE_BYTES => {
                 lock(&self.memo).insert(
                     document["guideId"].as_str().unwrap().to_owned(),
                     MemoEntry {
-                        signature: FileSignature::of(&metadata),
+                        signature: signature(&metadata),
                         document: document.clone(),
                     },
                 );
@@ -713,10 +637,7 @@ fn read_cache_directory(path: &Path) -> Result<Option<fs::ReadDir>, GuideError> 
         {
             Ok(None)
         }
-        Err(error) => Err(GuideError::cache_with_source(
-            "guide cache could not be inspected",
-            error,
-        )),
+        Err(_) => Err(GuideError::cache("guide cache could not be inspected")),
     }
 }
 
@@ -743,7 +664,7 @@ fn read_bounded_regular_file(
     if initial.len() > max_bytes {
         return Err(CacheReadError::TooLarge);
     }
-    let initial_signature = FileSignature::of(&initial);
+    let initial_signature = signature(&initial);
     let payload = if known_signature == Some(initial_signature) {
         None
     } else {
@@ -758,7 +679,7 @@ fn read_bounded_regular_file(
         Some(payload)
     };
     let final_metadata = file.metadata().map_err(|_| CacheReadError::Unsafe)?;
-    let final_signature = FileSignature::of(&final_metadata);
+    let final_signature = signature(&final_metadata);
     if !final_metadata.is_file()
         || final_signature != initial_signature
         || payload
@@ -774,54 +695,10 @@ fn read_bounded_regular_file(
             CacheReadError::Unsafe
         }
     })?;
-    if !path_metadata.is_file() || FileSignature::of(&path_metadata) != final_signature {
+    if !path_metadata.is_file() || signature(&path_metadata) != final_signature {
         return Err(CacheReadError::Changed);
     }
     Ok((payload, final_signature))
-}
-
-fn create_temp(parent: &Path) -> io::Result<(File, PathBuf)> {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let mut last_error = None;
-    for _ in 0..128 {
-        let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = parent.join(format!(
-            ".guide-{}-{nonce:x}-{counter:x}.tmp",
-            std::process::id()
-        ));
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-        {
-            Ok(file) => return Ok((file, path)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                last_error = Some(error);
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Err(last_error.unwrap_or_else(|| io::Error::other("could not create temporary file")))
-}
-
-fn make_private(file: &File) -> io::Result<()> {
-    if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
-}
-
-fn sync_directory(path: &Path) -> io::Result<()> {
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
-        .open(path)?
-        .sync_all()
 }
 
 fn system_now_ms() -> u64 {
@@ -868,13 +745,7 @@ fn download(url: &str, timeout: Duration, max_bytes: usize) -> Result<Vec<u8>, G
             .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.5")
             .header("User-Agent", "GRIP/1.0 Steam-Deck local guide reader")
             .call()
-            .map_err(|error| {
-                GuideError::with_source(
-                    GuideErrorKind::Download,
-                    "Could not download the Steam guide",
-                    error,
-                )
-            })?;
+            .map_err(|_| GuideError::download("Could not download the Steam guide"))?;
         if redirect_status(response.status().as_u16()) {
             if redirects == MAX_REDIRECTS {
                 return Err(GuideError::download("Could not download the Steam guide"));
@@ -928,7 +799,7 @@ fn download(url: &str, timeout: Duration, max_bytes: usize) -> Result<Vec<u8>, G
                 } else {
                     "Could not download the Steam guide"
                 };
-                GuideError::with_source(GuideErrorKind::Download, message, error)
+                GuideError::download(message)
             })?;
         if body.len() > max_bytes {
             return Err(GuideError::download(

@@ -55,16 +55,16 @@ Requirements follow the current official Decky template:
 - Rust 1.85 or newer
 
 ```bash
-just install
-just check
+pnpm install
+pnpm run check
 ```
 
 Individual checks are also available:
 
 ```bash
-just typecheck
-just test
-just build
+pnpm run typecheck
+pnpm run test
+pnpm run build
 ```
 
 The frontend bundle is written to `dist/index.js`. Decky's custom-backend build

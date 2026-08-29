@@ -8,7 +8,6 @@ export interface GripMainWindow extends FocusWindow {
     replace?: boolean,
     skipIfRouteMatches?: boolean,
   ) => void;
-  NavigateBack?: () => void;
   NavigateToRunningApp?: (replace?: boolean) => void;
 }
 
@@ -32,16 +31,6 @@ export function navigateMainWindow(
     throw new Error("找不到 Steam 主界面窗口");
   }
   mainWindow.Navigate(path, replace);
-  closeSideMenus(mainWindow);
-}
-
-export function navigateBackMainWindow(
-  mainWindow: GripMainWindow | null,
-): void {
-  if (!mainWindow?.NavigateBack) {
-    throw new Error("找不到 Steam 主界面窗口");
-  }
-  mainWindow.NavigateBack();
   closeSideMenus(mainWindow);
 }
 

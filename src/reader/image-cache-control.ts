@@ -1,18 +1,14 @@
 export interface ReaderImageCacheControlSnapshot {
-  clearing: boolean;
-  generation: number;
   paused: boolean;
 }
 
 /**
  * Coordinates the panel's destructive image-cache action with an active
- * reader route. Pausing publishes synchronously so queued frontend work drops
- * its Blob results before the backend cache is cleared.
+ * reader route. Starting a clear publishes synchronously so queued frontend
+ * work drops its Blob results before the backend cache is cleared.
  */
 export class ReaderImageCacheControl {
   private snapshot: ReaderImageCacheControlSnapshot = {
-    clearing: false,
-    generation: 0,
     paused: false,
   };
   private activeClear: object | null = null;
@@ -25,25 +21,15 @@ export class ReaderImageCacheControl {
     return () => this.listeners.delete(listener);
   };
 
-  pause(): void {
-    this.snapshot = {
-      ...this.snapshot,
-      generation: this.snapshot.generation + 1,
-      paused: true,
-    };
-    this.publish();
-  }
-
-  resume(): boolean {
+  resume(): void {
     if (this.activeClear) {
-      return false;
+      return;
     }
     if (!this.snapshot.paused) {
-      return true;
+      return;
     }
-    this.snapshot = { ...this.snapshot, paused: false };
+    this.snapshot = { paused: false };
     this.publish();
-    return true;
   }
 
   beginClear(): object {
@@ -52,11 +38,7 @@ export class ReaderImageCacheControl {
     }
     const token = {};
     this.activeClear = token;
-    this.snapshot = {
-      clearing: true,
-      generation: this.snapshot.generation + 1,
-      paused: true,
-    };
+    this.snapshot = { paused: true };
     this.publish();
     return token;
   }
@@ -66,11 +48,7 @@ export class ReaderImageCacheControl {
       return;
     }
     this.activeClear = null;
-    this.snapshot = {
-      ...this.snapshot,
-      clearing: false,
-      paused: keepPaused,
-    };
+    this.snapshot = { paused: keepPaused };
     this.publish();
   }
 

@@ -9,23 +9,13 @@ try {
     recursive: true,
   });
 
-  const configurations = Array.isArray(config) ? config : [config];
+  const { output, watch: _watch, ...inputOptions } = config;
+  const bundle = await rollup(inputOptions);
 
-  for (const configuration of configurations) {
-    const { output, watch: _watch, ...inputOptions } = configuration;
-    const outputs = Array.isArray(output) ? output : [output];
-    const bundle = await rollup(inputOptions);
-
-    try {
-      for (const outputOptions of outputs) {
-        if (!outputOptions) {
-          throw new Error("Rollup configuration is missing output options");
-        }
-        await bundle.write(outputOptions);
-      }
-    } finally {
-      await bundle.close();
-    }
+  try {
+    await bundle.write(output);
+  } finally {
+    await bundle.close();
   }
 
   // Some Decky Rollup plugin versions retain background handles after a

@@ -1,5 +1,5 @@
 import { ButtonItem, PanelSection, PanelSectionRow } from "@decky/ui";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 
 import {
   getHotkeyStatus,
@@ -51,7 +51,10 @@ export function GripPanel({
   getCacheStats,
   repairPositions,
 }: GripPanelProps) {
-  const [status, setStatus] = useState(statusStore.getSnapshot);
+  const status = useSyncExternalStore(
+    statusStore.subscribe,
+    statusStore.getSnapshot,
+  );
   const [readerBusy, setReaderBusy] = useState(false);
   const [readerError, setReaderError] = useState<string | null>(null);
   const [hotkeyStatus, setHotkeyStatus] = useState<HotkeyStatus | null>(null);
@@ -59,21 +62,10 @@ export function GripPanel({
   const [cacheBusy, setCacheBusy] = useState(false);
   const [cacheMessage, setCacheMessage] = useState<string | null>(null);
   const [cacheStats, setCacheStats] = useState<ReaderCacheStats | null>(null);
-  const [performanceSnapshot, setPerformanceSnapshot] = useState(
+  const performanceSnapshot = useSyncExternalStore(
+    performance.subscribe,
     performance.getSnapshot,
   );
-
-  useEffect(() => {
-    setStatus(statusStore.getSnapshot());
-    return statusStore.subscribe(() => setStatus(statusStore.getSnapshot()));
-  }, [statusStore]);
-
-  useEffect(() => {
-    setPerformanceSnapshot(performance.getSnapshot());
-    return performance.subscribe(() =>
-      setPerformanceSnapshot(performance.getSnapshot()),
-    );
-  }, [performance]);
 
   useEffect(() => {
     let canceled = false;

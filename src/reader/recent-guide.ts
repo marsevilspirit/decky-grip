@@ -1,9 +1,4 @@
-import type { PositionSnapshots } from "../backend";
-import {
-  makeGuideKey,
-  splitGuideKey,
-  type GuideIdentity,
-} from "../steam/guide-key";
+import { makeGuideKey, type GuideIdentity } from "../steam/guide-key";
 
 export interface RecentGuideSeed {
   identity: GuideIdentity;
@@ -82,21 +77,4 @@ export function chooseObservedGuide(
         (runningAppId === undefined || identity.appId === runningAppId),
     ) ?? null
   );
-}
-
-export function findMostRecentGuide(
-  positions: PositionSnapshots,
-  preferredAppId?: string,
-): GuideIdentity | null {
-  const entries = Object.entries(positions)
-    .map(([guideKey, position]) => ({
-      identity: splitGuideKey(guideKey),
-      updatedAt: position.updatedAt,
-    }))
-    .filter(
-      ({ identity }) =>
-        preferredAppId === undefined || identity.appId === preferredAppId,
-    )
-    .sort((left, right) => right.updatedAt - left.updatedAt);
-  return entries[0]?.identity ?? null;
 }

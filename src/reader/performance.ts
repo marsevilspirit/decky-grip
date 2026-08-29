@@ -135,6 +135,7 @@ export class ReaderPerformanceTracker {
   private readonly traceByGuide = new Map<string, object>();
   private readonly attempts: ReaderPerformanceAttempt[] = [];
   private readonly listeners = new Set<() => void>();
+  private snapshot: ReaderPerformanceSnapshot | null = null;
 
   constructor(private readonly clock: () => number = Date.now) {}
 
@@ -144,6 +145,9 @@ export class ReaderPerformanceTracker {
   };
 
   readonly getSnapshot = (): ReaderPerformanceSnapshot => {
+    if (this.snapshot) {
+      return this.snapshot;
+    }
     const samples = this.attempts.flatMap((attempt) =>
       attempt.kind === "success" ? [attempt.sample] : [],
     );
@@ -173,7 +177,7 @@ export class ReaderPerformanceTracker {
           ? "pass"
           : "fail";
     }
-    return {
+    this.snapshot = {
       latest: samples[samples.length - 1] ?? null,
       latestFailure: failures[failures.length - 1] ?? null,
       warmAttempts,
@@ -186,6 +190,7 @@ export class ReaderPerformanceTracker {
       minimumSamples: WARM_GATE_MIN_SAMPLES,
       gate,
     };
+    return this.snapshot;
   };
 
   begin(event: InstrumentedHotkeyPress): ReaderPerformanceTrace {
@@ -407,6 +412,7 @@ export class ReaderPerformanceTracker {
   }
 
   private publish(): void {
+    this.snapshot = null;
     for (const listener of this.listeners) {
       listener();
     }

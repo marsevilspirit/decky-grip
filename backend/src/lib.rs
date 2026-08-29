@@ -164,11 +164,6 @@ impl PositionStore {
         }
     }
 
-    fn get(&self, guide_key: &str) -> Result<Option<Position>, StoreError> {
-        validate_guide_key(guide_key)?;
-        Ok(self.read_document()?.positions.get(guide_key).cloned())
-    }
-
     fn snapshot(&self) -> Result<Value, StoreError> {
         Ok(Value::Object(self.read_document()?.positions_value()))
     }
@@ -193,29 +188,6 @@ impl PositionStore {
         }
         self.write_atomic(&document)?;
         Ok(position)
-    }
-
-    fn delete(&self, guide_key: &str) -> Result<bool, StoreError> {
-        validate_guide_key(guide_key)?;
-        let mut document = self.read_document()?;
-        if document.positions.remove(guide_key).is_none() {
-            return Ok(false);
-        }
-        self.write_atomic(&document)?;
-        Ok(true)
-    }
-
-    fn clear(&self) -> Result<usize, StoreError> {
-        let document = self.read_document()?;
-        let count = document.positions.len();
-        if count != 0 {
-            self.write_atomic(&Document::default())?;
-        }
-        Ok(count)
-    }
-
-    fn count(&self) -> Result<usize, StoreError> {
-        Ok(self.read_document()?.positions.len())
     }
 
     fn repair(&self) -> Result<Value, StoreError> {
@@ -274,7 +246,7 @@ enum ReadError {
     Unsafe,
 }
 
-#[derive(PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FileSignature {
     device: u64,
     inode: u64,
@@ -555,15 +527,6 @@ fn dispatch(
     params: Option<&Value>,
 ) -> Result<Value, StoreError> {
     match method {
-        "ping" => {
-            empty_params(params)?;
-            Ok(protocol_info())
-        }
-        "positions.get" => Ok(store
-            .get(guide_key_param(params)?)?
-            .as_ref()
-            .map(position_value)
-            .unwrap_or(Value::Null)),
         "positions.snapshot" => {
             empty_params(params)?;
             store.snapshot()
@@ -579,15 +542,6 @@ fn dispatch(
                     ))?;
             let scroll_top = object.get("scroll_top").expect("scroll_top was checked");
             Ok(position_value(&store.save(guide_key, scroll_top)?))
-        }
-        "positions.delete" => Ok(Value::Bool(store.delete(guide_key_param(params)?)?)),
-        "positions.clear" => {
-            empty_params(params)?;
-            Ok(json!(store.clear()?))
-        }
-        "positions.count" => {
-            empty_params(params)?;
-            Ok(json!(store.count()?))
         }
         "positions.repair" => {
             empty_params(params)?;
@@ -631,67 +585,24 @@ fn dispatch(
 }
 
 #[cfg(test)]
-fn response_for_line(
-    store: &PositionStore,
-    reader_store: &ReaderPositionStore,
-    line: &[u8],
-) -> Value {
-    let request: Value = match serde_json::from_slice(line) {
-        Ok(request) => request,
-        Err(_) => {
-            return json!({
-                "error": {"kind": "protocol", "message": "request is not valid JSON"},
-                "id": null,
-                "ok": false,
-            });
-        }
-    };
-    let id = request
-        .as_object()
-        .and_then(|object| object.get("id"))
-        .cloned()
-        .unwrap_or(Value::Null);
-    let result = request_fields(&request)
-        .and_then(|(method, params)| dispatch(store, reader_store, method, params));
-    match result {
-        Ok(result) => json!({"id": id, "ok": true, "result": result}),
-        Err(error) => {
-            let (kind, message) = match error {
-                StoreError::Validation(message) => ("validation", message),
-                StoreError::Storage(message) => ("storage", message),
-                StoreError::Durability(message) => ("durability", message),
-                StoreError::Protocol(message) => ("protocol", message),
-            };
-            json!({"error": {"kind": kind, "message": message}, "id": id, "ok": false})
-        }
-    }
-}
+mod test_support {
+    use super::{Ordering, PathBuf, TEMP_COUNTER, fs};
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::{PermissionsExt, symlink};
-    use std::sync::mpsc;
-    use std::thread;
-    use std::time::Duration;
-
-    struct TestDirectory(PathBuf);
+    pub(crate) struct TestDirectory(pub(crate) PathBuf, &'static str);
 
     impl TestDirectory {
-        fn new() -> Self {
+        pub(crate) fn new(filename: &'static str) -> Self {
             let path = std::env::temp_dir().join(format!(
                 "grip-sidecar-test-{}-{}",
                 std::process::id(),
                 TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir(&path).unwrap();
-            Self(path)
+            Self(path, filename)
         }
 
-        fn path(&self) -> PathBuf {
-            self.0.join("positions.json")
+        pub(crate) fn path(&self) -> PathBuf {
+            self.0.join(self.1)
         }
     }
 
@@ -700,14 +611,26 @@ mod tests {
             let _ = fs::remove_dir_all(&self.0);
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::TestDirectory;
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn round_trip_matches_python_schema_and_permissions() {
-        let directory = TestDirectory::new();
+        let directory = TestDirectory::new("positions.json");
         let path = directory.path();
         let store = PositionStore::new(path.clone());
 
-        assert_eq!(store.get("1113000:3414883877").unwrap(), None);
+        assert_eq!(store.snapshot().unwrap(), json!({}));
         let saved = store
             .save("1113000:90071992547409931234", &json!(42.0))
             .unwrap();
@@ -723,14 +646,12 @@ mod tests {
             document["positions"]["1113000:90071992547409931234"]["scroll_top"],
             42.0
         );
-        assert!(store.delete("1113000:90071992547409931234").unwrap());
-        assert!(!store.delete("1113000:90071992547409931234").unwrap());
-        assert_eq!(store.clear().unwrap(), 0);
+        assert_eq!(store.snapshot().unwrap(), document["positions"]);
     }
 
     #[test]
     fn corruption_is_preserved_until_repair_backs_it_up() {
-        let directory = TestDirectory::new();
+        let directory = TestDirectory::new("positions.json");
         let path = directory.path();
         let original = b"{ definitely not json";
         fs::write(&path, original).unwrap();
@@ -746,12 +667,12 @@ mod tests {
             fs::metadata(&backup).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        assert_eq!(store.count().unwrap(), 0);
+        assert_eq!(store.snapshot().unwrap(), json!({}));
     }
 
     #[test]
     fn repair_leaves_missing_and_valid_stores_untouched() {
-        let directory = TestDirectory::new();
+        let directory = TestDirectory::new("positions.json");
         let missing_path = directory.0.join("missing/positions.json");
         let missing_store = PositionStore::new(missing_path.clone());
         assert_eq!(
@@ -777,7 +698,7 @@ mod tests {
 
     #[test]
     fn full_store_rejects_new_keys_without_blocking_overwrites() {
-        let directory = TestDirectory::new();
+        let directory = TestDirectory::new("positions.json");
         let path = directory.path();
         let store = PositionStore::new(path.clone());
         let mut document = Document::default();
@@ -801,32 +722,36 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), original);
 
         assert_eq!(store.save("1:1", &json!(999.0)).unwrap().scroll_top, 999.0);
-        assert_eq!(store.count().unwrap(), MAX_POSITIONS);
-        assert_eq!(store.get("1:1").unwrap().unwrap().scroll_top, 999.0);
+        assert_eq!(
+            store.read_document().unwrap().positions.len(),
+            MAX_POSITIONS
+        );
+        assert_eq!(store.snapshot().unwrap()["1:1"]["scroll_top"], 999.0);
     }
 
     #[test]
     fn unsafe_and_invalid_stores_are_rejected() {
-        let directory = TestDirectory::new();
+        let directory = TestDirectory::new("positions.json");
         let path = directory.path();
         let outside = directory.0.join("outside.json");
         fs::write(&outside, b"{\"positions\":{},\"schema_version\":1}").unwrap();
         symlink(&outside, &path).unwrap();
-        assert!(PositionStore::new(path.clone()).count().is_err());
+        assert!(PositionStore::new(path.clone()).snapshot().is_err());
         fs::remove_file(&path).unwrap();
 
         fs::write(&path, b"{\"positions\":{},\"schema_version\":1.0}").unwrap();
-        assert!(PositionStore::new(path).count().is_err());
+        assert!(PositionStore::new(path).snapshot().is_err());
     }
 
     #[test]
     fn fifo_store_is_rejected_without_blocking() {
-        let directory = TestDirectory::new();
+        let directory = TestDirectory::new("positions.json");
         let path = directory.path();
         let path_bytes = CString::new(path.as_os_str().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(path_bytes.as_ptr(), 0o600) }, 0);
         let (sender, receiver) = mpsc::channel();
-        let handle = thread::spawn(move || sender.send(PositionStore::new(path).count()).unwrap());
+        let handle =
+            thread::spawn(move || sender.send(PositionStore::new(path).snapshot()).unwrap());
 
         let error = receiver
             .recv_timeout(Duration::from_secs(1))
@@ -878,47 +803,14 @@ mod tests {
 
     #[test]
     fn oversized_store_is_rejected_before_parsing() {
-        let directory = TestDirectory::new();
+        let directory = TestDirectory::new("positions.json");
         let path = directory.path();
         fs::write(&path, vec![b' '; MAX_FILE_BYTES as usize + 1]).unwrap();
 
-        let error = PositionStore::new(path).count().unwrap_err();
+        let error = PositionStore::new(path).snapshot().unwrap_err();
         assert!(matches!(
             error,
             StoreError::Storage(message) if message.contains("larger than")
         ));
-    }
-
-    #[test]
-    fn protocol_classifies_validation_without_touching_the_store() {
-        let directory = TestDirectory::new();
-        let store = PositionStore::new(directory.path());
-        let reader_store = ReaderPositionStore::new(directory.0.join("reader_positions.json"));
-        let response = response_for_line(
-            &store,
-            &reader_store,
-            br#"{"id":7,"method":"positions.save","params":{"guide_key":"0:2","scroll_top":3}}"#,
-        );
-        assert_eq!(response["id"], 7);
-        assert_eq!(response["ok"], false);
-        assert_eq!(response["error"]["kind"], "validation");
-        assert!(!directory.path().exists());
-    }
-
-    #[test]
-    fn reader_protocol_requires_the_exact_save_parameters() {
-        let directory = TestDirectory::new();
-        let store = PositionStore::new(directory.path());
-        let reader_path = directory.0.join("reader_positions.json");
-        let reader_store = ReaderPositionStore::new(reader_path.clone());
-        let response = response_for_line(
-            &store,
-            &reader_store,
-            br#"{"id":8,"method":"reader_positions.save","params":{"guide_key":"1:2","scroll_top":3,"section_id":null,"anchor_text":null}}"#,
-        );
-        assert_eq!(response["id"], 8);
-        assert_eq!(response["ok"], false);
-        assert_eq!(response["error"]["kind"], "protocol");
-        assert!(!reader_path.exists());
     }
 }

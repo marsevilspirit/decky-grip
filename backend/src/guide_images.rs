@@ -37,14 +37,12 @@ type Fetcher = dyn Fn(&str, Duration, usize) -> Result<(String, Vec<u8>), ImageE
 pub enum ImageErrorKind {
     Validation,
     Download,
-    Cache,
 }
 
 #[derive(Debug)]
 pub struct ImageError {
     kind: ImageErrorKind,
     message: String,
-    source: Option<Box<dyn Error + Send + Sync>>,
 }
 
 impl ImageError {
@@ -52,19 +50,6 @@ impl ImageError {
         Self {
             kind,
             message: message.into(),
-            source: None,
-        }
-    }
-
-    fn with_source(
-        kind: ImageErrorKind,
-        message: impl Into<String>,
-        source: impl Error + Send + Sync + 'static,
-    ) -> Self {
-        Self {
-            kind,
-            message: message.into(),
-            source: Some(Box::new(source)),
         }
     }
 
@@ -74,13 +59,6 @@ impl ImageError {
 
     pub fn download(message: impl Into<String>) -> Self {
         Self::new(ImageErrorKind::Download, message)
-    }
-
-    fn download_with_source(
-        message: impl Into<String>,
-        source: impl Error + Send + Sync + 'static,
-    ) -> Self {
-        Self::with_source(ImageErrorKind::Download, message, source)
     }
 
     pub fn kind(&self) -> ImageErrorKind {
@@ -98,13 +76,7 @@ impl fmt::Display for ImageError {
     }
 }
 
-impl Error for ImageError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        self.source
-            .as_deref()
-            .map(|source| source as &(dyn Error + 'static))
-    }
-}
+impl Error for ImageError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ImageLimits {
@@ -304,7 +276,7 @@ impl GuideImageCache {
         Ok(Some(response(&downloaded, false)))
     }
 
-    pub fn clear(&self) -> Result<Value, ImageError> {
+    pub fn clear(&self) -> Value {
         {
             let mut state = lock(&self.state);
             state.generation = state.generation.wrapping_add(1);
@@ -329,10 +301,10 @@ impl GuideImageCache {
             state.clear_memory();
             state.clearing = false;
         }
-        Ok(json!({
+        json!({
             "bytesRemoved": bytes_removed,
             "filesRemoved": files_removed,
-        }))
+        })
     }
 
     pub fn stats(&self) -> Value {
@@ -934,9 +906,7 @@ fn download(
             .header("Accept-Encoding", "identity")
             .header("User-Agent", "GRIP/1.0 Steam-Deck local guide reader")
             .call()
-            .map_err(|error| {
-                ImageError::download_with_source("Could not download the Steam image", error)
-            })?;
+            .map_err(|_| ImageError::download("Could not download the Steam image"))?;
         if redirect_status(response.status().as_u16()) {
             if redirects == MAX_REDIRECTS {
                 return Err(ImageError::download("Could not download the Steam image"));
@@ -1012,7 +982,7 @@ fn download(
                 } else {
                     "Could not download the Steam image"
                 };
-                ImageError::download_with_source(message, error)
+                ImageError::download(message)
             })?;
         let image = validate_image(&mime_type, body, max_bytes)?;
         return Ok((image.mime_type, image.body));

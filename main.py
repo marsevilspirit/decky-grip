@@ -24,10 +24,6 @@ class Plugin:
             positions_path,
             decky.logger,
         )
-        self._store = self._sidecar.positions
-        self._reader_positions = self._sidecar.reader_positions
-        self._guide_reader = self._sidecar.guides
-        self._guide_images = self._sidecar.images
         self._io_lock = asyncio.Lock()
         self._preload_executor: Optional[concurrent.futures.ThreadPoolExecutor] = (
             concurrent.futures.ThreadPoolExecutor(
@@ -153,13 +149,10 @@ class Plugin:
         task.add_done_callback(self._report_emit_result)
 
     async def get_hotkey_status(self):
-        return await self._run_io(self._sidecar.hotkey_status)
-
-    async def get_position(self, guide_key: str):
-        return await self._run_io(self._store.get, guide_key)
+        return await self._run_io(self._sidecar.request, "hotkey.status", {})
 
     async def get_positions(self):
-        positions = await self._run_io(self._store.snapshot)
+        positions = await self._run_io(self._sidecar.request, "positions.snapshot", {})
         return {
             guide_key: {
                 "scrollTop": position["scroll_top"],
@@ -169,19 +162,20 @@ class Plugin:
         }
 
     async def save_position(self, guide_key: str, scroll_top: float):
-        return await self._run_io(self._store.save, guide_key, scroll_top)
-
-    async def delete_position(self, guide_key: str) -> bool:
-        return await self._run_io(self._store.delete, guide_key)
-
-    async def clear_positions(self) -> int:
-        return await self._run_io(self._store.clear)
-
-    async def get_position_count(self) -> int:
-        return await self._run_io(self._store.count)
+        return await self._run_io(
+            self._sidecar.request,
+            "positions.save",
+            {"guide_key": guide_key, "scroll_top": scroll_top},
+        )
 
     async def get_guide(self, guide_id: str, force_refresh: bool = False):
-        return await self._run_guide_io(self._guide_reader.get, guide_id, force_refresh)
+        request = functools.partial(
+            self._sidecar.request,
+            "guides.get",
+            {"guide_id": guide_id, "force_refresh": force_refresh},
+            timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
+        )
+        return await self._run_guide_io(request)
 
     async def get_cached_guide(self, guide_id: str):
         # Cache-only warming has its own single worker, so even a large cache
@@ -190,30 +184,41 @@ class Plugin:
         if executor is None:
             return None
         try:
+            request = functools.partial(
+                self._sidecar.request,
+                "guides.get_cached",
+                {"guide_id": guide_id},
+                timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
+            )
             return await self._run_executor_io(
-                self._guide_reader.get_cached,
-                guide_id,
+                request,
                 executor=executor,
             )
         except _ExecutorUnavailable:
             return None
 
     async def get_guide_image(self, url: str, allow_download: bool = True):
-        return await self._run_guide_io(self._guide_images.get, url, allow_download)
+        request = functools.partial(
+            self._sidecar.request,
+            "images.get",
+            {"url": url, "allow_download": allow_download},
+            timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
+        )
+        return await self._run_guide_io(request)
 
     async def clear_guide_cache(self):
-        return await self._run_guide_io(self._guide_reader.clear)
+        return await self._run_guide_io(self._sidecar.request, "guides.clear", {})
 
     async def clear_image_cache(self):
-        return await self._run_guide_io(self._guide_images.clear)
+        return await self._run_guide_io(self._sidecar.request, "images.clear", {})
 
     async def get_reader_cache_stats(self):
-        return await self._run_guide_io(self._sidecar.cache_stats)
+        return await self._run_guide_io(self._sidecar.request, "reader_cache.stats", {})
 
     def _repair_position_stores(self):
         return {
-            "positions": self._store.repair(),
-            "readerPositions": self._reader_positions.repair(),
+            "positions": self._sidecar.request("positions.repair", {}),
+            "readerPositions": self._sidecar.request("reader_positions.repair", {}),
         }
 
     async def repair_position_stores(self):
@@ -232,7 +237,11 @@ class Plugin:
         }
 
     async def get_reader_position(self, guide_key: str):
-        position = await self._run_io(self._reader_positions.get, guide_key)
+        position = await self._run_io(
+            self._sidecar.request,
+            "reader_positions.get",
+            {"guide_key": guide_key},
+        )
         return self._reader_position_for_frontend(position)
 
     async def save_reader_position(
@@ -244,11 +253,14 @@ class Plugin:
         anchor_offset: float,
     ):
         position = await self._run_io(
-            self._reader_positions.save,
-            guide_key,
-            scroll_top,
-            section_id,
-            anchor_text,
-            anchor_offset,
+            self._sidecar.request,
+            "reader_positions.save",
+            {
+                "guide_key": guide_key,
+                "scroll_top": scroll_top,
+                "section_id": section_id,
+                "anchor_text": anchor_text,
+                "anchor_offset": anchor_offset,
+            },
         )
         return self._reader_position_for_frontend(position)

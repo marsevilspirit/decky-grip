@@ -1,4 +1,7 @@
+mod common;
+
 use base64::Engine as _;
+use common::TestDirectory;
 use grip_sidecar::guide_images::{
     GuideImageCache, ImageError, ImageErrorKind, ImageLimits, canonical_image_url,
 };
@@ -8,36 +11,14 @@ use std::ffi::CString;
 use std::fs::{self, File, FileTimes};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
 const IMAGE_URL: &str = "https://images.steamusercontent.com/ugc/example/image.png";
 const IMAGE_DIGEST: &str = "8440b380c871e5f183b586ca0a652b6d7b17e155fe2c05990b9b4aaa1829b874";
-static DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-struct TestDirectory(PathBuf);
-
-impl TestDirectory {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "grip-image-integration-{}-{}",
-            std::process::id(),
-            DIRECTORY_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TestDirectory {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
 fn png(marker: u8, width: u32, height: u32) -> Vec<u8> {
     let mut body = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
     body.extend_from_slice(&width.to_be_bytes());
@@ -391,10 +372,7 @@ fn clear_during_download_blocks_late_refill() {
         }
     }
 
-    assert_eq!(
-        cache.clear().unwrap(),
-        json!({"bytesRemoved": 0, "filesRemoved": 0})
-    );
+    assert_eq!(cache.clear(), json!({"bytesRemoved": 0, "filesRemoved": 0}));
     {
         let (release_lock, release_signal) = &*release;
         *release_lock.lock().unwrap() = true;
@@ -451,7 +429,7 @@ fn stats_clear_and_reads_only_touch_managed_regular_files() {
         ])
     );
 
-    assert_eq!(cache.clear().unwrap()["filesRemoved"], 1);
+    assert_eq!(cache.clear()["filesRemoved"], 1);
     assert_eq!(fs::read(unmanaged).unwrap(), b"keep");
     assert_eq!(fs::read(outside).unwrap(), png(b'o', 1, 1));
     assert_eq!(cache.stats()["files"], 0);

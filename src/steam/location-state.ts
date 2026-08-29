@@ -1,5 +1,3 @@
-const GUIDE_SCROLL_TOP_KEY =
-  /^OverlayGuide_([1-9]\d{0,19})ScrollTop_HistoryValue$/;
 const DECIMAL_GUIDE_ID = /^[1-9]\d{0,19}$/;
 
 export const MAX_SCROLL_TOP = 1_000_000_000;
@@ -41,30 +39,6 @@ export function guideScrollTopKey(guideId: string): string {
   }
 
   return `OverlayGuide_${guideId}ScrollTop_HistoryValue`;
-}
-
-/** Read all verified keys for diagnostics, not to identify the active guide. */
-export function extractGuideScrollSnapshots(
-  locationState: unknown,
-): GuideScrollSnapshot[] {
-  const state = readStateRecord(locationState);
-  if (state === null) {
-    return [];
-  }
-  const snapshots: GuideScrollSnapshot[] = [];
-
-  try {
-    for (const [key, value] of Object.entries(state)) {
-      const match = GUIDE_SCROLL_TOP_KEY.exec(key);
-      if (match && isScrollTop(value)) {
-        snapshots.push({ guideId: match[1], scrollTop: value });
-      }
-    }
-  } catch {
-    return [];
-  }
-
-  return snapshots;
 }
 
 export function readGuideScrollSnapshot(

@@ -26,10 +26,6 @@ import {
 import type { ReaderImageCacheControl } from "../reader/image-cache-control";
 import type { ReaderPerformanceTracker } from "../reader/performance";
 import {
-  initialRenderedSectionCount,
-  nextRenderedSectionCount,
-} from "../reader/progressive-render";
-import {
   ReaderSessionCache,
   retainGuideForStaleRefresh,
   type ReaderSessionSnapshot,
@@ -42,6 +38,7 @@ const RESTORE_STABLE_MS = 100;
 const RESTORE_TIMEOUT_MS = 10_000;
 const LOADING_INDICATOR_DELAY_MS = 180;
 const MAX_OBSERVED_GUIDE_IMAGES = 512;
+const SECTION_RENDER_BATCH = 8;
 
 const READER_CSS = `
 .grip-reader-content { color: #dcdedf; font-size: 18px; line-height: 1.55; padding: 10px 34px 80px; }
@@ -122,9 +119,7 @@ export function GuideReaderPage({
   const [sectionRenderState, setSectionRenderState] =
     useState<SectionRenderState>(() => ({
       guide: initialSnapshot?.guide ?? null,
-      count: initialRenderedSectionCount(
-        initialSnapshot?.guide.sections.length ?? 0,
-      ),
+      count: Math.min(initialSnapshot?.guide.sections.length ?? 0, 1),
     }));
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -305,13 +300,13 @@ export function GuideReaderPage({
   const renderedSectionCount = loaded
     ? sectionRenderState.guide === loaded.guide
       ? sectionRenderState.count
-      : initialRenderedSectionCount(loaded.guide.sections.length)
+      : Math.min(loaded.guide.sections.length, 1)
     : 0;
 
   useEffect(() => {
     const guide = loaded?.guide ?? null;
     const total = guide?.sections.length ?? 0;
-    let scheduledCount = initialRenderedSectionCount(total);
+    let scheduledCount = Math.min(total, 1);
     setSectionRenderState({ guide, count: scheduledCount });
     if (!guide || scheduledCount >= total) {
       return;
@@ -323,7 +318,7 @@ export function GuideReaderPage({
       if (canceled) {
         return;
       }
-      scheduledCount = nextRenderedSectionCount(scheduledCount, total);
+      scheduledCount = Math.min(total, scheduledCount + SECTION_RENDER_BATCH);
       setSectionRenderState((current) => ({
         guide,
         count:

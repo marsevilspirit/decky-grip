@@ -59,12 +59,8 @@ for line in sys.stdin:
         result = params
     elif method.endswith(".snapshot"):
         result = {}
-    elif method.endswith(".delete"):
-        result = True
     elif method.endswith(".clear"):
         result = {"filesRemoved": 1, "bytesRemoved": 2}
-    elif method.endswith(".count"):
-        result = 3
     elif method.endswith(".repair"):
         result = {"repaired": False, "backup": None}
     elif method == "hotkey.status":
@@ -203,28 +199,32 @@ for line in sys.stdin:
             )
         self.logger.error.assert_called_once()
 
-    def test_large_response_pipes_are_buffered_and_cached_guides_get_full_timeout(self):
+    def test_large_response_pipes_are_buffered(self):
         client = self.start()
         self.assertIsInstance(client._process.stdin, io.BufferedWriter)
         self.assertIsInstance(client._process.stdout, io.BufferedReader)
 
-        with mock.patch.object(client, "_request") as request:
-            client.guides.get_cached("3414883877")
-        request.assert_called_once_with(
-            "guides.get_cached",
-            {"guide_id": "3414883877"},
-            timeout=client.guides.RESPONSE_TIMEOUT_SECONDS,
-        )
-
-    def test_adapters_only_forward_json(self):
+    def test_request_only_forwards_json(self):
         client = self.start()
 
         self.assertEqual(
-            client.positions.save("raw key", "raw scroll"),
+            client.request(
+                "positions.save",
+                {"guide_key": "raw key", "scroll_top": "raw scroll"},
+            ),
             {"guide_key": "raw key", "scroll_top": "raw scroll"},
         )
         self.assertEqual(
-            client.reader_positions.save("raw", "top", 7, [], "offset"),
+            client.request(
+                "reader_positions.save",
+                {
+                    "guide_key": "raw",
+                    "scroll_top": "top",
+                    "section_id": 7,
+                    "anchor_text": [],
+                    "anchor_offset": "offset",
+                },
+            ),
             {
                 "guide_key": "raw",
                 "scroll_top": "top",
@@ -234,23 +234,28 @@ for line in sys.stdin:
             },
         )
         self.assertEqual(
-            client.guides.get("3414883877", True),
+            client.request(
+                "guides.get",
+                {"guide_id": "3414883877", "force_refresh": True},
+            ),
             {"guide_id": "3414883877", "force_refresh": True},
         )
         self.assertEqual(
-            client.images.get("https://example.invalid/a", False),
+            client.request(
+                "images.get",
+                {"url": "https://example.invalid/a", "allow_download": False},
+            ),
             {"url": "https://example.invalid/a", "allow_download": False},
         )
-        self.assertEqual(client.positions.count(), 3)
-        self.assertEqual(client.hotkey_status()["button"], "L4")
-        self.assertEqual(client.cache_stats()["images"]["files"], 2)
+        self.assertEqual(client.request("hotkey.status", {})["button"], "L4")
+        self.assertEqual(client.request("reader_cache.stats", {})["images"]["files"], 2)
 
     def test_maps_validation_and_preserves_other_error_kinds(self):
         client = self.start()
         with self.assertRaisesRegex(ValueError, "bad input"):
-            client.positions.get("validation")
+            client.request("reader_positions.get", {"guide_key": "validation"})
         with self.assertRaisesRegex(RustSidecarError, "disk failed") as raised:
-            client.positions.get("storage")
+            client.request("reader_positions.get", {"guide_key": "storage"})
         self.assertEqual(raised.exception.kind, "storage")
 
     def test_demultiplexes_responses_and_dispatches_events(self):
@@ -260,8 +265,8 @@ for line in sys.stdin:
         client.set_event_callback(lambda name, payload: events.append((name, payload)))
 
         with ThreadPoolExecutor(max_workers=2) as executor:
-            first = executor.submit(client._request, "test.echo", {"value": 1})
-            second = executor.submit(client._request, "test.echo", {"value": 2})
+            first = executor.submit(client.request, "test.echo", {"value": 1})
+            second = executor.submit(client.request, "test.echo", {"value": 2})
             self.assertEqual(first.result(timeout=1), {"value": 1})
             self.assertEqual(second.result(timeout=1), {"value": 2})
 
@@ -274,18 +279,18 @@ for line in sys.stdin:
         client.RESPONSE_TIMEOUT_SECONDS = 0.03
         started = time.monotonic()
         with self.assertRaisesRegex(RustSidecarError, "timed out"):
-            client._request("test.slow", {})
+            client.request("test.slow", {})
         self.assertLess(time.monotonic() - started, 1)
 
         client.RESPONSE_TIMEOUT_SECONDS = 1
-        self.assertEqual(client._request("test.next", {}), "next")
+        self.assertEqual(client.request("test.next", {}), "next")
 
     def test_eof_wakes_every_pending_request(self):
         self.write_sidecar(EOF_SIDECAR)
         client = self.start()
         with ThreadPoolExecutor(max_workers=2) as executor:
             requests = [
-                executor.submit(client._request, "test.wait", {"value": value})
+                executor.submit(client.request, "test.wait", {"value": value})
                 for value in (1, 2)
             ]
             for request in requests:
@@ -297,9 +302,9 @@ for line in sys.stdin:
         client = self.start()
         client.MAX_RESPONSE_BYTES = 64
         with self.assertRaisesRegex(RustSidecarError, "unavailable"):
-            client._request("test.oversized", {})
+            client.request("test.oversized", {})
         with self.assertRaisesRegex(RustSidecarError, "unavailable"):
-            client._request("test.after_failure", {})
+            client.request("test.after_failure", {})
 
 
 @unittest.skipUnless(
@@ -349,17 +354,32 @@ class RustSidecarProcessIntegrationTests(unittest.TestCase):
                 self.assertTrue(
                     RustSidecar.REQUIRED_CAPABILITIES <= client.capabilities
                 )
-                self.assertEqual(client.hotkey_status()["button"], "L4")
+                self.assertEqual(client.request("hotkey.status", {})["button"], "L4")
                 self.assertEqual(
-                    client.positions.snapshot()["1:90071992547409931234"]["scroll_top"],
+                    client.request("positions.snapshot", {})["1:90071992547409931234"][
+                        "scroll_top"
+                    ],
                     12.5,
                 )
-                client.positions.save("2:20", 56)
+                client.request(
+                    "positions.save", {"guide_key": "2:20", "scroll_top": 56}
+                )
                 self.assertEqual(
-                    client.reader_positions.get("1:2")["anchor_text"],
+                    client.request("reader_positions.get", {"guide_key": "1:2"})[
+                        "anchor_text"
+                    ],
                     "existing anchor",
                 )
-                client.reader_positions.save("2:20", 78, "section-2", None, -5)
+                client.request(
+                    "reader_positions.save",
+                    {
+                        "guide_key": "2:20",
+                        "scroll_top": 78,
+                        "section_id": "section-2",
+                        "anchor_text": None,
+                        "anchor_offset": -5,
+                    },
+                )
             finally:
                 client.close()
 

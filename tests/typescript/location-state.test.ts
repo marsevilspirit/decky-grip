@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  extractGuideScrollSnapshots,
   guideScrollTopKey,
   MAX_SCROLL_TOP,
   mergeGuideScrollSnapshot,
@@ -9,18 +8,6 @@ import {
 } from "../../src/steam/location-state";
 
 describe("Steam guide location state", () => {
-  it("extracts only verified guide scroll keys", () => {
-    expect(
-      extractGuideScrollSnapshots({
-        OverlayGuide_3414883877ScrollTop_HistoryValue: 5561.3335,
-        OverlayGuide_3414883877ScrollLeft_HistoryValue: 0,
-        OverlayGuide_badScrollTop_HistoryValue: 100,
-        OverlayGuide_9ScrollTop_HistoryValue: Number.NaN,
-        unrelated: 42,
-      }),
-    ).toEqual([{ guideId: "3414883877", scrollTop: 5561.3335 }]);
-  });
-
   it("reads only the explicitly active guide", () => {
     const locationState = {
       OverlayGuide_10ScrollTop_HistoryValue: 100,
@@ -35,8 +22,6 @@ describe("Steam guide location state", () => {
   });
 
   it("treats unsupported state as unreadable", () => {
-    expect(extractGuideScrollSnapshots(null)).toEqual([]);
-    expect(extractGuideScrollSnapshots([])).toEqual([]);
     expect(readGuideScrollSnapshot("state", "1")).toBeNull();
   });
 
@@ -125,7 +110,6 @@ describe("Steam guide location state", () => {
       },
     );
 
-    expect(extractGuideScrollSnapshots(hostile)).toEqual([]);
     expect(() =>
       mergeGuideScrollSnapshot(hostile, { guideId: "1", scrollTop: 1 }),
     ).toThrow(TypeError);

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
+from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -15,113 +16,6 @@ class RustSidecarError(RuntimeError):
     def __init__(self, message: str, kind: str = "transport") -> None:
         super().__init__(message)
         self.kind = kind
-
-
-class _PendingResponse:
-    def __init__(self) -> None:
-        self.ready = threading.Event()
-        self.response: Optional[Dict[str, Any]] = None
-        self.error: Optional[Exception] = None
-
-
-class RustPositionStore:
-    def __init__(self, client: "RustSidecar") -> None:
-        self._client = client
-
-    def get(self, guide_key: str):
-        return self._client._request("positions.get", {"guide_key": guide_key})
-
-    def snapshot(self):
-        return self._client._request("positions.snapshot", {})
-
-    def save(self, guide_key: str, scroll_top: float):
-        return self._client._request(
-            "positions.save",
-            {"guide_key": guide_key, "scroll_top": scroll_top},
-        )
-
-    def delete(self, guide_key: str):
-        return self._client._request("positions.delete", {"guide_key": guide_key})
-
-    def clear(self):
-        return self._client._request("positions.clear", {})
-
-    def count(self):
-        return self._client._request("positions.count", {})
-
-    def repair(self):
-        return self._client._request("positions.repair", {})
-
-
-class RustReaderPositionStore:
-    def __init__(self, client: "RustSidecar") -> None:
-        self._client = client
-
-    def get(self, guide_key: str):
-        return self._client._request("reader_positions.get", {"guide_key": guide_key})
-
-    def save(
-        self,
-        guide_key: str,
-        scroll_top: float,
-        section_id: Optional[str],
-        anchor_text: Optional[str],
-        anchor_offset: float,
-    ):
-        return self._client._request(
-            "reader_positions.save",
-            {
-                "guide_key": guide_key,
-                "scroll_top": scroll_top,
-                "section_id": section_id,
-                "anchor_text": anchor_text,
-                "anchor_offset": anchor_offset,
-            },
-        )
-
-    def repair(self):
-        return self._client._request("reader_positions.repair", {})
-
-
-class RustGuideReader:
-    RESPONSE_TIMEOUT_SECONDS = 45
-
-    def __init__(self, client: "RustSidecar") -> None:
-        self._client = client
-
-    def get(self, guide_id: str, force_refresh: bool = False):
-        return self._client._request(
-            "guides.get",
-            {"guide_id": guide_id, "force_refresh": force_refresh},
-            timeout=self.RESPONSE_TIMEOUT_SECONDS,
-        )
-
-    def get_cached(self, guide_id: str):
-        return self._client._request(
-            "guides.get_cached",
-            {"guide_id": guide_id},
-            timeout=self.RESPONSE_TIMEOUT_SECONDS,
-        )
-
-    def clear(self):
-        return self._client._request("guides.clear", {})
-
-
-class RustGuideImages:
-    RESPONSE_TIMEOUT_SECONDS = 45
-
-    def __init__(self, client: "RustSidecar") -> None:
-        self._client = client
-
-    def get(self, url: str, allow_download: bool = True):
-        return self._client._request(
-            "images.get",
-            {"url": url, "allow_download": allow_download},
-            timeout=self.RESPONSE_TIMEOUT_SECONDS,
-        )
-
-    def clear(self):
-        return self._client._request("images.clear", {})
 
 
 class RustSidecar:
@@ -138,6 +32,7 @@ class RustSidecar:
         }
     )
     RESPONSE_TIMEOUT_SECONDS = 5
+    LONG_RESPONSE_TIMEOUT_SECONDS = 45
     MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 
     def __init__(self, binary: Path, positions_path: Path) -> None:
@@ -147,7 +42,7 @@ class RustSidecar:
         self._next_id = 0
         self._failed = False
         self._closed = False
-        self._pending: Dict[int, _PendingResponse] = {}
+        self._pending: Dict[int, Future[Dict[str, Any]]] = {}
         self._event_callback: Optional[Callable[[str, Any], None]] = None
         self.capabilities = frozenset()
         self._process = subprocess.Popen(
@@ -163,10 +58,6 @@ class RustSidecar:
             daemon=True,
         )
         self._reader_thread.start()
-        self.positions = RustPositionStore(self)
-        self.reader_positions = RustReaderPositionStore(self)
-        self.guides = RustGuideReader(self)
-        self.images = RustGuideImages(self)
 
     @classmethod
     def start(cls, binary: Path, positions_path: Path, logger: Any) -> "RustSidecar":
@@ -175,7 +66,7 @@ class RustSidecar:
             if not binary.is_file():
                 raise RustSidecarError("GRIP Rust sidecar binary is missing")
             client = cls(binary, positions_path)
-            hello = client._request("ping", {})
+            hello = client.request("ping", {})
             if (
                 not isinstance(hello, dict)
                 or set(hello) != {"version", "capabilities"}
@@ -242,12 +133,6 @@ class RustSidecar:
         with self._state_lock:
             self._event_callback = callback
 
-    def hotkey_status(self):
-        return self._request("hotkey.status", {})
-
-    def cache_stats(self):
-        return self._request("reader_cache.stats", {})
-
     @staticmethod
     def _unavailable_error() -> RustSidecarError:
         return RustSidecarError("GRIP Rust sidecar is unavailable")
@@ -261,8 +146,7 @@ class RustSidecar:
             self._pending.clear()
 
         for request in pending:
-            request.error = self._unavailable_error()
-            request.ready.set()
+            request.set_exception(self._unavailable_error())
         if terminate and self._process.poll() is None:
             try:
                 self._process.terminate()
@@ -298,8 +182,7 @@ class RustSidecar:
             with self._state_lock:
                 pending = self._pending.pop(message["id"], None)
             if pending is not None:
-                pending.response = message
-                pending.ready.set()
+                pending.set_result(message)
             return True
         if (
             set(message) != {"event", "payload"}
@@ -346,7 +229,7 @@ class RustSidecar:
             raise ValueError(error["message"])
         raise RustSidecarError(error["message"], error["kind"])
 
-    def _request(
+    def request(
         self,
         method: str,
         params: Dict[str, Any],
@@ -360,7 +243,7 @@ class RustSidecar:
             if not process_dead:
                 self._next_id += 1
                 request_id = self._next_id
-                pending = _PendingResponse()
+                pending: Future[Dict[str, Any]] = Future()
                 self._pending[request_id] = pending
 
         if process_dead:
@@ -395,16 +278,15 @@ class RustSidecar:
         except (BrokenPipeError, OSError, ValueError):
             self._fail_transport()
 
-        if not pending.ready.wait(
-            self.RESPONSE_TIMEOUT_SECONDS if timeout is None else timeout
-        ):
+        try:
+            response = pending.result(
+                timeout=self.RESPONSE_TIMEOUT_SECONDS if timeout is None else timeout
+            )
+        except FutureTimeoutError:
             with self._state_lock:
                 abandoned = self._pending.pop(request_id, None) is pending
             if abandoned:
                 raise RustSidecarError("GRIP Rust sidecar request timed out")
-            pending.ready.wait()
+            response = pending.result()
 
-        if pending.error is not None:
-            raise pending.error
-        assert pending.response is not None
-        return self._unwrap_response(pending.response)
+        return self._unwrap_response(response)

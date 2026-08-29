@@ -1,8 +1,8 @@
+use crate::guide_images::canonical_image_url;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
-use url::Url;
 
 pub(crate) const MAX_SECTIONS: usize = 512;
 pub(crate) const MAX_PAGE_NODES: usize = 200_000;
@@ -17,8 +17,6 @@ pub(crate) const MAX_FRAGMENT_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 
 const MAX_MARKUP_CHARS: usize = 16_384;
 const MAX_ATTRIBUTES: usize = 256;
-const MAX_CHARACTER_REFERENCE_CHARS: usize = 64;
-
 type Attributes = Vec<(String, Option<String>)>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -104,151 +102,76 @@ trait HtmlSink {
 
 struct HtmlParser<S> {
     sink: S,
-    buffer: String,
     rawtext_tag: Option<&'static str>,
-    deferred_data: Vec<String>,
-    #[cfg(test)]
-    compactions: usize,
 }
 
 impl<S: HtmlSink> HtmlParser<S> {
     fn new(sink: S) -> Self {
         Self {
             sink,
-            buffer: String::new(),
             rawtext_tag: None,
-            deferred_data: Vec::new(),
-            #[cfg(test)]
-            compactions: 0,
         }
-    }
-
-    fn feed(&mut self, data: &str) -> Result<(), ParseFailure> {
-        self.buffer.push_str(data);
-        self.parse_available(false)
-    }
-
-    fn close(&mut self) -> Result<(), ParseFailure> {
-        self.parse_available(true)?;
-        self.emit_data("")
-    }
-
-    fn into_sink(self) -> S {
-        self.sink
     }
 
     fn emit_data(&mut self, data: &str) -> Result<(), ParseFailure> {
-        if self.deferred_data.is_empty() && data.is_empty() {
+        if data.is_empty() {
             return Ok(());
         }
-        let joined;
-        let raw = if self.deferred_data.is_empty() {
-            data
-        } else {
-            self.deferred_data.push(data.to_owned());
-            joined = self.deferred_data.concat();
-            self.deferred_data.clear();
-            &joined
-        };
-        if raw.is_empty() {
-            return Ok(());
-        }
-        let decoded = html_escape::decode_html_entities(raw);
+        let decoded = html_escape::decode_html_entities(data);
         self.sink.handle_data(&decoded).map_err(ParseFailure::Sink)
     }
 
-    fn defer_data(&mut self, data: &str) {
-        if !data.is_empty() {
-            self.deferred_data.push(data.to_owned());
-        }
-    }
-
-    fn parse_available(&mut self, final_input: bool) -> Result<(), ParseFailure> {
-        let source = std::mem::take(&mut self.buffer);
+    fn parse(mut self, source: &str) -> Result<S, ParseFailure> {
         let mut offset = 0;
         while offset < source.len() {
             if let Some(tag) = self.rawtext_tag {
-                match find_rawtext_end(&source, offset, tag, final_input) {
+                match find_rawtext_end(source, offset, tag) {
                     Some(end) => {
                         self.emit_data(&source[offset..end])?;
                         offset = end;
                         self.rawtext_tag = None;
                         continue;
                     }
-                    None if final_input => {
-                        self.emit_data(&source[offset..])?;
-                        offset = source.len();
-                    }
                     None => {
-                        let safe_end = rawtext_safe_end(&source, offset, tag);
-                        self.defer_data(&source[offset..safe_end]);
-                        offset = safe_end;
+                        self.emit_data(&source[offset..])?;
+                        break;
                     }
                 }
-                break;
             }
 
             let Some(relative_markup) = source[offset..].find('<') else {
-                if final_input {
-                    self.emit_data(&source[offset..])?;
-                    offset = source.len();
-                } else {
-                    let safe_end = safe_text_end(&source, offset);
-                    self.defer_data(&source[offset..safe_end]);
-                    offset = safe_end;
-                }
+                self.emit_data(&source[offset..])?;
                 break;
             };
             let markup = offset + relative_markup;
             if markup > offset {
                 self.emit_data(&source[offset..markup])?;
                 offset = markup;
-            } else if !self.deferred_data.is_empty() {
-                self.emit_data("")?;
             }
 
-            let Some(consumed) = self.consume_markup(&source, offset, final_input)? else {
-                break;
-            };
-            offset = consumed;
+            offset = self.consume_markup(source, offset)?;
         }
-
-        if offset > 0 {
-            #[cfg(test)]
-            {
-                self.compactions += 1;
-            }
-            self.buffer.push_str(&source[offset..]);
-        } else {
-            self.buffer = source;
-        }
-        Ok(())
+        Ok(self.sink)
     }
 
-    fn consume_markup(
-        &mut self,
-        source: &str,
-        start: usize,
-        final_input: bool,
-    ) -> Result<Option<usize>, ParseFailure> {
+    fn consume_markup(&mut self, source: &str, start: usize) -> Result<usize, ParseFailure> {
         if source[start..].starts_with("<!--") {
             if let Some(relative_end) = source[start + 4..].find("-->") {
-                return Ok(Some(start + 4 + relative_end + 3));
+                return Ok(start + 4 + relative_end + 3);
             }
             if source[start..].chars().count() > MAX_MARKUP_CHARS {
                 return Err(TokenizerError("HTML comment exceeds the size limit").into());
             }
-            return Ok(final_input.then_some(source.len()));
+            return Ok(source.len());
         }
 
         if source[start..].starts_with("<!") || source[start..].starts_with("<?") {
             let tag_start = start + 2;
             return match tag_end(source, tag_start)? {
-                Some(end) => Ok(Some(end + 1)),
-                None if !final_input => Ok(None),
+                Some(end) => Ok(end + 1),
                 None => {
                     self.emit_data("<")?;
-                    Ok(Some(start + 1))
+                    Ok(start + 1)
                 }
             };
         }
@@ -256,40 +179,30 @@ impl<S: HtmlSink> HtmlParser<S> {
         if source[start..].starts_with("</") {
             let name_start = start + 2;
             let Some(name_end) = tag_name_end(source, name_start) else {
-                if !final_input && name_start == source.len() {
-                    return Ok(None);
-                }
                 self.emit_data("<")?;
-                return Ok(Some(start + 1));
+                return Ok(start + 1);
             };
             return match tag_end(source, name_end)? {
                 Some(end) => {
                     let tag = source[name_start..name_end].to_ascii_lowercase();
                     self.sink.handle_endtag(&tag)?;
-                    Ok(Some(end + 1))
+                    Ok(end + 1)
                 }
-                None if !final_input => Ok(None),
                 None => {
                     self.emit_data("<")?;
-                    Ok(Some(start + 1))
+                    Ok(start + 1)
                 }
             };
         }
 
         let name_start = start + 1;
         let Some(name_end) = tag_name_end(source, name_start) else {
-            if !final_input && name_start == source.len() {
-                return Ok(None);
-            }
             self.emit_data("<")?;
-            return Ok(Some(start + 1));
+            return Ok(start + 1);
         };
         let Some(end) = tag_end(source, name_end)? else {
-            if !final_input {
-                return Ok(None);
-            }
             self.emit_data("<")?;
-            return Ok(Some(start + 1));
+            return Ok(start + 1);
         };
 
         let tag = source[name_start..name_end].to_ascii_lowercase();
@@ -317,7 +230,7 @@ impl<S: HtmlSink> HtmlParser<S> {
                 _ => None,
             };
         }
-        Ok(Some(end + 1))
+        Ok(end + 1)
     }
 }
 
@@ -442,53 +355,7 @@ fn skip_whitespace(source: &str, mut index: usize) -> usize {
     index
 }
 
-fn safe_text_end(source: &str, start: usize) -> usize {
-    let Some(relative_ampersand) = source[start..].rfind('&') else {
-        return source.len();
-    };
-    let ampersand = start + relative_ampersand;
-    let candidate = &source[ampersand..];
-    if candidate.chars().count() <= MAX_CHARACTER_REFERENCE_CHARS
-        && possible_character_reference(candidate)
-    {
-        ampersand
-    } else {
-        source.len()
-    }
-}
-
-fn possible_character_reference(candidate: &str) -> bool {
-    let Some(rest) = candidate.strip_prefix('&') else {
-        return false;
-    };
-    if let Some(numeric) = rest.strip_prefix('#') {
-        let digits = numeric
-            .strip_prefix('x')
-            .or_else(|| numeric.strip_prefix('X'))
-            .unwrap_or(numeric);
-        digits.bytes().all(|byte| byte.is_ascii_hexdigit())
-    } else {
-        rest.bytes().all(|byte| byte.is_ascii_alphanumeric())
-    }
-}
-
-fn rawtext_safe_end(source: &str, start: usize, tag: &str) -> usize {
-    let closing = format!("</{tag}");
-    let available = &source[start..];
-    for size in (1..=closing.len().min(available.len())).rev() {
-        let suffix_start = available.len() - size;
-        if available.is_char_boundary(suffix_start)
-            && closing
-                .as_bytes()
-                .starts_with(&available.as_bytes()[suffix_start..].to_ascii_lowercase())
-        {
-            return source.len() - size;
-        }
-    }
-    source.len()
-}
-
-fn find_rawtext_end(source: &str, start: usize, tag: &str, final_input: bool) -> Option<usize> {
+fn find_rawtext_end(source: &str, start: usize, tag: &str) -> Option<usize> {
     let closing = format!("</{tag}");
     let bytes = source.as_bytes();
     let mut search = start;
@@ -504,9 +371,6 @@ fn find_rawtext_end(source: &str, start: usize, tag: &str, final_input: bool) ->
                     .next()
                     .is_some_and(|character| character.is_whitespace() || character == '>'))
         {
-            if !final_input && end == source.len() {
-                return None;
-            }
             return Some(candidate);
         }
         search = candidate + 2;
@@ -601,100 +465,12 @@ fn allowed_class(class: &str) -> bool {
     )
 }
 
-fn escape_text(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            _ => escaped.push(character),
-        }
-    }
-    escaped
-}
-
-fn escape_attribute(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '&' => escaped.push_str("&amp;"),
-            '<' => escaped.push_str("&lt;"),
-            '>' => escaped.push_str("&gt;"),
-            '"' => escaped.push_str("&quot;"),
-            '\'' => escaped.push_str("&#x27;"),
-            _ => escaped.push(character),
-        }
-    }
-    escaped
-}
-
 fn normalized_decimal(value: &str) -> Option<String> {
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
     let parsed = value.parse::<u32>().ok()?;
     (parsed > 0 && parsed <= 16_384).then(|| parsed.to_string())
-}
-
-fn is_allowed_image_host(hostname: &str) -> bool {
-    ["steamstatic.com", "steamusercontent.com"]
-        .iter()
-        .any(|suffix| hostname == *suffix || hostname.ends_with(&format!(".{suffix}")))
-}
-
-fn canonical_image_url(value: &str) -> Option<String> {
-    if value.is_empty()
-        || value.len() > 4_096
-        || value.bytes().any(|byte| {
-            !(0x21..=0x7e).contains(&byte)
-                || matches!(
-                    byte,
-                    b'<' | b'>' | b'"' | b'{' | b'}' | b'|' | b'\\' | b'^' | b'`'
-                )
-        })
-    {
-        return None;
-    }
-    let parsed = Url::parse(value).ok()?;
-    if !parsed.scheme().eq_ignore_ascii_case("https")
-        || parsed
-            .fragment()
-            .is_some_and(|fragment| !fragment.is_empty())
-    {
-        return None;
-    }
-
-    let scheme_end = value.find("://")?;
-    let remainder = &value[scheme_end + 3..];
-    let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
-    let authority = &remainder[..authority_end];
-    if authority.is_empty() || authority.contains('@') || authority.starts_with('[') {
-        return None;
-    }
-    let (raw_host, explicit_port) = match authority.rsplit_once(':') {
-        Some((host, port)) => (host, Some(port)),
-        None => (authority, None),
-    };
-    if explicit_port.is_some_and(|port| port != "443") {
-        return None;
-    }
-    let hostname = raw_host.trim_end_matches('.').to_ascii_lowercase();
-    if hostname.is_empty() || !is_allowed_image_host(&hostname) {
-        return None;
-    }
-    parsed.host_str()?;
-
-    let mut canonical = format!("https://{hostname}");
-    if explicit_port.is_some() {
-        canonical.push_str(":443");
-    }
-    canonical.push_str(parsed.path());
-    if let Some(query) = parsed.query() {
-        canonical.push('?');
-        canonical.push_str(query);
-    }
-    Some(canonical)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -814,7 +590,7 @@ impl FragmentSanitizer {
         if tag == "img" {
             let source = values
                 .get("src")
-                .and_then(|value| canonical_image_url(value))?;
+                .and_then(|value| canonical_image_url(value).ok())?;
             serialized.insert("loading", "lazy".to_owned());
             serialized.insert("src", source);
         }
@@ -822,7 +598,12 @@ impl FragmentSanitizer {
         Some(
             serialized
                 .into_iter()
-                .map(|(name, value)| format!(" {name}=\"{}\"", escape_attribute(&value)))
+                .map(|(name, value)| {
+                    format!(
+                        " {name}=\"{}\"",
+                        html_escape::encode_quoted_attribute(&value)
+                    )
+                })
                 .collect(),
         )
     }
@@ -911,7 +692,7 @@ impl HtmlSink for FragmentSanitizer {
         self.record_node()?;
         self.record_text(data)?;
         if self.drop_depth == 0 {
-            self.append(escape_text(data))?;
+            self.append(html_escape::encode_text(data).into_owned())?;
         }
         Ok(())
     }
@@ -920,14 +701,10 @@ impl HtmlSink for FragmentSanitizer {
 pub(crate) fn sanitize_fragment_with_stats(
     fragment: &str,
 ) -> Result<(String, FragmentStats), GuideHtmlError> {
-    let mut parser = HtmlParser::new(FragmentSanitizer::new());
-    parser
-        .feed(fragment)
-        .map_err(|error| public_parse_error(error, "guide contains malformed HTML"))?;
-    parser
-        .close()
-        .map_err(|error| public_parse_error(error, "guide contains malformed HTML"))?;
-    parser.into_sink().finish()
+    HtmlParser::new(FragmentSanitizer::new())
+        .parse(fragment)
+        .map_err(|error| public_parse_error(error, "guide contains malformed HTML"))?
+        .finish()
 }
 
 pub fn sanitize_fragment(fragment: &str) -> Result<String, GuideHtmlError> {
@@ -972,11 +749,9 @@ impl HtmlSink for ImageTagSink {
 }
 
 fn localized_image_tag(source: &str) -> String {
-    let mut parser = HtmlParser::new(ImageTagSink::default());
-    if parser.feed(source).is_err() || parser.close().is_err() {
+    let Ok(sink) = HtmlParser::new(ImageTagSink::default()).parse(source) else {
         return String::new();
-    }
-    let sink = parser.into_sink();
+    };
     let Some(attributes) = sink.attributes else {
         return String::new();
     };
@@ -1003,7 +778,7 @@ fn localized_image_tag(source: &str) -> String {
     }
     let Some(source) = values
         .get("src")
-        .and_then(|value| canonical_image_url(value))
+        .and_then(|value| canonical_image_url(value).ok())
     else {
         return String::new();
     };
@@ -1042,7 +817,12 @@ fn localized_image_tag(source: &str) -> String {
     values.insert("data-grip-image-url".to_owned(), source);
     let attributes: String = values
         .into_iter()
-        .map(|(name, value)| format!(" {name}=\"{}\"", escape_attribute(&value)))
+        .map(|(name, value)| {
+            format!(
+                " {name}=\"{}\"",
+                html_escape::encode_quoted_attribute(&value)
+            )
+        })
         .collect();
     format!("<img{attributes}>")
 }
@@ -1468,14 +1248,9 @@ pub fn parse_guide_html(guide_id: &str, source: &str) -> Result<Value, GuideHtml
             "guide_id must be a positive decimal string",
         ));
     }
-    let mut parser = HtmlParser::new(GuidePageParser::new());
-    parser
-        .feed(source)
+    let mut page = HtmlParser::new(GuidePageParser::new())
+        .parse(source)
         .map_err(|error| public_parse_error(error, "Steam returned malformed guide HTML"))?;
-    parser
-        .close()
-        .map_err(|error| public_parse_error(error, "Steam returned malformed guide HTML"))?;
-    let mut page = parser.into_sink();
     page.finish()?;
     if page.title.is_empty() || page.author.is_empty() || page.sections.is_empty() {
         return Err(GuideHtmlError::new(
@@ -1514,7 +1289,7 @@ mod tests {
         Data(String),
     }
 
-    #[derive(Default)]
+    #[derive(Debug, Default)]
     struct RecordingSink {
         events: Vec<Event>,
     }
@@ -1550,63 +1325,11 @@ mod tests {
         }
     }
 
-    fn parse_recording(source: &str, chunks: &[usize]) -> Vec<Event> {
-        let mut parser = HtmlParser::new(RecordingSink::default());
-        let mut offset = 0;
-        for &size in chunks {
-            let end = (offset + size).min(source.len());
-            parser
-                .feed(&source[offset..end])
-                .unwrap_or_else(|_| panic!());
-            offset = end;
-        }
-        parser.feed(&source[offset..]).unwrap_or_else(|_| panic!());
-        parser.close().unwrap_or_else(|_| panic!());
-        parser.into_sink().events
-    }
-
-    #[test]
-    fn chunked_feed_matches_single_feed_across_token_boundaries() {
-        let source = "text &amp; more<div DATA-X='1>2' disabled>body\
-                      <script>if (left < right) { value = '&amp;'; }</ScRiPt >\
-                      <br /></div>tail";
-        let expected = parse_recording(source, &[]);
-        let one_byte_chunks = vec![1; source.len()];
-        for chunks in [
-            one_byte_chunks,
-            vec![4, 7, 2, 19, 1, 3, 11, 5, 23],
-            vec![source.find("<script>").unwrap() + 3, 2, 4, 9, 1, 17],
-        ] {
-            assert_eq!(parse_recording(source, &chunks), expected);
-        }
-    }
-
-    #[test]
-    fn incomplete_quoted_tag_waits_and_close_emits_text() {
-        let mut parser = HtmlParser::new(RecordingSink::default());
-        parser
-            .feed("<div title='left>")
-            .unwrap_or_else(|_| panic!());
-        assert!(parser.sink.events.is_empty());
-        parser.feed("right'>body").unwrap_or_else(|_| panic!());
-        assert_eq!(
-            parser.sink.events,
-            vec![Event::Start(
-                "div".to_owned(),
-                vec![("title".to_owned(), Some("left>right".to_owned()))]
-            )]
-        );
-        parser.close().unwrap_or_else(|_| panic!());
-        assert_eq!(
-            parser.sink.events,
-            vec![
-                Event::Start(
-                    "div".to_owned(),
-                    vec![("title".to_owned(), Some("left>right".to_owned()))]
-                ),
-                Event::Data("body".to_owned()),
-            ]
-        );
+    fn parse_recording(source: &str) -> Vec<Event> {
+        HtmlParser::new(RecordingSink::default())
+            .parse(source)
+            .unwrap_or_else(|_| panic!())
+            .events
     }
 
     #[test]
@@ -1619,26 +1342,24 @@ mod tests {
             Event::Start("p".to_owned(), vec![]),
             Event::Data("after".to_owned()),
         ];
-        assert_eq!(parse_recording(source, &[]), expected);
-        let split = source.find("</scriptx>").unwrap() + "</script".len();
-        assert_eq!(parse_recording(source, &[split]), expected);
+        assert_eq!(parse_recording(source), expected);
     }
 
     #[test]
     fn unclosed_rawtext_and_malformed_markup_keep_safe_callbacks() {
         assert_eq!(
-            parse_recording("before<!-- ignored forever", &[]),
+            parse_recording("before<!-- ignored forever"),
             vec![Event::Data("before".to_owned())]
         );
         assert_eq!(
-            parse_recording("<style>a < b &amp; c", &[]),
+            parse_recording("<style>a < b &amp; c"),
             vec![
                 Event::Start("style".to_owned(), vec![]),
                 Event::Data("a < b & c".to_owned()),
             ]
         );
         assert_eq!(
-            parse_recording("x<!broken", &[]),
+            parse_recording("x<!broken"),
             vec![
                 Event::Data("x".to_owned()),
                 Event::Data("<".to_owned()),
@@ -1648,34 +1369,9 @@ mod tests {
     }
 
     #[test]
-    fn completed_token_stream_compacts_once_per_feed() {
-        for token_count in [1_000, 8_000] {
-            let mut parser = HtmlParser::new(RecordingSink::default());
-            parser.feed(&"<b>x</b>".repeat(token_count)).unwrap();
-            assert_eq!(parser.compactions, 1);
-            assert!(parser.buffer.is_empty());
-            assert_eq!(parser.sink.events.len(), token_count * 3);
-        }
-    }
-
-    #[test]
-    fn incremental_plain_text_does_not_grow_the_tokenizer_buffer() {
-        let mut parser = HtmlParser::new(RecordingSink::default());
-        let mut maximum_buffer = 0;
-        for _ in 0..20_000 {
-            parser.feed("x").unwrap_or_else(|_| panic!());
-            maximum_buffer = maximum_buffer.max(parser.buffer.len());
-        }
-        parser.close().unwrap_or_else(|_| panic!());
-        assert_eq!(maximum_buffer, 0);
-        assert_eq!(parser.sink.events, vec![Event::Data("x".repeat(20_000))]);
-    }
-
-    #[test]
     fn one_malformed_markup_token_has_a_hard_size_limit() {
-        let mut parser = HtmlParser::new(RecordingSink::default());
-        let error = parser
-            .feed(&format!("<div title='{}", "x".repeat(MAX_MARKUP_CHARS + 1)))
+        let error = HtmlParser::new(RecordingSink::default())
+            .parse(&format!("<div title='{}", "x".repeat(MAX_MARKUP_CHARS + 1)))
             .expect_err("oversized markup must fail");
         match error {
             ParseFailure::Tokenizer(error) => assert!(error.to_string().contains("size limit")),

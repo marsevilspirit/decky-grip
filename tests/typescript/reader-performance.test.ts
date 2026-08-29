@@ -40,6 +40,16 @@ describe("physical L4 reader performance gate", () => {
     ).toBeNull();
   });
 
+  it("keeps external-store snapshots stable until an update", () => {
+    const tracker = new ReaderPerformanceTracker();
+    const initial = tracker.getSnapshot();
+
+    expect(tracker.getSnapshot()).toBe(initial);
+    tracker.clear();
+    expect(tracker.getSnapshot()).not.toBe(initial);
+    expect(tracker.getSnapshot()).toBe(tracker.getSnapshot());
+  });
+
   it("records every stage from hardware detection through restored content", () => {
     let now = 1_000;
     const tracker = new ReaderPerformanceTracker(() => now);

@@ -345,42 +345,17 @@ fn reader_position_value(position: &ReaderPosition) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TEMP_COUNTER;
+    use crate::test_support::TestDirectory;
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{PermissionsExt, symlink};
-    use std::sync::atomic::Ordering;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
-    struct TestDirectory(PathBuf);
-
-    impl TestDirectory {
-        fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "grip-reader-positions-test-{}-{}",
-                std::process::id(),
-                TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-            ));
-            fs::create_dir(&path).unwrap();
-            Self(path)
-        }
-
-        fn path(&self) -> PathBuf {
-            self.0.join("reader_positions.json")
-        }
-    }
-
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
     #[test]
     fn round_trip_matches_python_schema_and_permissions() {
-        let directory = TestDirectory::new();
+        let directory = TestDirectory::new("reader_positions.json");
         let path = directory.path();
         let store = ReaderPositionStore::new(path.clone());
 
@@ -424,7 +399,7 @@ mod tests {
 
     #[test]
     fn invalid_inputs_are_rejected_without_a_write() {
-        let directory = TestDirectory::new();
+        let directory = TestDirectory::new("reader_positions.json");
         let path = directory.path();
         let store = ReaderPositionStore::new(path.clone());
         let cases = [
@@ -467,7 +442,7 @@ mod tests {
 
     #[test]
     fn anchor_text_uses_python_unicode_and_control_character_rules() {
-        let directory = TestDirectory::new();
+        let directory = TestDirectory::new("reader_positions.json");
         let path = directory.path();
         let store = ReaderPositionStore::new(path.clone());
         let allowed_controls = "tab\tline\nreturn\rnext\u{85}";
@@ -518,7 +493,7 @@ mod tests {
 
     #[test]
     fn corruption_is_preserved_until_repair_backs_it_up() {
-        let directory = TestDirectory::new();
+        let directory = TestDirectory::new("reader_positions.json");
         let path = directory.path();
         let original = b"{ definitely not json";
         fs::write(&path, original).unwrap();
@@ -554,7 +529,7 @@ mod tests {
 
     #[test]
     fn repair_leaves_missing_and_valid_stores_untouched() {
-        let directory = TestDirectory::new();
+        let directory = TestDirectory::new("reader_positions.json");
         let missing_path = directory.0.join("missing/reader_positions.json");
         let missing_store = ReaderPositionStore::new(missing_path.clone());
         assert_eq!(
@@ -580,7 +555,7 @@ mod tests {
 
     #[test]
     fn full_store_rejects_new_keys_without_blocking_overwrites() {
-        let directory = TestDirectory::new();
+        let directory = TestDirectory::new("reader_positions.json");
         let path = directory.path();
         let store = ReaderPositionStore::new(path.clone());
         let mut document = ReaderDocument::default();
@@ -622,7 +597,7 @@ mod tests {
 
     #[test]
     fn unsafe_and_fifo_stores_are_rejected_without_blocking() {
-        let directory = TestDirectory::new();
+        let directory = TestDirectory::new("reader_positions.json");
         let path = directory.path();
         let outside = directory.0.join("outside.json");
         fs::write(&outside, b"{\"positions\":{},\"schema_version\":1}").unwrap();
@@ -705,7 +680,7 @@ mod tests {
 
     #[test]
     fn reader_store_accepts_a_valid_file_larger_than_the_primary_budget() {
-        let directory = TestDirectory::new();
+        let directory = TestDirectory::new("reader_positions.json");
         let path = directory.path();
         let mut document = ReaderDocument::default();
         let anchor_text = "x".repeat(150);
@@ -734,7 +709,7 @@ mod tests {
 
     #[test]
     fn oversized_store_is_rejected_before_parsing() {
-        let directory = TestDirectory::new();
+        let directory = TestDirectory::new("reader_positions.json");
         let path = directory.path();
         fs::write(&path, vec![b' '; MAX_FILE_BYTES as usize + 1]).unwrap();
 

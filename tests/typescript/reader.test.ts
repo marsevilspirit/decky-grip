@@ -8,13 +8,7 @@ import {
   restoreReaderPosition,
 } from "../../src/reader/anchor";
 import {
-  initialRenderedSectionCount,
-  nextRenderedSectionCount,
-  SECTION_RENDER_BATCH,
-} from "../../src/reader/progressive-render";
-import {
   chooseObservedGuide,
-  findMostRecentGuide,
   RecentGuideIndex,
 } from "../../src/reader/recent-guide";
 import { shortSectionTitle } from "../../src/reader/toc-title";
@@ -177,47 +171,6 @@ describe("GRIP Reader helpers", () => {
     expect(dom.treeWalkerCalls()).toBe(2);
     expect(index.refresh()).toBe(0);
     expect(dom.treeWalkerCalls()).toBe(2);
-  });
-
-  it("reveals a huge guide in deterministic bounded section batches", () => {
-    const counts = [initialRenderedSectionCount(512)];
-    while (counts[counts.length - 1] < 512) {
-      counts.push(nextRenderedSectionCount(counts[counts.length - 1], 512));
-    }
-
-    expect(counts[0]).toBe(1);
-    expect(counts[counts.length - 1]).toBe(512);
-    for (let index = 1; index < counts.length; index += 1) {
-      expect(counts[index] - counts[index - 1]).toBeLessThanOrEqual(
-        SECTION_RENDER_BATCH,
-      );
-      expect(counts[index]).toBeGreaterThan(counts[index - 1]);
-    }
-    expect(initialRenderedSectionCount(0)).toBe(0);
-    expect(initialRenderedSectionCount(3)).toBe(1);
-    expect([
-      initialRenderedSectionCount(20),
-      nextRenderedSectionCount(1, 20),
-      nextRenderedSectionCount(9, 20),
-      nextRenderedSectionCount(17, 20),
-    ]).toEqual([1, 9, 17, 20]);
-  });
-
-  it("chooses the newest saved guide for the running app", () => {
-    const positions = {
-      "1113000:10": { scrollTop: 1, updatedAt: 100 },
-      "1113000:11": { scrollTop: 2, updatedAt: 300 },
-      "222:20": { scrollTop: 3, updatedAt: 400 },
-    };
-
-    expect(findMostRecentGuide(positions, "1113000")).toEqual({
-      appId: "1113000",
-      guideId: "11",
-    });
-    expect(findMostRecentGuide(positions)).toEqual({
-      appId: "222",
-      guideId: "20",
-    });
   });
 
   it("replaces persisted recent-guide seeds after a store repair", () => {

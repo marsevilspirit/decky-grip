@@ -27,31 +27,31 @@ fake_decky.logger = _TestLogger()
 sys.modules["decky"] = fake_decky
 
 import main as plugin_main  # noqa: E402
-from rust_sidecar import RustSidecarError  # noqa: E402
+from rust_sidecar import RustSidecar, RustSidecarError  # noqa: E402
 
 
 def make_sidecar():
     sidecar = mock.Mock()
-    sidecar.positions = mock.Mock()
-    sidecar.reader_positions = mock.Mock()
-    sidecar.guides = mock.Mock()
-    sidecar.images = mock.Mock()
-    sidecar.positions.snapshot.return_value = {}
-    sidecar.positions.repair.return_value = {
-        "repaired": False,
-        "backup": None,
+    sidecar.responses = {
+        "positions.snapshot": {},
+        "positions.repair": {"repaired": False, "backup": None},
+        "reader_positions.get": None,
+        "reader_positions.repair": {"repaired": False, "backup": None},
+        "hotkey.status": {
+            "available": False,
+            "button": "L4",
+            "device": None,
+            "running": True,
+        },
     }
-    sidecar.reader_positions.get.return_value = None
-    sidecar.reader_positions.repair.return_value = {
-        "repaired": False,
-        "backup": None,
-    }
-    sidecar.hotkey_status.return_value = {
-        "available": False,
-        "button": "L4",
-        "device": None,
-        "running": True,
-    }
+
+    def request(method, _params, **_kwargs):
+        response = sidecar.responses.get(method)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    sidecar.request.side_effect = request
     return sidecar
 
 
@@ -81,10 +81,7 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_constructor_requires_the_one_rust_backend(self):
         plugin = self.plugin()
 
-        self.assertIs(plugin._store, self.sidecar.positions)
-        self.assertIs(plugin._reader_positions, self.sidecar.reader_positions)
-        self.assertIs(plugin._guide_reader, self.sidecar.guides)
-        self.assertIs(plugin._guide_images, self.sidecar.images)
+        self.assertIs(plugin._sidecar, self.sidecar)
         self.assertEqual(
             self.start.call_args.args[1],
             Path(self.settings_directory.name) / "positions.json",
@@ -101,14 +98,14 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_running_sidecar_failure_does_not_switch_writers(self):
         plugin = self.plugin()
-        self.sidecar.positions.get.side_effect = RustSidecarError("dead")
+        self.sidecar.responses["positions.snapshot"] = RustSidecarError("dead")
 
         with self.assertRaisesRegex(RustSidecarError, "dead"):
-            await plugin.get_position("1:2")
+            await plugin.get_positions()
         with self.assertRaisesRegex(RustSidecarError, "dead"):
-            await plugin.get_position("1:2")
+            await plugin.get_positions()
 
-        self.assertIs(plugin._store, self.sidecar.positions)
+        self.assertIs(plugin._sidecar, self.sidecar)
         self.start.assert_called_once()
 
     async def test_hotkey_event_is_validated_forwarded_and_stopped(self):
@@ -159,25 +156,19 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_position_rpcs_forward_and_shape_snapshots(self):
         plugin = self.plugin()
-        self.sidecar.positions.get.return_value = {"scroll_top": 1}
-        self.sidecar.positions.snapshot.return_value = {
+        self.sidecar.responses["positions.snapshot"] = {
             "1:2": {"scroll_top": 12.5, "updated_at_ms": 34}
         }
-        self.sidecar.positions.save.return_value = {"scroll_top": 2}
-        self.sidecar.positions.delete.return_value = True
-        self.sidecar.positions.clear.return_value = 3
-        self.sidecar.positions.count.return_value = 4
+        self.sidecar.responses["positions.save"] = {"scroll_top": 2}
 
-        self.assertEqual(await plugin.get_position("1:2"), {"scroll_top": 1})
         self.assertEqual(
             await plugin.get_positions(),
             {"1:2": {"scrollTop": 12.5, "updatedAt": 34}},
         )
         self.assertEqual(await plugin.save_position("1:2", 2), {"scroll_top": 2})
-        self.assertTrue(await plugin.delete_position("1:2"))
-        self.assertEqual(await plugin.clear_positions(), 3)
-        self.assertEqual(await plugin.get_position_count(), 4)
-        self.sidecar.positions.save.assert_called_once_with("1:2", 2)
+        self.sidecar.request.assert_any_call(
+            "positions.save", {"guide_key": "1:2", "scroll_top": 2}
+        )
 
     async def test_reader_position_and_repair_bridges_shape_only_for_frontend(self):
         plugin = self.plugin()
@@ -188,9 +179,9 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
             "anchor_offset": -17.5,
             "updated_at_ms": 34,
         }
-        self.sidecar.reader_positions.get.return_value = saved
-        self.sidecar.reader_positions.save.return_value = saved
-        self.sidecar.positions.repair.return_value = {
+        self.sidecar.responses["reader_positions.get"] = saved
+        self.sidecar.responses["reader_positions.save"] = saved
+        self.sidecar.responses["positions.repair"] = {
             "repaired": True,
             "backup": "/tmp/positions.bak",
         }
@@ -248,12 +239,13 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
         started = threading.Event()
         release = threading.Event()
 
-        def snapshot():
+        def request(method, _params, **_kwargs):
+            self.assertEqual(method, "positions.snapshot")
             started.set()
             release.wait(timeout=2)
             return {}
 
-        self.sidecar.positions.snapshot.side_effect = snapshot
+        self.sidecar.request.side_effect = request
         request = asyncio.create_task(plugin.get_positions())
         self.assertTrue(await asyncio.to_thread(started.wait, 1))
         unloading = asyncio.create_task(plugin._unload())
@@ -268,13 +260,19 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
         first_started = threading.Event()
         release_first = threading.Event()
 
-        def get(guide_id, force_refresh):
+        def request(method, params, *, timeout=None):
+            self.assertEqual(method, "guides.get")
+            self.assertEqual(timeout, RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS)
+            guide_id = params["guide_id"]
             if guide_id == "1":
                 first_started.set()
                 release_first.wait(timeout=2)
-            return {"guideId": guide_id, "forceRefresh": force_refresh}
+            return {
+                "guideId": guide_id,
+                "forceRefresh": params["force_refresh"],
+            }
 
-        self.sidecar.guides.get.side_effect = get
+        self.sidecar.request.side_effect = request
         first = asyncio.create_task(plugin.get_guide("1"))
         try:
             self.assertTrue(await asyncio.to_thread(first_started.wait, 1))
@@ -292,14 +290,17 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
         release = threading.Event()
         calls = []
 
-        def get_cached(guide_id):
+        def request(method, params, *, timeout=None):
+            self.assertEqual(method, "guides.get_cached")
+            self.assertEqual(timeout, RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS)
+            guide_id = params["guide_id"]
             calls.append(guide_id)
             if guide_id == "1":
                 started.set()
                 release.wait(timeout=2)
             return None
 
-        self.sidecar.guides.get_cached.side_effect = get_cached
+        self.sidecar.request.side_effect = request
         first = asyncio.create_task(plugin.get_cached_guide("1"))
         self.assertTrue(await asyncio.to_thread(started.wait, 1))
         second = asyncio.create_task(plugin.get_cached_guide("2"))
@@ -321,7 +322,9 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
         release = threading.Event()
         cancellation_observed = asyncio.Event()
 
-        def get(_guide_id, _force_refresh):
+        def request(method, _params, *, timeout=None):
+            self.assertEqual(method, "guides.get")
+            self.assertEqual(timeout, RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS)
             started.set()
             release.wait(timeout=2)
             return {}
@@ -333,7 +336,7 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
                 cancellation_observed.set()
                 raise
 
-        self.sidecar.guides.get.side_effect = get
+        self.sidecar.request.side_effect = request
         task = asyncio.create_task(call())
         self.assertTrue(await asyncio.to_thread(started.wait, 1))
         task.cancel()
@@ -346,12 +349,12 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
         result = await asyncio.gather(task, return_exceptions=True)
         self.assertIsInstance(result[0], asyncio.CancelledError)
 
-    async def test_image_and_cache_admin_rpcs_use_dedicated_adapters(self):
+    async def test_image_and_cache_admin_rpcs_forward_protocol_methods(self):
         plugin = self.plugin()
-        self.sidecar.images.get.return_value = {"fromCache": True}
-        self.sidecar.guides.clear.return_value = {"filesRemoved": 1}
-        self.sidecar.images.clear.return_value = {"filesRemoved": 2}
-        self.sidecar.cache_stats.return_value = {
+        self.sidecar.responses["images.get"] = {"fromCache": True}
+        self.sidecar.responses["guides.clear"] = {"filesRemoved": 1}
+        self.sidecar.responses["images.clear"] = {"filesRemoved": 2}
+        self.sidecar.responses["reader_cache.stats"] = {
             "guides": {"files": 0},
             "images": {"files": 0},
         }
@@ -366,8 +369,13 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await plugin.clear_guide_cache())["filesRemoved"], 1)
         self.assertEqual((await plugin.clear_image_cache())["filesRemoved"], 2)
         self.assertEqual((await plugin.get_reader_cache_stats())["guides"]["files"], 0)
-        self.sidecar.images.get.assert_called_once_with(
-            "https://images.steamusercontent.com/a.png", False
+        self.sidecar.request.assert_any_call(
+            "images.get",
+            {
+                "url": "https://images.steamusercontent.com/a.png",
+                "allow_download": False,
+            },
+            timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
         )
 
 

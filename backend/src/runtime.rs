@@ -179,7 +179,6 @@ fn image_error_kind(kind: ImageErrorKind) -> &'static str {
     match kind {
         ImageErrorKind::Validation => "validation",
         ImageErrorKind::Download => "download",
-        ImageErrorKind::Cache => "cache",
     }
 }
 
@@ -287,7 +286,7 @@ fn dispatch_general(
         }
         "images.clear" => {
             empty_params(params)?;
-            images.clear().map_err(RequestError::Image)
+            Ok(images.clear())
         }
         "reader_cache.stats" => {
             empty_params(params)?;
@@ -756,7 +755,6 @@ mod tests {
     fn image_error_kinds_keep_the_python_contract() {
         assert_eq!(image_error_kind(ImageErrorKind::Validation), "validation");
         assert_eq!(image_error_kind(ImageErrorKind::Download), "download");
-        assert_eq!(image_error_kind(ImageErrorKind::Cache), "cache");
     }
 
     #[test]
@@ -824,7 +822,9 @@ mod tests {
                 .recv_timeout(Duration::from_secs(1))
                 .unwrap();
             store_requests
-                .send(Work::Request(json!({"id": 2, "method": "positions.count"})))
+                .send(Work::Request(
+                    json!({"id": 2, "method": "positions.snapshot"}),
+                ))
                 .unwrap();
 
             let deadline = Instant::now() + Duration::from_secs(1);
@@ -832,7 +832,7 @@ mod tests {
                 thread::sleep(Duration::from_millis(5));
             }
             assert_eq!(output_copy.messages()[0]["id"], 2);
-            assert_eq!(output_copy.messages()[0]["result"], 0);
+            assert_eq!(output_copy.messages()[0]["result"], json!({}));
 
             release.send(()).unwrap();
             drop(store_requests);

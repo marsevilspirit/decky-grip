@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  isImageNearViewport,
   ReaderImageHydrator,
   type CachedGuideImage,
 } from "../../src/reader/image-hydrator";
@@ -20,12 +19,6 @@ function image(url: string) {
   return candidate;
 }
 
-function root(images: ReturnType<typeof image>[]) {
-  return {
-    querySelectorAll: () => images,
-  } as unknown as HTMLElement;
-}
-
 const cached: CachedGuideImage = {
   mimeType: "image/png",
   base64: "aW1hZ2U=",
@@ -35,18 +28,6 @@ const cached: CachedGuideImage = {
 };
 
 describe("reader image hydration", () => {
-  it("selects only images in or near the reader viewport", () => {
-    const rect = (top: number, bottom: number) => ({
-      getBoundingClientRect: () => ({ bottom, top }) as DOMRect,
-    });
-    const scroller = rect(100, 500);
-
-    expect(isImageNearViewport(rect(-700, -600), scroller)).toBe(false);
-    expect(isImageNearViewport(rect(-100, 0), scroller)).toBe(true);
-    expect(isImageNearViewport(rect(500, 600), scroller)).toBe(true);
-    expect(isImageNearViewport(rect(1_101, 1_201), scroller)).toBe(false);
-  });
-
   it("loads inert URLs through a bounded RPC and assigns only blob URLs", async () => {
     let active = 0;
     let maximumActive = 0;
@@ -75,7 +56,7 @@ describe("reader image hydration", () => {
       vi.fn(),
     );
 
-    hydrator.hydrate(root(images));
+    hydrator.hydrateImages(images);
     expect(fetchImage).toHaveBeenCalledTimes(2);
     expect(maximumActive).toBe(2);
     releases.shift()?.();
@@ -84,7 +65,11 @@ describe("reader image hydration", () => {
       releases.shift()?.();
       await Promise.resolve();
     }
-    await hydrator.waitForIdle();
+    await vi.waitFor(() =>
+      expect(
+        images.every((candidate) => candidate.src.startsWith("blob:")),
+      ).toBe(true),
+    );
 
     expect(images.map((candidate) => candidate.src)).toEqual([
       "blob:grip-1",
@@ -107,10 +92,9 @@ describe("reader image hydration", () => {
       vi.fn(),
     );
 
-    hydrator.hydrate(root([target]));
-    await hydrator.waitForIdle();
-    hydrator.hydrate(root([target]));
-    await hydrator.waitForIdle();
+    hydrator.hydrateImages([target]);
+    await vi.waitFor(() => expect(target.src).toBe("blob:cached"));
+    hydrator.hydrateImages([target]);
 
     expect(fetchImage).toHaveBeenCalledOnce();
     expect(target.src).toBe("blob:cached");
@@ -128,8 +112,8 @@ describe("reader image hydration", () => {
       vi.fn(),
     );
 
-    hydrator.hydrate(root([first, second]));
-    await hydrator.waitForIdle();
+    hydrator.hydrateImages([first, second]);
+    await vi.waitFor(() => expect(second.src).toBe("blob:shared"));
 
     expect(fetchImage).toHaveBeenCalledOnce();
     expect(makeObjectUrl).toHaveBeenCalledOnce();
@@ -151,16 +135,13 @@ describe("reader image hydration", () => {
       64,
     );
 
-    hydrator.hydrate(root([first, second]), (candidate) => candidate === first);
-    await hydrator.waitForIdle();
+    hydrator.hydrateImages([first]);
+    await vi.waitFor(() => expect(first.src).toBe("blob:1"));
     expect(first.src).toBe("blob:1");
     expect(second.src).toBe("");
 
-    hydrator.hydrate(
-      root([first, second]),
-      (candidate) => candidate === second,
-    );
-    await hydrator.waitForIdle();
+    hydrator.hydrateImages([second]);
+    await vi.waitFor(() => expect(second.src).toBe("blob:2"));
     expect(first.src).toBe("");
     expect(second.src).toBe("blob:2");
     expect(revoke).toHaveBeenCalledWith("blob:1");
@@ -176,8 +157,10 @@ describe("reader image hydration", () => {
       vi.fn(),
     );
 
-    hydrator.hydrate(root([target]));
-    await hydrator.waitForIdle();
+    hydrator.hydrateImages([target]);
+    await vi.waitFor(() =>
+      expect(target.dataset.gripImageState).toBe("unavailable"),
+    );
 
     expect(makeObjectUrl).not.toHaveBeenCalled();
     expect(target.dataset.gripImageState).toBe("unavailable");
@@ -199,7 +182,9 @@ describe("reader image hydration", () => {
 
     hydrator.setPinnedImages([first, second]);
     hydrator.hydrateImages([first, second]);
-    await hydrator.waitForIdle();
+    await vi.waitFor(() =>
+      expect(second.dataset.gripImageState).toBe("deferred"),
+    );
 
     expect(first.src).toBe("blob:1");
     expect(first.dataset.gripImageState).toBe("ready");
@@ -209,7 +194,7 @@ describe("reader image hydration", () => {
 
     hydrator.setPinnedImages([second]);
     hydrator.hydrateImages([second]);
-    await hydrator.waitForIdle();
+    await vi.waitFor(() => expect(second.src).toBe("blob:2"));
 
     expect(first.src).toBe("");
     expect(second.src).toBe("blob:2");
@@ -249,7 +234,9 @@ describe("reader image hydration", () => {
     releases.shift()?.();
     await vi.waitFor(() => expect(fetchImage).toHaveBeenCalledTimes(3));
     releases.shift()?.();
-    await hydrator.waitForIdle();
+    await vi.waitFor(() =>
+      expect(images[2].dataset.gripImageState).toBe("ready"),
+    );
 
     expect(fetchImage).toHaveBeenCalledTimes(3);
     expect(images[2].dataset.gripImageState).toBe("ready");
@@ -266,11 +253,11 @@ describe("reader image hydration", () => {
       vi.fn(),
     );
 
-    hydrator.hydrate(root([target]));
-    await hydrator.waitForIdle();
+    hydrator.hydrateImages([target]);
+    await vi.waitFor(() => expect(target.src).toBe("blob:cached-1"));
     hydrator.clear();
-    hydrator.hydrate(root([target]));
-    await hydrator.waitForIdle();
+    hydrator.hydrateImages([target]);
+    await vi.waitFor(() => expect(target.src).toBe("blob:cached-2"));
 
     expect(fetchImage).toHaveBeenCalledTimes(2);
     expect(target.src).toBe("blob:cached-2");
@@ -291,10 +278,11 @@ describe("reader image hydration", () => {
       revoke,
     );
 
-    hydrator.hydrate(root([target]));
+    hydrator.hydrateImages([target]);
     hydrator.clear();
     resolveImage(cached);
-    await hydrator.waitForIdle();
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(target.src).toBe("");
     expect(makeObjectUrl).not.toHaveBeenCalled();

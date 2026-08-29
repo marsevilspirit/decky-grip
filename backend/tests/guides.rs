@@ -1,3 +1,6 @@
+mod common;
+
+use common::TestDirectory;
 use grip_sidecar::guides::{GuideError, GuideReader};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -16,28 +19,6 @@ const OTHER_GUIDE_ID: &str = "3414883878";
 const NOW_MS: u64 = 1_800_000_000_000;
 const CACHE_MAX_AGE_MS: u64 = 6 * 60 * 60 * 1_000;
 const MAX_DOWNLOAD_BYTES: usize = 16 * 1024 * 1024;
-
-static DIRECTORY_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-struct TestDirectory(PathBuf);
-
-impl TestDirectory {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "grip-guide-integration-{}-{}",
-            std::process::id(),
-            DIRECTORY_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&path).unwrap();
-        Self(path)
-    }
-}
-
-impl Drop for TestDirectory {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
 
 enum FetchPlan {
     Body(Vec<u8>),
@@ -136,10 +117,6 @@ fn downloads_then_serves_the_validated_network_inert_cache() {
             Duration::from_secs(12),
             MAX_DOWNLOAD_BYTES,
         )
-    );
-    assert_eq!(
-        GuideReader::source_url(GUIDE_ID).unwrap(),
-        "https://steamcommunity.com/sharedfiles/filedetails/?id=3414883877&l=schinese"
     );
     assert_eq!(
         downloaded

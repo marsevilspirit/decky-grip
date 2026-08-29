@@ -18,12 +18,6 @@ interface HydratableImage {
   removeAttribute(name: string): void;
 }
 
-interface ImageRoot {
-  querySelectorAll<E extends Element = Element>(
-    selectors: string,
-  ): NodeListOf<E>;
-}
-
 interface PendingImageUrl {
   generation: number;
   images: Set<HydratableImage>;
@@ -37,11 +31,6 @@ interface BlobEntry {
 }
 
 type ObjectUrlFactory = (image: CachedGuideImage) => string;
-export type ImageHydrationPredicate = (image: HTMLImageElement) => boolean;
-
-interface RectElement {
-  getBoundingClientRect(): DOMRect;
-}
 
 const DEFAULT_CONCURRENCY = 3;
 const DEFAULT_MAX_BLOB_BYTES = 32 * 1024 * 1024;
@@ -87,21 +76,6 @@ function residentImageBytes(image: CachedGuideImage): number {
   return Math.max(decodedBase64Bytes(image.base64), decodedBytes);
 }
 
-export function isImageNearViewport(
-  image: RectElement,
-  scroller: RectElement,
-  overscanScreens = 1.5,
-): boolean {
-  const viewport = scroller.getBoundingClientRect();
-  const imageRect = image.getBoundingClientRect();
-  const viewportHeight = Math.max(1, viewport.bottom - viewport.top);
-  const overscan = Math.max(0, overscanScreens) * viewportHeight;
-  return (
-    imageRect.bottom >= viewport.top - overscan &&
-    imageRect.top <= viewport.bottom + overscan
-  );
-}
-
 /**
  * Resolves only caller-selected inert image nodes through the backend cache.
  * Requests and Blob URLs are shared per canonical URL, while a frontend LRU
@@ -114,7 +88,6 @@ export class ReaderImageHydrator {
   private readonly imageUrls = new WeakMap<object, string>();
   private readonly capacityDeferredAt = new WeakMap<object, number>();
   private readonly pendingOverflow = new Set<HydratableImage>();
-  private readonly idleWaiters = new Set<() => void>();
   private readonly pinnedUrls = new Set<string>();
   private active = 0;
   private blobBytes = 0;
@@ -142,16 +115,6 @@ export class ReaderImageHydrator {
         throw new TypeError(`${label} must be a positive integer`);
       }
     }
-  }
-
-  hydrate(
-    root: ImageRoot,
-    shouldHydrate: ImageHydrationPredicate = () => true,
-  ): void {
-    const images = [
-      ...root.querySelectorAll<HTMLImageElement>("img[data-grip-image-url]"),
-    ].filter(shouldHydrate);
-    this.hydrateImages(images);
   }
 
   /** Pins the current near-viewport working set so LRU eviction cannot thrash it. */
@@ -226,13 +189,6 @@ export class ReaderImageHydrator {
     this.pump();
   }
 
-  waitForIdle(): Promise<void> {
-    if (this.active === 0 && this.queue.length === 0) {
-      return Promise.resolve();
-    }
-    return new Promise((resolve) => this.idleWaiters.add(resolve));
-  }
-
   clear(): void {
     this.generation += 1;
     this.queue.length = 0;
@@ -246,7 +202,6 @@ export class ReaderImageHydrator {
     }
     this.blobs.clear();
     this.blobBytes = 0;
-    this.resolveIdleIfReady();
   }
 
   private pump(): void {
@@ -263,10 +218,8 @@ export class ReaderImageHydrator {
         }
         this.refillPendingOverflow();
         this.pump();
-        this.resolveIdleIfReady();
       });
     }
-    this.resolveIdleIfReady();
   }
 
   private async load(task: PendingImageUrl): Promise<void> {
@@ -408,7 +361,6 @@ export class ReaderImageHydrator {
         this.pendingOverflow.delete(image);
       }
     }
-    this.resolveIdleIfReady();
   }
 
   private refillPendingOverflow(): void {
@@ -448,15 +400,5 @@ export class ReaderImageHydrator {
       image.dataset.gripImageState = "evicted";
       this.imageUrls.delete(image);
     }
-  }
-
-  private resolveIdleIfReady(): void {
-    if (this.active !== 0 || this.queue.length !== 0) {
-      return;
-    }
-    for (const resolve of this.idleWaiters) {
-      resolve();
-    }
-    this.idleWaiters.clear();
   }
 }
