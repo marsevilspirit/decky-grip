@@ -82,6 +82,18 @@ fn run_concurrent_store_writer(positions_path: PathBuf, app_id: u64, barrier: Ar
             }),
         );
     }
+    for index in 1..=10_u64 {
+        let guide_key = format!("{app_id}:{index}");
+        send_and_expect_ok(
+            &mut input,
+            &mut output,
+            &json!({
+                "id": 100 + index,
+                "method": "favorites.set",
+                "params": {"guide_key": guide_key, "favorite": true},
+            }),
+        );
+    }
 
     drop(input);
     output.read_to_end(&mut Vec::new()).unwrap();
@@ -145,7 +157,7 @@ fn json_lines_process_handles_ping_repair_and_position_lifecycle() {
         responses[&1]["result"],
         json!({
             "version": 2,
-            "capabilities": ["positions", "reader_positions", "guides", "images", "hotkey", "multiplex"],
+            "capabilities": ["positions", "reader_positions", "favorites", "guides", "images", "hotkey", "multiplex"],
         })
     );
     assert_eq!(responses[&2]["error"]["kind"], "storage");
@@ -251,7 +263,7 @@ fn json_lines_process_uses_the_sibling_reader_position_store() {
         responses[&1]["result"],
         json!({
             "version": 2,
-            "capabilities": ["positions", "reader_positions", "guides", "images", "hotkey", "multiplex"],
+            "capabilities": ["positions", "reader_positions", "favorites", "guides", "images", "hotkey", "multiplex"],
         })
     );
     assert_eq!(responses[&2]["error"]["kind"], "storage");
@@ -387,10 +399,180 @@ fn guide_library_joins_recent_reader_positions_with_cached_metadata() {
 }
 
 #[test]
-fn concurrent_sidecars_preserve_disjoint_position_writes() {
+fn favorites_repair_and_set_are_durable_and_idempotent() {
+    let directory = TestDirectory::new();
+    let positions_path = directory.0.join("positions.json");
+    let favorites_path = directory.0.join("favorites.json");
+    let corrupt = b"{ broken favorites";
+    fs::write(&favorites_path, corrupt).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_grip-sidecar"))
+        .arg(&positions_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+
+    let blocked = send_and_read_response(
+        &mut input,
+        &mut output,
+        &json!({"id": 1, "method": "favorites.set", "params": {"guide_key": "1:7", "favorite": true}}),
+    );
+    assert_eq!(blocked["error"]["kind"], "storage");
+    assert_eq!(fs::read(&favorites_path).unwrap(), corrupt);
+
+    let repaired = send_and_read_response(
+        &mut input,
+        &mut output,
+        &json!({"id": 2, "method": "favorites.repair"}),
+    );
+    assert_eq!(repaired["result"]["repaired"], true);
+    let backup = PathBuf::from(repaired["result"]["backup"].as_str().unwrap());
+    assert_eq!(fs::read(backup).unwrap(), corrupt);
+
+    let empty = fs::read(&favorites_path).unwrap();
+    let absent = send_and_read_response(
+        &mut input,
+        &mut output,
+        &json!({"id": 3, "method": "favorites.set", "params": {"guide_key": "1:7", "favorite": false}}),
+    );
+    assert_eq!(
+        absent["result"],
+        json!({"guide_key": "1:7", "favorite": false})
+    );
+    assert_eq!(fs::read(&favorites_path).unwrap(), empty);
+
+    let added = send_and_read_response(
+        &mut input,
+        &mut output,
+        &json!({"id": 4, "method": "favorites.set", "params": {"guide_key": "1:7", "favorite": true}}),
+    );
+    assert_eq!(
+        added["result"],
+        json!({"guide_key": "1:7", "favorite": true})
+    );
+    let first_add = fs::read(&favorites_path).unwrap();
+    let added_again = send_and_read_response(
+        &mut input,
+        &mut output,
+        &json!({"id": 5, "method": "favorites.set", "params": {"guide_key": "1:7", "favorite": true}}),
+    );
+    assert_eq!(added_again["result"], added["result"]);
+    assert_eq!(fs::read(&favorites_path).unwrap(), first_add);
+
+    send_and_expect_ok(
+        &mut input,
+        &mut output,
+        &json!({"id": 6, "method": "favorites.set", "params": {"guide_key": "1:7", "favorite": false}}),
+    );
+    let first_remove = fs::read(&favorites_path).unwrap();
+    send_and_expect_ok(
+        &mut input,
+        &mut output,
+        &json!({"id": 7, "method": "favorites.set", "params": {"guide_key": "1:7", "favorite": false}}),
+    );
+    assert_eq!(fs::read(&favorites_path).unwrap(), first_remove);
+
+    let invalid = send_and_read_response(
+        &mut input,
+        &mut output,
+        &json!({"id": 8, "method": "favorites.set", "params": {"guide_key": "1:7", "favorite": 1}}),
+    );
+    assert_eq!(invalid["error"]["kind"], "validation");
+    assert_eq!(
+        fs::metadata(&favorites_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    drop(input);
+    output.read_to_end(&mut Vec::new()).unwrap();
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
+fn guide_library_returns_all_favorites_then_five_recent_nonfavorites() {
     let directory = TestDirectory::new();
     let positions_path = directory.0.join("positions.json");
     let reader_positions_path = directory.0.join("reader_positions.json");
+    let favorites_path = directory.0.join("favorites.json");
+    let reader_positions = (1_u64..=7)
+        .map(|guide_id| {
+            (
+                format!("1:{guide_id}"),
+                json!({
+                    "anchor_offset": 0,
+                    "anchor_text": null,
+                    "scroll_top": 0,
+                    "section_id": null,
+                    "updated_at_ms": 800 - guide_id * 100,
+                }),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    fs::write(
+        &reader_positions_path,
+        serde_json::to_vec(&json!({
+            "positions": reader_positions,
+            "schema_version": 1,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        &favorites_path,
+        serde_json::to_vec(&json!({
+            "favorites": {
+                "1:7": {"favorited_at_ms": 900},
+                "1:8": {"favorited_at_ms": 1000},
+            },
+            "schema_version": 1,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_grip-sidecar"))
+        .arg(&positions_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let response = send_and_read_response(
+        &mut input,
+        &mut output,
+        &json!({"id": 1, "method": "guides.list", "params": {"app_id": "1"}}),
+    );
+    assert_eq!(response["ok"], true);
+    let entries = response["result"].as_array().unwrap();
+    assert_eq!(entries.len(), 7);
+    assert_eq!(entries[0]["guideId"], "8");
+    assert_eq!(entries[0]["favorite"], true);
+    assert_eq!(entries[0]["updatedAt"], 1000);
+    assert_eq!(entries[0]["cache"], Value::Null);
+    assert_eq!(entries[1]["guideId"], "7");
+    assert_eq!(entries[1]["favorite"], true);
+    assert_eq!(entries[1]["updatedAt"], 100);
+    for (entry, guide_id) in entries[2..].iter().zip(1_u64..=5) {
+        assert_eq!(entry["guideId"], guide_id.to_string());
+        assert_eq!(entry["favorite"], false);
+    }
+
+    drop(input);
+    output.read_to_end(&mut Vec::new()).unwrap();
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
+fn concurrent_sidecars_preserve_disjoint_store_writes() {
+    let directory = TestDirectory::new();
+    let positions_path = directory.0.join("positions.json");
+    let reader_positions_path = directory.0.join("reader_positions.json");
+    let favorites_path = directory.0.join("favorites.json");
     let barrier = Arc::new(Barrier::new(2));
     let writers: Vec<_> = [1_u64, 2]
         .into_iter()
@@ -419,6 +601,20 @@ fn concurrent_sidecars_preserve_disjoint_position_writes() {
         assert!(lock.is_file());
         assert_eq!(lock.permissions().mode() & 0o777, 0o600);
     }
+
+    let document: Value = serde_json::from_slice(&fs::read(&favorites_path).unwrap()).unwrap();
+    let favorites = document["favorites"].as_object().unwrap();
+    assert_eq!(favorites.len(), 20);
+    for app_id in [1_u64, 2] {
+        for index in 1..=10_u64 {
+            assert!(favorites.contains_key(&format!("{app_id}:{index}")));
+        }
+    }
+    let mut lock_name = favorites_path.file_name().unwrap().to_os_string();
+    lock_name.push(".lock");
+    let lock = fs::metadata(favorites_path.with_file_name(lock_name)).unwrap();
+    assert!(lock.is_file());
+    assert_eq!(lock.permissions().mode() & 0o777, 0o600);
 }
 
 #[test]

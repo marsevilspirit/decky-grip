@@ -883,7 +883,10 @@ export function GuideReaderPage({
       const repairMessage = repair ? await onRepairPositions() : null;
       const snapshot = await cache.retryPosition(identity);
       setLoaded(snapshot);
-      setLoadWarning(snapshot.positionWarning ? null : repairMessage);
+      const warnings = [repairMessage, snapshot.positionWarning].filter(
+        (warning): warning is string => warning !== null,
+      );
+      setLoadWarning(warnings.length > 0 ? warnings.join("；") : null);
     } catch (reason: unknown) {
       setLoadWarning(`阅读位置恢复失败，正文仍可使用：${errorMessage(reason)}`);
     } finally {

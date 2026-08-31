@@ -1,10 +1,12 @@
 use super::{
-    MAX_REQUEST_BYTES, PositionStore, ReaderPositionStore, StoreError, dispatch, empty_params,
-    params_with_fields, protocol_info, request_fields, valid_id,
+    FavoriteStore, MAX_POSITIONS, MAX_REQUEST_BYTES, PositionStore, ReaderPositionStore,
+    StoreError, dispatch, empty_params, params_with_fields, protocol_info, request_fields,
+    valid_id,
 };
 use crate::guide_images::{GuideImageCache, ImageError, ImageErrorKind};
 use crate::guides::{GuideError, GuideErrorKind, GuideReader};
 use crate::hotkey::{HotkeyEvent, L4HotkeyMonitor};
+use crate::reader_positions::ReaderHistoryEntry;
 use serde_json::{Value, json};
 use std::collections::{HashSet, VecDeque};
 use std::io::{self, BufRead, Read, Write};
@@ -122,6 +124,7 @@ struct GeneralServices {
     guides: Arc<GuideReader>,
     images: Arc<GuideImageCache>,
     reader_store: ReaderPositionStore,
+    favorite_store: FavoriteStore,
 }
 
 impl Drop for GuideLease<'_> {
@@ -209,7 +212,9 @@ fn invalid_json_response() -> Value {
 
 fn is_store_request(request: &Value) -> bool {
     request_fields(request).is_ok_and(|(method, _)| {
-        method.starts_with("positions.") || method.starts_with("reader_positions.")
+        method.starts_with("positions.")
+            || method.starts_with("reader_positions.")
+            || method.starts_with("favorites.")
     })
 }
 
@@ -218,6 +223,7 @@ fn dispatch_general(
     guides: &Arc<GuideReader>,
     images: &Arc<GuideImageCache>,
     reader_store: &ReaderPositionStore,
+    favorite_store: &FavoriteStore,
     method: &str,
     params: Option<&Value>,
 ) -> Result<Value, RequestError> {
@@ -282,14 +288,54 @@ fn dispatch_general(
                     .into());
                 }
             };
+            let mut favorites = favorite_store.entries()?;
+            let mut favorite_entries = Vec::new();
+            let mut recent_entries = Vec::new();
+            for entry in reader_store.recent(app_id, MAX_POSITIONS)? {
+                let guide_key = format!("{}:{}", entry.app_id, entry.guide_id);
+                if let Some(favorited_at_ms) = favorites.remove(&guide_key) {
+                    favorite_entries.push((favorited_at_ms, entry));
+                } else if recent_entries.len() < GUIDE_LIBRARY_LIMIT {
+                    recent_entries.push(entry);
+                }
+            }
+            for (guide_key, favorited_at_ms) in favorites {
+                let (entry_app_id, guide_id) = guide_key
+                    .split_once(':')
+                    .expect("stored favorite keys are validated");
+                if app_id.is_some_and(|app_id| app_id != entry_app_id) {
+                    continue;
+                }
+                favorite_entries.push((
+                    favorited_at_ms,
+                    ReaderHistoryEntry {
+                        app_id: entry_app_id.to_owned(),
+                        guide_id: guide_id.to_owned(),
+                        section_id: None,
+                        updated_at_ms: favorited_at_ms,
+                    },
+                ));
+            }
+            favorite_entries.sort_by(|(left_at, left), (right_at, right)| {
+                right_at
+                    .cmp(left_at)
+                    .then_with(|| left.app_id.cmp(&right.app_id))
+                    .then_with(|| left.guide_id.cmp(&right.guide_id))
+            });
+
             let mut entries = Vec::new();
-            for entry in reader_store.recent(app_id, GUIDE_LIBRARY_LIMIT)? {
+            for (favorite, entry) in favorite_entries
+                .into_iter()
+                .map(|(_, entry)| (true, entry))
+                .chain(recent_entries.into_iter().map(|entry| (false, entry)))
+            {
                 let cache = guides
                     .cached_summary(&entry.guide_id, entry.section_id.as_deref())
                     .map_err(RequestError::Guide)?;
                 entries.push(json!({
                     "appId": entry.app_id,
                     "cache": cache,
+                    "favorite": favorite,
                     "guideId": entry.guide_id,
                     "updatedAt": entry.updated_at_ms,
                 }));
@@ -381,6 +427,7 @@ fn store_worker<W: Write>(
     requests: Receiver<Work>,
     store: PositionStore,
     reader_store: ReaderPositionStore,
+    favorite_store: FavoriteStore,
     writer: Arc<Mutex<&mut W>>,
     errors: SyncSender<io::Error>,
     failed: Arc<AtomicBool>,
@@ -391,7 +438,8 @@ fn store_worker<W: Write>(
         }
         let response = match work {
             Work::Request(request) => response_for_request(&request, |method, params| {
-                dispatch(&store, &reader_store, method, params).map_err(RequestError::Store)
+                dispatch(&store, &reader_store, &favorite_store, method, params)
+                    .map_err(RequestError::Store)
             }),
             Work::Ready(response) => response,
         };
@@ -429,6 +477,7 @@ fn general_worker<W: Write>(
                     &services.guides,
                     &services.images,
                     &services.reader_store,
+                    &services.favorite_store,
                     method,
                     params,
                 )
@@ -548,6 +597,7 @@ pub fn serve_with_hotkey_roots(
             guides: Arc::clone(&guides),
             images: Arc::clone(&images),
             reader_store: ReaderPositionStore::new(path.with_file_name("reader_positions.json")),
+            favorite_store: FavoriteStore::new(path.with_file_name("favorites.json")),
         });
 
         let store_writer = Arc::clone(&writer);
@@ -555,11 +605,13 @@ pub fn serve_with_hotkey_roots(
         let store_failed = Arc::clone(&failed);
         let store = PositionStore::new(path.clone());
         let reader_store = ReaderPositionStore::new(path.with_file_name("reader_positions.json"));
+        let favorite_store = FavoriteStore::new(path.with_file_name("favorites.json"));
         let store_thread = scope.spawn(move || {
             store_worker(
                 store_receiver,
                 store,
                 reader_store,
+                favorite_store,
                 store_writer,
                 store_errors,
                 store_failed,
@@ -731,6 +783,7 @@ mod tests {
             guides,
             images,
             reader_store: ReaderPositionStore::new(root.join("reader_positions.json")),
+            favorite_store: FavoriteStore::new(root.join("favorites.json")),
         })
     }
 
@@ -762,7 +815,7 @@ mod tests {
             responses[&1]["result"],
             json!({
                 "version": 2,
-                "capabilities": ["positions", "reader_positions", "guides", "images", "hotkey", "multiplex"],
+                "capabilities": ["positions", "reader_positions", "favorites", "guides", "images", "hotkey", "multiplex"],
             })
         );
         assert_eq!(
@@ -872,11 +925,22 @@ mod tests {
             let writer = Arc::new(Mutex::new(&mut output));
             let store = PositionStore::new(test_root.join("positions.json"));
             let reader_store = ReaderPositionStore::new(test_root.join("reader_positions.json"));
+            let favorite_store = FavoriteStore::new(test_root.join("favorites.json"));
             let store_worker = scope.spawn({
                 let writer = Arc::clone(&writer);
                 let errors = errors.clone();
                 let failed = Arc::clone(&failed);
-                move || store_worker(store_receiver, store, reader_store, writer, errors, failed)
+                move || {
+                    store_worker(
+                        store_receiver,
+                        store,
+                        reader_store,
+                        favorite_store,
+                        writer,
+                        errors,
+                        failed,
+                    )
+                }
             });
             let guide_worker = scope.spawn({
                 let writer = Arc::clone(&writer);

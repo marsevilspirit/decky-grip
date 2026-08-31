@@ -1,17 +1,25 @@
 import { useQuickAccessVisible } from "@decky/api";
-import { ButtonItem, PanelSection, PanelSectionRow } from "@decky/ui";
+import {
+  ButtonItem,
+  PanelSection,
+  PanelSectionRow,
+  TextField,
+  ToggleField,
+} from "@decky/ui";
 import { useEffect, useState, useSyncExternalStore } from "react";
 
 import {
   getHotkeyStatus,
+  setGuideFavorite,
   type CacheClearResult,
   type GuideLibraryEntry,
   type HotkeyStatus,
   type ReaderCacheStats,
 } from "../backend";
 import type { ReaderPerformanceTracker } from "../reader/performance";
+import { filterGuideLibraryEntries } from "../reader/recent-guide";
 import type { GripRuntimeStatus, RuntimeStatusStore } from "../runtime-status";
-import type { GuideIdentity } from "../steam/guide-key";
+import { makeGuideKey, type GuideIdentity } from "../steam/guide-key";
 
 export interface GripPanelProps {
   status: RuntimeStatusStore;
@@ -67,7 +75,7 @@ function describeGuide(entry: GuideLibraryEntry): string {
         ? "已缓存，可更新"
         : "已缓存"
       : "打开时联网下载",
-    `上次阅读 ${formatReadTime(entry.updatedAt)}`,
+    `最近记录 ${formatReadTime(entry.updatedAt)}`,
   ];
   if (entry.cache?.author) {
     details.splice(1, 0, `作者：${entry.cache.author}`);
@@ -103,6 +111,9 @@ export function GripPanel({
   );
   const [libraryError, setLibraryError] = useState<string | null>(null);
   const [libraryRevision, setLibraryRevision] = useState(0);
+  const [guideFilter, setGuideFilter] = useState("");
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [favoriteBusy, setFavoriteBusy] = useState<string | null>(null);
   const [hotkeyStatus, setHotkeyStatus] = useState<HotkeyStatus | null>(null);
   const [positionRetryBusy, setPositionRetryBusy] = useState(false);
   const [cacheBusy, setCacheBusy] = useState(false);
@@ -246,7 +257,34 @@ export function GripPanel({
     }
   };
 
+  const updateFavorite = async (
+    entry: GuideLibraryEntry,
+    favorite: boolean,
+  ): Promise<void> => {
+    if (favoriteBusy !== null) {
+      return;
+    }
+    const guideKey = makeGuideKey(entry);
+    setFavoriteBusy(guideKey);
+    setReaderError(null);
+    try {
+      await setGuideFavorite(guideKey, favorite);
+    } catch (error: unknown) {
+      setReaderError(
+        `收藏更新失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setLibraryRevision((revision) => revision + 1);
+      setFavoriteBusy(null);
+    }
+  };
+
   const lastAction = describeLastAction(status);
+  const visibleGuides = filterGuideLibraryEntries(
+    guideLibrary ?? [],
+    guideFilter,
+    favoritesOnly,
+  );
 
   return (
     <>
@@ -387,6 +425,26 @@ export function GripPanel({
             <div style={{ opacity: 0.75 }}>正在读取最近指南…</div>
           </PanelSectionRow>
         )}
+        {guideLibrary && guideLibrary.length > 0 && (
+          <>
+            <PanelSectionRow>
+              <TextField
+                bShowClearAction
+                label="筛选指南"
+                onChange={(event) => setGuideFilter(event.currentTarget.value)}
+                value={guideFilter}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ToggleField
+                checked={favoritesOnly}
+                description="本地收藏固定显示在最近指南之前"
+                label="仅看收藏"
+                onChange={setFavoritesOnly}
+              />
+            </PanelSectionRow>
+          </>
+        )}
         {libraryError && (
           <PanelSectionRow>
             <div style={{ color: "#f0b35a" }}>
@@ -400,21 +458,24 @@ export function GripPanel({
               </ButtonItem>
               <ButtonItem
                 disabled={positionRetryBusy}
-                label={positionRetryBusy ? "正在修复…" : "备份并修复位置文件"}
+                label={positionRetryBusy ? "正在修复…" : "备份并修复本地数据"}
                 layout="below"
                 onClick={() => {
                   setPositionRetryBusy(true);
                   void repairPositions()
                     .then(setCacheMessage)
                     .catch((error: unknown) =>
-                      setLibraryError(
-                        `位置恢复失败：${error instanceof Error ? error.message : String(error)}`,
+                      setCacheMessage(
+                        `本地数据恢复失败：${error instanceof Error ? error.message : String(error)}`,
                       ),
                     )
-                    .finally(() => setPositionRetryBusy(false));
+                    .finally(() => {
+                      setLibraryRevision((revision) => revision + 1);
+                      setPositionRetryBusy(false);
+                    });
                 }}
               >
-                仅在校验失败时备份原文件并重置，然后重新读取指南库
+                仅在校验失败时备份位置或收藏文件，然后重新读取指南库
               </ButtonItem>
             </div>
           </PanelSectionRow>
@@ -426,7 +487,14 @@ export function GripPanel({
             </div>
           </PanelSectionRow>
         )}
-        {guideLibrary?.map((entry) => {
+        {guideLibrary &&
+          guideLibrary.length > 0 &&
+          visibleGuides.length === 0 && (
+            <PanelSectionRow>
+              <div style={{ opacity: 0.75 }}>没有匹配的指南。</div>
+            </PanelSectionRow>
+          )}
+        {visibleGuides.map((entry) => {
           const guideKey = `${entry.appId}:${entry.guideId}`;
           return (
             <PanelSectionRow key={guideKey}>
@@ -450,6 +518,21 @@ export function GripPanel({
                 >
                   {describeGuide(entry)}
                 </ButtonItem>
+                <ToggleField
+                  checked={entry.favorite}
+                  disabled={
+                    favoriteBusy !== null || cacheBusy || readerBusy !== null
+                  }
+                  description="仅保存在本机，最多收藏 20 条"
+                  label={
+                    favoriteBusy === guideKey
+                      ? "正在保存收藏…"
+                      : entry.favorite
+                        ? "已收藏"
+                        : "收藏"
+                  }
+                  onChange={(favorite) => void updateFavorite(entry, favorite)}
+                />
                 {entry.cache && (
                   <ButtonItem
                     disabled={cacheBusy || readerBusy !== null}

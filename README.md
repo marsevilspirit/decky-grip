@@ -38,9 +38,10 @@ restore it when the guide is opened again.
   overwriting the saved value.
 - Guide and app ids stay decimal strings so large Steam ids never lose
   precision.
-- The panel lists up to five recent GRIP Reader guides for the running game (or
-  globally when no game is running), with cached title, chapter, and offline
-  state. Reader history remains available when a guide body cache is removed.
+- The panel lists up to 20 local favorites before five recent GRIP Reader
+  guides for the running game (or globally when no game is running), with
+  cached title, chapter, and offline state. Reader history and favorites remain
+  available when a guide body cache is removed.
 - The plugin does not need root privileges.
 
 The current Steam UI findings and implementation boundaries are recorded in
@@ -78,7 +79,8 @@ Python tests use only the standard library.
    first handoff, keep the guide visible and open Decky with the Quick Access
    button.
 2. Select **GRIP**, then choose **继续当前或最近指南**, or open a specific
-   entry from **指南库**.
+   entry from **指南库**. Important guides can be kept at the top with the
+   local **收藏** switch; filtering never contacts Steam.
 3. Scroll normally in the full-screen reader. GRIP saves the first visible text
    and its exact viewport offset automatically.
 4. For instant in-game access after that first handoff, map the upper-left
@@ -130,6 +132,13 @@ GRIP Reader uses separate `reader_positions.json` and `guides/<guide-id>.json`
 files. Reader bookmarks include `section_id`, `anchor_text`, and
 `anchor_offset`; downloaded HTML is revalidated on the first process read and
 again whenever the cache file's identity or metadata changes.
+
+Local favorites are stored separately in `favorites.json`, capped at 20, and
+never synchronized to the Steam account. The Rust sidecar validates and writes
+the file with the same private, locked, atomic replacement used by the position
+stores, so an older plugin can still read existing position schemas after a
+rollback. Repair preserves invalid bytes in a same-directory backup before
+resetting only the damaged store.
 
 Images live under the guide cache's `images/` directory. Each image is limited
 to 8 MiB and a validated 8192-pixel / 16-megapixel canvas, the disk LRU to

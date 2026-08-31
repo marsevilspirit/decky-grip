@@ -1,4 +1,5 @@
 import { makeGuideKey, type GuideIdentity } from "../steam/guide-key";
+import type { GuideLibraryEntry } from "../backend";
 
 export interface RecentGuideSeed {
   identity: GuideIdentity;
@@ -77,4 +78,27 @@ export function chooseObservedGuide(
         (runningAppId === undefined || identity.appId === runningAppId),
     ) ?? null
   );
+}
+
+export function filterGuideLibraryEntries(
+  entries: readonly GuideLibraryEntry[],
+  query: string,
+  favoritesOnly: boolean,
+): GuideLibraryEntry[] {
+  const needle = query.trim().toLocaleLowerCase();
+  return entries.filter((entry) => {
+    if (favoritesOnly && !entry.favorite) {
+      return false;
+    }
+    if (!needle) {
+      return true;
+    }
+    return [
+      entry.appId,
+      entry.guideId,
+      entry.cache?.title,
+      entry.cache?.author,
+      entry.cache?.sectionTitle,
+    ].some((value) => value?.toLocaleLowerCase().includes(needle));
+  });
 }

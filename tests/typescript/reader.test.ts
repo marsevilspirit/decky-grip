@@ -9,6 +9,7 @@ import {
 } from "../../src/reader/anchor";
 import {
   chooseObservedGuide,
+  filterGuideLibraryEntries,
   RecentGuideIndex,
 } from "../../src/reader/recent-guide";
 import { RuntimeStatusStore } from "../../src/runtime-status";
@@ -272,6 +273,40 @@ describe("GRIP Reader helpers", () => {
     expect(status.getSnapshot().guideLibraryRevision).toBe(2);
     expect(notifications).toBe(2);
     unsubscribe();
+  });
+
+  it("filters the bounded guide library without changing backend order", () => {
+    const entries = [
+      {
+        appId: "1113000",
+        guideId: "10",
+        updatedAt: 200,
+        favorite: true,
+        cache: {
+          author: "Alice",
+          fetchedAt: 1,
+          sectionTitle: "四月",
+          stale: false,
+          title: "完整攻略",
+        },
+      },
+      {
+        appId: "222",
+        guideId: "20",
+        updatedAt: 100,
+        favorite: false,
+        cache: null,
+      },
+    ];
+
+    expect(filterGuideLibraryEntries(entries, "ALICE", false)).toEqual([
+      entries[0],
+    ]);
+    expect(filterGuideLibraryEntries(entries, "20", false)).toEqual([
+      entries[1],
+    ]);
+    expect(filterGuideLibraryEntries(entries, "", true)).toEqual([entries[0]]);
+    expect(filterGuideLibraryEntries(entries, "", false)).toEqual(entries);
   });
 
   it("keeps short month headings and limits long headings to four characters", () => {

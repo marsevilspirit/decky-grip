@@ -268,21 +268,30 @@ export default definePlugin(() => {
     const positionsReloaded = result.positions.repaired
       ? await controller.reloadPositionsAfterRepair()
       : await controller.retryPositions();
-    if (!positionsReloaded) {
-      throw new Error(
-        status.getSnapshot().positionWarning ?? "位置文件重读失败",
-      );
-    }
     status.refreshGuideLibrary();
     const backups = [
+      result.favorites.backup ? `本地收藏：${result.favorites.backup}` : null,
       result.positions.backup ? `原生位置：${result.positions.backup}` : null,
       result.readerPositions.backup
         ? `阅读器位置：${result.readerPositions.backup}`
         : null,
     ].filter((value): value is string => value !== null);
+    const errors = [
+      result.favorites.error ? `本地收藏：${result.favorites.error}` : null,
+      result.positions.error ? `原生位置：${result.positions.error}` : null,
+      result.readerPositions.error
+        ? `阅读器位置：${result.readerPositions.error}`
+        : null,
+      !positionsReloaded
+        ? (status.getSnapshot().positionWarning ?? "位置文件重读失败")
+        : null,
+    ].filter((value): value is string => value !== null);
+    if (errors.length > 0) {
+      return `${backups.length > 0 ? `已备份并重置：${backups.join("；")}。` : ""}部分本地数据恢复失败：${errors.join("；")}`;
+    }
     return backups.length > 0
-      ? `损坏位置已备份并重置。${backups.join("；")}`
-      : "位置文件校验正常，无需重置。";
+      ? `损坏本地数据已备份并重置。${backups.join("；")}`
+      : "本地数据校验正常，无需重置。";
   };
 
   const clearGuides = () => mutateGuideCache(clearGuideCache);

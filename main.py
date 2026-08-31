@@ -215,6 +215,13 @@ class Plugin:
         )
         return await self._run_guide_io(request)
 
+    async def set_guide_favorite(self, guide_key: str, favorite: bool):
+        return await self._run_io(
+            self._sidecar.request,
+            "favorites.set",
+            {"guide_key": guide_key, "favorite": favorite},
+        )
+
     async def get_guide_image(self, url: str, allow_download: bool = True):
         request = functools.partial(
             self._sidecar.request,
@@ -239,10 +246,21 @@ class Plugin:
         return await self._run_guide_io(self._sidecar.request, "reader_cache.stats", {})
 
     def _repair_position_stores(self):
-        return {
-            "positions": self._sidecar.request("positions.repair", {}),
-            "readerPositions": self._sidecar.request("reader_positions.repair", {}),
-        }
+        repairs = {}
+        for name, method in (
+            ("favorites", "favorites.repair"),
+            ("positions", "positions.repair"),
+            ("readerPositions", "reader_positions.repair"),
+        ):
+            try:
+                repairs[name] = self._sidecar.request(method, {})
+            except Exception as error:
+                repairs[name] = {
+                    "repaired": False,
+                    "backup": None,
+                    "error": str(error) or type(error).__name__,
+                }
+        return repairs
 
     async def repair_position_stores(self):
         return await self._run_io(self._repair_position_stores)

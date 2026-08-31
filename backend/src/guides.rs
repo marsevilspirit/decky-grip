@@ -184,7 +184,7 @@ impl GuideReader {
         section_id: Option<&str>,
     ) -> Result<Option<Value>, GuideError> {
         validate_guide_id(guide_id)?;
-        let Some(document) = self.read_cache(guide_id)? else {
+        let Some(document) = self.read_cache_without_memoizing(guide_id)? else {
             return Ok(None);
         };
         let section_title = section_id.and_then(|section_id| {
@@ -369,6 +369,18 @@ impl GuideReader {
     }
 
     fn read_cache(&self, guide_id: &str) -> Result<Option<Value>, GuideError> {
+        self.read_cache_with_memo(guide_id, true)
+    }
+
+    fn read_cache_without_memoizing(&self, guide_id: &str) -> Result<Option<Value>, GuideError> {
+        self.read_cache_with_memo(guide_id, false)
+    }
+
+    fn read_cache_with_memo(
+        &self,
+        guide_id: &str,
+        memoize: bool,
+    ) -> Result<Option<Value>, GuideError> {
         let path = self.cache_path(guide_id);
         for attempt in 0..2 {
             let memoized = lock(&self.memo).get(guide_id).cloned();
@@ -415,13 +427,15 @@ impl GuideReader {
                     return Err(error);
                 }
             };
-            lock(&self.memo).insert(
-                guide_id.to_owned(),
-                MemoEntry {
-                    signature,
-                    document: document.clone(),
-                },
-            );
+            if memoize {
+                lock(&self.memo).insert(
+                    guide_id.to_owned(),
+                    MemoEntry {
+                        signature,
+                        document: document.clone(),
+                    },
+                );
+            }
             return Ok(Some(document));
         }
         unreachable!("cache reads retry at most once")
@@ -877,6 +891,7 @@ fn download(url: &str, timeout: Duration, max_bytes: usize) -> Result<Vec<u8>, G
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TestDirectory;
 
     #[test]
     fn steam_url_policy_matches_the_python_redirect_handler() {
@@ -903,5 +918,32 @@ mod tests {
         assert!(!is_stale(CACHE_MAX_AGE_MS, 0));
         assert!(is_stale(CACHE_MAX_AGE_MS + 1, 0));
         assert!(!is_stale(1, 2));
+    }
+
+    #[test]
+    fn cached_summary_validates_without_retaining_the_document() {
+        let directory = TestDirectory::new("guides");
+        let cache_directory = directory.path();
+        fs::create_dir(&cache_directory).unwrap();
+        let path = cache_directory.join("1.json");
+        let mut document = json!({
+            "author": "author",
+            "fetchedAt": 1,
+            "guideId": "1",
+            "schemaVersion": 1,
+            "sections": [{"html": "<p>body</p>", "id": "2", "title": "section"}],
+            "sourceUrl": "https://steamcommunity.com/sharedfiles/filedetails/?id=1&l=schinese",
+            "title": "title",
+        });
+        fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+        let reader = GuideReader::with_fetcher(cache_directory, |_, _, _| unreachable!(), || 1);
+
+        assert!(reader.cached_summary("1", Some("2")).unwrap().is_some());
+        assert!(lock(&reader.memo).is_empty());
+
+        document["sections"][0]["html"] = json!("<script>unsafe</script>");
+        fs::write(path, serde_json::to_vec(&document).unwrap()).unwrap();
+        assert!(reader.cached_summary("1", None).is_err());
+        assert!(lock(&reader.memo).is_empty());
     }
 }

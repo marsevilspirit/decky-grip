@@ -46,7 +46,13 @@ export interface GuideLibraryEntry {
   appId: string;
   guideId: string;
   updatedAt: number;
+  favorite: boolean;
   cache: GuideLibraryCache | null;
+}
+
+export interface GuideFavoriteResult {
+  guide_key: string;
+  favorite: boolean;
 }
 
 export interface ReaderCacheStats {
@@ -67,9 +73,11 @@ export interface ReaderCacheStats {
 export interface PositionStoreRepairResult {
   repaired: boolean;
   backup: string | null;
+  error?: string;
 }
 
 export interface PositionStoresRepairResult {
+  favorites: PositionStoreRepairResult;
   positions: PositionStoreRepairResult;
   readerPositions: PositionStoreRepairResult;
 }
@@ -97,6 +105,11 @@ export const getGuideLibrary = callable<
   [appId: string | null],
   GuideLibraryEntry[]
 >("get_guide_library");
+
+export const setGuideFavorite = callable<
+  [guideKey: string, favorite: boolean],
+  GuideFavoriteResult
+>("set_guide_favorite");
 
 export const getGuideImage = callable<
   [url: string, allowDownload?: boolean],
