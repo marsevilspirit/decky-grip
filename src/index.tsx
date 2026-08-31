@@ -296,6 +296,14 @@ export default definePlugin(() => {
 
   const clearGuides = () => mutateGuideCache(clearGuideCache);
 
+  const cacheGuide = async (identity: GuideIdentity) => {
+    try {
+      return (await readerCache.load(identity, { forceRefresh: true })).guide;
+    } finally {
+      status.refreshGuideLibrary();
+    }
+  };
+
   const removeGuide = (guideId: string) =>
     mutateGuideCache(() => removeGuideCache(guideId));
 
@@ -412,6 +420,7 @@ export default definePlugin(() => {
     titleView: <div className={staticClasses.Title}>GRIP</div>,
     content: (
       <GripPanel
+        cacheGuide={cacheGuide}
         clearGuides={clearGuides}
         clearImages={clearImages}
         getCacheStats={getReaderCacheStats}

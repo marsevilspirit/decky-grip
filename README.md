@@ -80,7 +80,8 @@ Python tests use only the standard library.
    button.
 2. Select **GRIP**, then choose **继续当前或最近指南**, or open a specific
    entry from **指南库**. Important guides can be kept at the top with the
-   local **收藏** switch; filtering never contacts Steam.
+   local **收藏** switch. Missing or stale guide bodies can be downloaded or
+   updated there without opening the reader; filtering never contacts Steam.
 3. Scroll normally in the full-screen reader. GRIP saves the first visible text
    and its exact viewport offset automatically.
 4. For instant in-game access after that first handoff, map the upper-left

@@ -10,6 +10,8 @@ import {
 import {
   chooseObservedGuide,
   filterGuideLibraryEntries,
+  guideCacheAction,
+  guideCacheRefreshFellBack,
   RecentGuideIndex,
 } from "../../src/reader/recent-guide";
 import { RuntimeStatusStore } from "../../src/runtime-status";
@@ -307,6 +309,37 @@ describe("GRIP Reader helpers", () => {
     ]);
     expect(filterGuideLibraryEntries(entries, "", true)).toEqual([entries[0]]);
     expect(filterGuideLibraryEntries(entries, "", false)).toEqual(entries);
+  });
+
+  it("chooses explicit cache actions and identifies an offline refresh fallback", () => {
+    const missing = {
+      appId: "1",
+      guideId: "10",
+      updatedAt: 1,
+      favorite: false,
+      cache: null,
+    };
+    const fresh = {
+      ...missing,
+      cache: {
+        author: "author",
+        fetchedAt: 1,
+        sectionTitle: null,
+        stale: false,
+        title: "title",
+      },
+    };
+    const stale = {
+      ...fresh,
+      cache: { ...fresh.cache, stale: true },
+    };
+
+    expect(guideCacheAction(missing)).toBe("download");
+    expect(guideCacheAction(fresh)).toBeNull();
+    expect(guideCacheAction(stale)).toBe("refresh");
+    expect(guideCacheRefreshFellBack("refresh", { stale: true })).toBe(true);
+    expect(guideCacheRefreshFellBack("refresh", { stale: false })).toBe(false);
+    expect(guideCacheRefreshFellBack("download", { stale: true })).toBe(false);
   });
 
   it("keeps short month headings and limits long headings to four characters", () => {

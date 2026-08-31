@@ -17,7 +17,13 @@ import {
   type ReaderCacheStats,
 } from "../backend";
 import type { ReaderPerformanceTracker } from "../reader/performance";
-import { filterGuideLibraryEntries } from "../reader/recent-guide";
+import {
+  filterGuideLibraryEntries,
+  guideCacheAction,
+  guideCacheRefreshFellBack,
+  type GuideCacheAction,
+} from "../reader/recent-guide";
+import type { DownloadedGuide } from "../reader/types";
 import type { GripRuntimeStatus, RuntimeStatusStore } from "../runtime-status";
 import { makeGuideKey, type GuideIdentity } from "../steam/guide-key";
 
@@ -28,6 +34,7 @@ export interface GripPanelProps {
   loadGuideLibrary: (appId: string | null) => Promise<GuideLibraryEntry[]>;
   retryPositions: () => Promise<boolean>;
   performance: ReaderPerformanceTracker;
+  cacheGuide: (identity: GuideIdentity) => Promise<DownloadedGuide>;
   clearGuides: () => Promise<CacheClearResult>;
   clearImages: () => Promise<CacheClearResult>;
   getCacheStats: () => Promise<ReaderCacheStats>;
@@ -93,6 +100,7 @@ export function GripPanel({
   loadGuideLibrary,
   retryPositions,
   performance,
+  cacheGuide,
   clearGuides,
   clearImages,
   getCacheStats,
@@ -123,6 +131,14 @@ export function GripPanel({
     performance.subscribe,
     performance.getSnapshot,
   );
+
+  const refreshCacheStats = async (): Promise<void> => {
+    try {
+      setCacheStats(await getCacheStats());
+    } catch {
+      setCacheStats(null);
+    }
+  };
 
   useEffect(() => {
     let canceled = false;
@@ -205,11 +221,7 @@ export function GripPanel({
       setCacheMessage(
         `${label}：删除 ${result.filesRemoved} 个文件，释放 ${formatBytes(result.bytesRemoved)}`,
       );
-      try {
-        setCacheStats(await getCacheStats());
-      } catch {
-        setCacheStats(null);
-      }
+      await refreshCacheStats();
     } catch (error: unknown) {
       setCacheMessage(
         `${label}失败：${error instanceof Error ? error.message : String(error)}`,
@@ -243,16 +255,41 @@ export function GripPanel({
       setCacheMessage(
         `“${entry.cache?.title ?? `指南 ${entry.guideId}`}”缓存已移除：释放 ${formatBytes(result.bytesRemoved)}`,
       );
-      try {
-        setCacheStats(await getCacheStats());
-      } catch {
-        setCacheStats(null);
-      }
+      await refreshCacheStats();
     } catch (error: unknown) {
       setCacheMessage(
         `移除指南缓存失败：${error instanceof Error ? error.message : String(error)}`,
       );
     } finally {
+      setCacheBusy(false);
+    }
+  };
+
+  const cacheGuideBody = async (
+    entry: GuideLibraryEntry,
+    action: GuideCacheAction,
+  ): Promise<void> => {
+    if (cacheBusy) {
+      return;
+    }
+    const title = entry.cache?.title ?? `指南 ${entry.guideId}`;
+    setCacheBusy(true);
+    setCacheMessage(null);
+    try {
+      const guide = await cacheGuide(entry);
+      setCacheMessage(
+        guideCacheRefreshFellBack(action, guide)
+          ? `“${title}”更新失败，继续保留本地旧缓存`
+          : action === "refresh"
+            ? `“${title}”正文缓存已更新`
+            : `“${title}”正文已缓存到本机`,
+      );
+    } catch (error: unknown) {
+      setCacheMessage(
+        `${action === "refresh" ? "更新" : "下载"}正文缓存失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      await refreshCacheStats();
       setCacheBusy(false);
     }
   };
@@ -496,6 +533,7 @@ export function GripPanel({
           )}
         {visibleGuides.map((entry) => {
           const guideKey = `${entry.appId}:${entry.guideId}`;
+          const cacheAction = guideCacheAction(entry);
           return (
             <PanelSectionRow key={guideKey}>
               <div style={{ width: "100%" }}>
@@ -533,6 +571,22 @@ export function GripPanel({
                   }
                   onChange={(favorite) => void updateFavorite(entry, favorite)}
                 />
+                {cacheAction && (
+                  <ButtonItem
+                    disabled={cacheBusy || readerBusy !== null}
+                    label={
+                      cacheAction === "refresh"
+                        ? "更新正文缓存"
+                        : "下载正文缓存"
+                    }
+                    layout="below"
+                    onClick={() => void cacheGuideBody(entry, cacheAction)}
+                  >
+                    {cacheAction === "refresh"
+                      ? "联网获取新版；失败时保留当前本地正文"
+                      : "不打开阅读器，下载后可离线打开正文"}
+                  </ButtonItem>
+                )}
                 {entry.cache && (
                   <ButtonItem
                     disabled={cacheBusy || readerBusy !== null}
