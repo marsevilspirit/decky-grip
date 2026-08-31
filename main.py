@@ -87,6 +87,15 @@ class Plugin:
         # delay an unrelated, already-cached guide.
         return await self._run_executor_io(function, *args)
 
+    async def _run_destructive_guide_io(self, method: str, params: dict) -> Any:
+        request = functools.partial(
+            self._sidecar.request,
+            method,
+            params,
+            timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
+        )
+        return await self._run_executor_io(request, wait_on_cancel=True)
+
     async def _main(self) -> None:
         self._event_loop = asyncio.get_running_loop()
         decky.logger.info("GRIP backend ready")
@@ -197,6 +206,15 @@ class Plugin:
         except _ExecutorUnavailable:
             return None
 
+    async def get_guide_library(self, app_id: Optional[str]):
+        request = functools.partial(
+            self._sidecar.request,
+            "guides.list",
+            {"app_id": app_id},
+            timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
+        )
+        return await self._run_guide_io(request)
+
     async def get_guide_image(self, url: str, allow_download: bool = True):
         request = functools.partial(
             self._sidecar.request,
@@ -207,10 +225,15 @@ class Plugin:
         return await self._run_guide_io(request)
 
     async def clear_guide_cache(self):
-        return await self._run_guide_io(self._sidecar.request, "guides.clear", {})
+        return await self._run_destructive_guide_io("guides.clear", {})
+
+    async def remove_guide_cache(self, guide_id: str):
+        return await self._run_destructive_guide_io(
+            "guides.remove", {"guide_id": guide_id}
+        )
 
     async def clear_image_cache(self):
-        return await self._run_guide_io(self._sidecar.request, "images.clear", {})
+        return await self._run_destructive_guide_io("images.clear", {})
 
     async def get_reader_cache_stats(self):
         return await self._run_guide_io(self._sidecar.request, "reader_cache.stats", {})

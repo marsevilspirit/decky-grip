@@ -422,6 +422,30 @@ describe("ReaderSessionCache", () => {
     expect(refreshed.position?.scrollTop).toBe(900);
   });
 
+  it("does not let a late refresh or retry overwrite a newer save", async () => {
+    for (const operation of ["refresh", "retry"] as const) {
+      const latePosition = deferred<ReaderPosition | null>();
+      const getReaderPosition = vi
+        .fn<ReaderSessionBackend["getReaderPosition"]>()
+        .mockResolvedValueOnce(readerPosition(100))
+        .mockImplementationOnce(() => latePosition.promise);
+      const cache = new ReaderSessionCache(backend({ getReaderPosition }));
+      await cache.load(identity);
+
+      const reading =
+        operation === "refresh"
+          ? cache.load(identity, { forceRefresh: true })
+          : cache.retryPosition(identity);
+      const saving = cache.savePosition(identity, capturedPosition(777));
+      latePosition.resolve(readerPosition(100));
+      await saving;
+      const result = await reading;
+
+      expect(result.position?.scrollTop).toBe(777);
+      expect(cache.peek(identity)?.position?.scrollTop).toBe(777);
+    }
+  });
+
   it("adopts a staged native handoff only after the backend reports no position", async () => {
     const pendingSave = deferred<ReaderPosition>();
     const saveReaderPosition = vi.fn(() => pendingSave.promise);
@@ -520,6 +544,149 @@ describe("ReaderSessionCache", () => {
     expect(cache.peek(identity)?.position).toBe(saved);
   });
 
+  it("persists same-guide saves in capture order across reader mounts", async () => {
+    const firstSave = deferred<ReaderPosition>();
+    const secondSave = deferred<ReaderPosition>();
+    const saveReaderPosition = vi
+      .fn<ReaderSessionBackend["saveReaderPosition"]>()
+      .mockImplementationOnce(() => firstSave.promise)
+      .mockImplementationOnce(() => secondSave.promise);
+    const cache = new ReaderSessionCache(backend({ saveReaderPosition }));
+    await cache.load(identity);
+
+    const first = cache.savePosition(identity, capturedPosition(400));
+    const second = cache.savePosition(identity, capturedPosition(800));
+
+    expect(saveReaderPosition).toHaveBeenCalledTimes(1);
+    expect(cache.peek(identity)?.position?.scrollTop).toBe(800);
+    expect(saveReaderPosition).toHaveBeenLastCalledWith(
+      guideKey,
+      400,
+      "10",
+      "Text",
+      12,
+    );
+    firstSave.resolve(readerPosition(400, 301));
+    await first;
+    await Promise.resolve();
+    expect(saveReaderPosition).toHaveBeenCalledTimes(2);
+    expect(saveReaderPosition).toHaveBeenLastCalledWith(
+      guideKey,
+      800,
+      "10",
+      "Text",
+      12,
+    );
+    secondSave.resolve(readerPosition(800, 302));
+    await second;
+    expect(cache.peek(identity)?.position).toEqual(readerPosition(800, 302));
+  });
+
+  it("waits for a pending save before retrying the stored position", async () => {
+    const releaseSave = deferred<void>();
+    let stored = readerPosition(100);
+    const getReaderPosition = vi.fn(async () => stored);
+    const saveReaderPosition = vi.fn(
+      async (_key: string, scrollTop: number) => {
+        await releaseSave.promise;
+        stored = readerPosition(scrollTop, 301);
+        return stored;
+      },
+    );
+    const cache = new ReaderSessionCache(
+      backend({ getReaderPosition, saveReaderPosition }),
+    );
+    await cache.load(identity);
+
+    const saving = cache.savePosition(identity, capturedPosition(777));
+    const retrying = cache.retryPosition(identity);
+
+    expect(cache.peek(identity)?.position?.scrollTop).toBe(777);
+    expect(getReaderPosition).toHaveBeenCalledOnce();
+    releaseSave.resolve(undefined);
+    await saving;
+    const retried = await retrying;
+    expect(getReaderPosition).toHaveBeenCalledTimes(2);
+    expect(retried.position?.scrollTop).toBe(777);
+    expect(cache.peek(identity)?.position?.scrollTop).toBe(777);
+  });
+
+  it("keeps a direct save newer than a same-tick staged handoff", async () => {
+    const stagedSave = deferred<ReaderPosition>();
+    const directSave = deferred<ReaderPosition>();
+    const saveReaderPosition = vi
+      .fn<ReaderSessionBackend["saveReaderPosition"]>()
+      .mockImplementationOnce(() => stagedSave.promise)
+      .mockImplementationOnce(() => directSave.promise);
+    const cache = new ReaderSessionCache(
+      backend({
+        getReaderPosition: vi.fn(async () => null),
+        saveReaderPosition,
+      }),
+    );
+    await cache.load(identity);
+
+    cache.stageHandoff(identity, capturedPosition(400));
+    const saving = cache.savePosition(identity, capturedPosition(800));
+
+    expect(saveReaderPosition).toHaveBeenCalledOnce();
+    expect(saveReaderPosition).toHaveBeenLastCalledWith(
+      guideKey,
+      400,
+      "10",
+      "Text",
+      12,
+    );
+    stagedSave.resolve(readerPosition(400, 301));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(saveReaderPosition).toHaveBeenCalledTimes(2);
+    expect(saveReaderPosition).toHaveBeenLastCalledWith(
+      guideKey,
+      800,
+      "10",
+      "Text",
+      12,
+    );
+    directSave.resolve(readerPosition(800, 302));
+    await saving;
+    expect(cache.peek(identity)?.position).toEqual(readerPosition(800, 302));
+  });
+
+  it("replaces an in-flight staged handoff with the latest capture", async () => {
+    const firstSave = deferred<ReaderPosition>();
+    const secondSave = deferred<ReaderPosition>();
+    const saveReaderPosition = vi
+      .fn<ReaderSessionBackend["saveReaderPosition"]>()
+      .mockImplementationOnce(() => firstSave.promise)
+      .mockImplementationOnce(() => secondSave.promise);
+    const cache = new ReaderSessionCache(
+      backend({
+        getReaderPosition: vi.fn(async () => null),
+        saveReaderPosition,
+      }),
+    );
+    await cache.load(identity);
+
+    cache.stageHandoff(identity, capturedPosition(400));
+    cache.stageHandoff(identity, capturedPosition(800));
+
+    expect(cache.peek(identity)?.position?.scrollTop).toBe(800);
+    expect(saveReaderPosition).toHaveBeenCalledOnce();
+    firstSave.resolve(readerPosition(400, 301));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(saveReaderPosition).toHaveBeenCalledTimes(2);
+    expect(saveReaderPosition).toHaveBeenLastCalledWith(
+      guideKey,
+      800,
+      "10",
+      "Text",
+      12,
+    );
+    secondSave.resolve(readerPosition(800, 302));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(cache.peek(identity)?.position).toEqual(readerPosition(800, 302));
+  });
+
   it("rolls an optimistic position back when persistence fails", async () => {
     const failure = new Error("disk unavailable");
     const cache = new ReaderSessionCache(
@@ -535,7 +702,73 @@ describe("ReaderSessionCache", () => {
       cache.savePosition(identity, capturedPosition(888)),
     ).rejects.toBe(failure);
 
-    expect(cache.peek(identity)).toBe(previous);
+    expect(cache.peek(identity)).toEqual(previous);
+  });
+
+  it("rolls back only the position when a concurrent refresh succeeds", async () => {
+    const refreshedGuide = deferred<DownloadedGuide>();
+    const refreshedPosition = deferred<ReaderPosition | null>();
+    const failedSave = deferred<ReaderPosition>();
+    const failure = new Error("disk unavailable");
+    const getGuide = vi
+      .fn<ReaderSessionBackend["getGuide"]>()
+      .mockResolvedValueOnce(guide("Old guide"))
+      .mockImplementationOnce(() => refreshedGuide.promise);
+    const getReaderPosition = vi
+      .fn<ReaderSessionBackend["getReaderPosition"]>()
+      .mockResolvedValueOnce(readerPosition(100))
+      .mockImplementationOnce(() => refreshedPosition.promise);
+    const cache = new ReaderSessionCache(
+      backend({
+        getGuide,
+        getReaderPosition,
+        saveReaderPosition: vi.fn(() => failedSave.promise),
+      }),
+    );
+    await cache.load(identity);
+
+    const refreshing = cache.load(identity, { forceRefresh: true });
+    const saving = cache.savePosition(identity, capturedPosition(777));
+    refreshedGuide.resolve(guide("New guide"));
+    refreshedPosition.resolve(readerPosition(100));
+    const refreshed = await refreshing;
+    expect(refreshed.guide.title).toBe("New guide");
+    expect(refreshed.position?.scrollTop).toBe(777);
+
+    const rejected = expect(saving).rejects.toBe(failure);
+    failedSave.reject(failure);
+    await rejected;
+    expect(cache.peek(identity)?.guide.title).toBe("New guide");
+    expect(cache.peek(identity)?.position?.scrollTop).toBe(100);
+  });
+
+  it("loads after clear only after an older in-flight save settles", async () => {
+    const releaseSave = deferred<void>();
+    let stored = readerPosition(100);
+    const getReaderPosition = vi.fn(async () => stored);
+    const saveReaderPosition = vi.fn(
+      async (_key: string, scrollTop: number) => {
+        await releaseSave.promise;
+        stored = readerPosition(scrollTop, 301);
+        return stored;
+      },
+    );
+    const cache = new ReaderSessionCache(
+      backend({ getReaderPosition, saveReaderPosition }),
+    );
+    await cache.load(identity);
+
+    const saving = cache.savePosition(identity, capturedPosition(777));
+    cache.clear();
+    const loading = cache.load(identity);
+
+    expect(getReaderPosition).toHaveBeenCalledOnce();
+    releaseSave.resolve(undefined);
+    await saving;
+    const loaded = await loading;
+    expect(getReaderPosition).toHaveBeenCalledTimes(2);
+    expect(loaded.position?.scrollTop).toBe(777);
+    expect(cache.peek(identity)?.position?.scrollTop).toBe(777);
   });
 
   it("clear removes cached and staged state without late load repopulation", async () => {

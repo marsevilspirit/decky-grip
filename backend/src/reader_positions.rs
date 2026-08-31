@@ -1,7 +1,7 @@
 use super::{
     JAVASCRIPT_MAX_SAFE_INTEGER, MAX_POSITIONS, MAX_SCROLL_TOP, ReadError, SCHEMA_VERSION,
-    StoreError, backup_corrupt_file, create_temp, make_private, read_bounded_regular_file,
-    sync_directory, valid_guide_key, validate_guide_key,
+    StoreError, acquire_store_lock, backup_corrupt_file, create_temp, make_private,
+    read_bounded_regular_file, sync_directory, valid_guide_key, validate_guide_key,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -26,6 +26,13 @@ struct ReaderPosition {
 #[derive(Debug, Default)]
 struct ReaderDocument {
     positions: BTreeMap<String, ReaderPosition>,
+}
+
+pub(super) struct ReaderHistoryEntry {
+    pub(super) app_id: String,
+    pub(super) guide_id: String,
+    pub(super) section_id: Option<String>,
+    pub(super) updated_at_ms: u64,
 }
 
 impl ReaderDocument {
@@ -169,6 +176,43 @@ impl ReaderPositionStore {
             .unwrap_or(Value::Null))
     }
 
+    pub(super) fn recent(
+        &self,
+        app_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ReaderHistoryEntry>, StoreError> {
+        let _lock = acquire_store_lock(&self.path)
+            .map_err(|_| StoreError::Storage("could not lock reader_positions.json"))?;
+        let mut entries: Vec<_> = self
+            .read_document()?
+            .positions
+            .into_iter()
+            .filter_map(|(guide_key, position)| {
+                let (entry_app_id, guide_id) = guide_key
+                    .split_once(':')
+                    .expect("stored reader position keys are validated");
+                if app_id.is_some_and(|app_id| app_id != entry_app_id) {
+                    return None;
+                }
+                Some(ReaderHistoryEntry {
+                    app_id: entry_app_id.to_owned(),
+                    guide_id: guide_id.to_owned(),
+                    section_id: position.section_id,
+                    updated_at_ms: position.updated_at_ms,
+                })
+            })
+            .collect();
+        entries.sort_by(|left, right| {
+            right
+                .updated_at_ms
+                .cmp(&left.updated_at_ms)
+                .then_with(|| left.app_id.cmp(&right.app_id))
+                .then_with(|| left.guide_id.cmp(&right.guide_id))
+        });
+        entries.truncate(limit);
+        Ok(entries)
+    }
+
     pub(super) fn save(
         &self,
         guide_key: &str,
@@ -198,6 +242,8 @@ impl ReaderPositionStore {
             "anchor_offset must be a finite number",
             "anchor_offset must be a finite number in range",
         )?;
+        let _lock = acquire_store_lock(&self.path)
+            .map_err(|_| StoreError::Storage("could not lock reader_positions.json"))?;
         let position = ReaderPosition {
             scroll_top,
             section_id,
@@ -218,6 +264,14 @@ impl ReaderPositionStore {
     }
 
     pub(super) fn repair(&self) -> Result<Value, StoreError> {
+        if matches!(
+            fs::symlink_metadata(&self.path),
+            Err(error) if error.kind() == io::ErrorKind::NotFound
+        ) {
+            return Ok(json!({"backup": null, "repaired": false}));
+        }
+        let _lock = acquire_store_lock(&self.path)
+            .map_err(|_| StoreError::Storage("could not lock reader_positions.json"))?;
         if self.read_document().is_ok() {
             return Ok(json!({"backup": null, "repaired": false}));
         }
@@ -395,6 +449,94 @@ mod tests {
         assert_eq!(replacement["anchor_text"], Value::Null);
         let document: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         assert_eq!(document["schema_version"], 1);
+    }
+
+    #[test]
+    fn recent_history_filters_sorts_and_limits_without_rewriting() {
+        let directory = TestDirectory::new("reader_positions.json");
+        let store = ReaderPositionStore::new(directory.path());
+        let mut document = ReaderDocument::default();
+        for (guide_key, updated_at_ms, section_id) in [
+            ("2:9", 300, None),
+            ("1:3", 200, Some("third")),
+            ("1:2", 200, Some("second")),
+            ("1:1", 100, Some("first")),
+        ] {
+            document.positions.insert(
+                guide_key.to_owned(),
+                ReaderPosition {
+                    scroll_top: 1.0,
+                    section_id: section_id.map(str::to_owned),
+                    anchor_text: None,
+                    anchor_offset: 0.0,
+                    updated_at_ms,
+                },
+            );
+        }
+        store.write_atomic(&document).unwrap();
+
+        let recent = store.recent(Some("1"), 2).unwrap();
+        assert_eq!(recent.len(), 2);
+        assert_eq!(recent[0].guide_id, "2");
+        assert_eq!(recent[0].section_id.as_deref(), Some("second"));
+        assert_eq!(recent[1].guide_id, "3");
+        assert_eq!(recent[1].updated_at_ms, 200);
+
+        let all = store.recent(None, 5).unwrap();
+        assert_eq!(all[0].app_id, "2");
+        assert_eq!(all[0].guide_id, "9");
+        assert!(
+            ReaderPositionStore::new(directory.0.join("missing.json"))
+                .recent(None, 5)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn recent_waits_for_an_active_store_write() {
+        let directory = TestDirectory::new("reader_positions.json");
+        let path = directory.path();
+        let store = ReaderPositionStore::new(path.clone());
+        let writer_lock = acquire_store_lock(&path).unwrap();
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (result_sender, result_receiver) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            started_sender.send(()).unwrap();
+            result_sender
+                .send(ReaderPositionStore::new(path).recent(None, 1))
+                .unwrap();
+        });
+
+        started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert!(
+            result_receiver
+                .recv_timeout(Duration::from_millis(50))
+                .is_err()
+        );
+
+        let mut document = ReaderDocument::default();
+        document.positions.insert(
+            "1:2".to_owned(),
+            ReaderPosition {
+                scroll_top: 1.0,
+                section_id: None,
+                anchor_text: None,
+                anchor_offset: 0.0,
+                updated_at_ms: 1,
+            },
+        );
+        store.write_atomic(&document).unwrap();
+        drop(writer_lock);
+
+        let recent = result_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("recent did not resume after the writer unlocked")
+            .unwrap();
+        reader.join().unwrap();
+        assert_eq!(recent[0].guide_id, "2");
     }
 
     #[test]

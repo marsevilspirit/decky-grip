@@ -10,6 +10,8 @@ export interface GuidePositionStatus extends GuideIdentity {
 export interface GripRuntimeStatus {
   phase: RuntimePhase;
   message: string;
+  guideLibraryAppId: string | null;
+  guideLibraryRevision: number;
   positionWarning: string | null;
   savedCount: number;
   activeGuide: GuideIdentity | null;
@@ -20,18 +22,24 @@ export interface GripRuntimeStatus {
 
 export class RuntimeStatusStore {
   private readonly recentGuides = new RecentGuideIndex();
-  private snapshot: GripRuntimeStatus = {
-    phase: "starting",
-    message: "Connecting to Steam's guide reader…",
-    positionWarning: null,
-    savedCount: 0,
-    activeGuide: null,
-    lastGuide: null,
-    lastCaptured: null,
-    lastRestored: null,
-  };
+  private snapshot: GripRuntimeStatus;
 
   private readonly listeners = new Set<() => void>();
+
+  constructor(guideLibraryAppId: string | null = null) {
+    this.snapshot = {
+      phase: "starting",
+      message: "Connecting to Steam's guide reader…",
+      guideLibraryAppId,
+      guideLibraryRevision: 0,
+      positionWarning: null,
+      savedCount: 0,
+      activeGuide: null,
+      lastGuide: null,
+      lastCaptured: null,
+      lastRestored: null,
+    };
+  }
 
   readonly getSnapshot = (): GripRuntimeStatus => this.snapshot;
 
@@ -49,6 +57,22 @@ export class RuntimeStatusStore {
 
   rememberGuide(identity: GuideIdentity): void {
     this.recentGuides.remember(identity);
+  }
+
+  refreshGuideLibrary(): void {
+    this.update({
+      guideLibraryRevision: this.snapshot.guideLibraryRevision + 1,
+    });
+  }
+
+  setGuideLibraryAppId(appId: string | null): void {
+    if (this.snapshot.guideLibraryAppId === appId) {
+      return;
+    }
+    this.update({
+      guideLibraryAppId: appId,
+      guideLibraryRevision: this.snapshot.guideLibraryRevision + 1,
+    });
   }
 
   update(update: Partial<GripRuntimeStatus>): void {

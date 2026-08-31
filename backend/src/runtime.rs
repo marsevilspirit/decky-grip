@@ -1,6 +1,6 @@
 use super::{
     MAX_REQUEST_BYTES, PositionStore, ReaderPositionStore, StoreError, dispatch, empty_params,
-    params_with_fields, protocol_info, request_fields,
+    params_with_fields, protocol_info, request_fields, valid_id,
 };
 use crate::guide_images::{GuideImageCache, ImageError, ImageErrorKind};
 use crate::guides::{GuideError, GuideErrorKind, GuideReader};
@@ -19,6 +19,7 @@ const QUEUE_CAPACITY: usize = 64;
 // The reader can issue three image RPCs at once; keep one slot for foreground work.
 const GENERAL_WORKERS: usize = 4;
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const GUIDE_LIBRARY_LIMIT: usize = 5;
 
 enum Work {
     Request(Value),
@@ -116,6 +117,13 @@ struct GuideLease<'a> {
     guide_id: Option<String>,
 }
 
+struct GeneralServices {
+    monitor: Arc<Mutex<L4HotkeyMonitor>>,
+    guides: Arc<GuideReader>,
+    images: Arc<GuideImageCache>,
+    reader_store: ReaderPositionStore,
+}
+
 impl Drop for GuideLease<'_> {
     fn drop(&mut self) {
         self.queue.complete(self.guide_id.as_deref());
@@ -127,7 +135,7 @@ fn guide_request_id(work: &Work) -> Option<&str> {
         return None;
     };
     let (method, params) = request_fields(request).ok()?;
-    if method != "guides.get" {
+    if !matches!(method, "guides.get" | "guides.get_cached" | "guides.remove") {
         return None;
     }
     params?.as_object()?.get("guide_id")?.as_str()
@@ -209,6 +217,7 @@ fn dispatch_general(
     monitor: &Arc<Mutex<L4HotkeyMonitor>>,
     guides: &Arc<GuideReader>,
     images: &Arc<GuideImageCache>,
+    reader_store: &ReaderPositionStore,
     method: &str,
     params: Option<&Value>,
 ) -> Result<Value, RequestError> {
@@ -261,9 +270,48 @@ fn dispatch_general(
                 .map_err(RequestError::Guide)?
                 .unwrap_or(Value::Null))
         }
+        "guides.list" => {
+            let object = params_with_fields(params, &["app_id"])?;
+            let app_id = match object.get("app_id").expect("app_id was checked") {
+                Value::Null => None,
+                Value::String(app_id) if valid_id(app_id) => Some(app_id.as_str()),
+                _ => {
+                    return Err(StoreError::Validation(
+                        "app_id must be null or a positive decimal string",
+                    )
+                    .into());
+                }
+            };
+            let mut entries = Vec::new();
+            for entry in reader_store.recent(app_id, GUIDE_LIBRARY_LIMIT)? {
+                let cache = guides
+                    .cached_summary(&entry.guide_id, entry.section_id.as_deref())
+                    .map_err(RequestError::Guide)?;
+                entries.push(json!({
+                    "appId": entry.app_id,
+                    "cache": cache,
+                    "guideId": entry.guide_id,
+                    "updatedAt": entry.updated_at_ms,
+                }));
+            }
+            Ok(Value::Array(entries))
+        }
         "guides.clear" => {
             empty_params(params)?;
             guides.clear_guide_cache().map_err(RequestError::Guide)
+        }
+        "guides.remove" => {
+            let object = params_with_fields(params, &["guide_id"])?;
+            let guide_id =
+                object
+                    .get("guide_id")
+                    .and_then(Value::as_str)
+                    .ok_or(StoreError::Validation(
+                        "guide_id must be a positive decimal string",
+                    ))?;
+            guides
+                .remove_guide_cache(guide_id)
+                .map_err(RequestError::Guide)
         }
         "guides.stats" => {
             empty_params(params)?;
@@ -355,9 +403,7 @@ fn store_worker<W: Write>(
 
 fn general_worker<W: Write>(
     requests: Arc<GeneralQueue>,
-    monitor: Arc<Mutex<L4HotkeyMonitor>>,
-    guides: Arc<GuideReader>,
-    images: Arc<GuideImageCache>,
+    services: Arc<GeneralServices>,
     writer: Arc<Mutex<&mut W>>,
     errors: SyncSender<io::Error>,
     failed: Arc<AtomicBool>,
@@ -378,7 +424,14 @@ fn general_worker<W: Write>(
         }
         let response = match work {
             Work::Request(request) => response_for_request(&request, |method, params| {
-                dispatch_general(&monitor, &guides, &images, method, params)
+                dispatch_general(
+                    &services.monitor,
+                    &services.guides,
+                    &services.images,
+                    &services.reader_store,
+                    method,
+                    params,
+                )
             }),
             Work::Ready(response) => response,
         };
@@ -490,6 +543,12 @@ pub fn serve_with_hotkey_roots(
         let (writer_errors, writer_error_receiver) = mpsc::sync_channel(1);
         let (store_requests, store_receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
         let general_requests = Arc::new(GeneralQueue::default());
+        let general_services = Arc::new(GeneralServices {
+            monitor: Arc::clone(&monitor),
+            guides: Arc::clone(&guides),
+            images: Arc::clone(&images),
+            reader_store: ReaderPositionStore::new(path.with_file_name("reader_positions.json")),
+        });
 
         let store_writer = Arc::clone(&writer);
         let store_errors = writer_errors.clone();
@@ -510,18 +569,14 @@ pub fn serve_with_hotkey_roots(
         let mut general_threads = Vec::with_capacity(GENERAL_WORKERS);
         for _ in 0..GENERAL_WORKERS {
             let requests = Arc::clone(&general_requests);
-            let worker_monitor = Arc::clone(&monitor);
-            let worker_guides = Arc::clone(&guides);
-            let worker_images = Arc::clone(&images);
+            let services = Arc::clone(&general_services);
             let worker_writer = Arc::clone(&writer);
             let worker_errors = writer_errors.clone();
             let worker_failed = Arc::clone(&failed);
             general_threads.push(scope.spawn(move || {
                 general_worker(
                     requests,
-                    worker_monitor,
-                    worker_guides,
-                    worker_images,
+                    services,
                     worker_writer,
                     worker_errors,
                     worker_failed,
@@ -665,6 +720,20 @@ mod tests {
         ))))
     }
 
+    fn test_services(
+        root: &std::path::Path,
+        monitor: Arc<Mutex<L4HotkeyMonitor>>,
+        guides: Arc<GuideReader>,
+        images: Arc<GuideImageCache>,
+    ) -> Arc<GeneralServices> {
+        Arc::new(GeneralServices {
+            monitor,
+            guides,
+            images,
+            reader_store: ReaderPositionStore::new(root.join("reader_positions.json")),
+        })
+    }
+
     #[test]
     fn ping_status_and_monitor_lifecycle_use_protocol_v2() {
         let output = SharedOutput::default();
@@ -787,6 +856,12 @@ mod tests {
             proc_root,
         )));
         let images = empty_images();
+        let services = test_services(
+            &test_root,
+            Arc::clone(&monitor),
+            Arc::clone(&guides),
+            Arc::clone(&images),
+        );
         let (store_requests, store_receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
         let general_requests = Arc::new(GeneralQueue::default());
         let failed = Arc::new(AtomicBool::new(false));
@@ -808,7 +883,8 @@ mod tests {
                 let errors = errors.clone();
                 let failed = Arc::clone(&failed);
                 let requests = Arc::clone(&general_requests);
-                move || general_worker(requests, monitor, guides, images, writer, errors, failed)
+                let services = Arc::clone(&services);
+                move || general_worker(requests, services, writer, errors, failed)
             });
 
             general_requests
@@ -849,7 +925,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_guide_waits_in_the_queue_without_starving_ping_or_another_guide() {
+    fn same_guide_operations_wait_in_fifo_without_starving_other_work() {
         const GUIDE_ID: &str = "3414883877";
         const OTHER_GUIDE_ID: &str = "3414883878";
 
@@ -887,6 +963,12 @@ mod tests {
             sysfs_root,
             proc_root,
         )));
+        let services = test_services(
+            &test_root,
+            Arc::clone(&monitor),
+            Arc::clone(&guides),
+            Arc::clone(&images),
+        );
         let requests = Arc::new(GeneralQueue::default());
         let failed = Arc::new(AtomicBool::new(false));
         let (errors, _error_receiver) = mpsc::sync_channel(1);
@@ -898,15 +980,13 @@ mod tests {
             let mut workers = Vec::new();
             for _ in 0..GENERAL_WORKERS {
                 let requests = Arc::clone(&requests);
-                let monitor = Arc::clone(&monitor);
-                let guides = Arc::clone(&guides);
-                let images = Arc::clone(&images);
+                let services = Arc::clone(&services);
                 let writer = Arc::clone(&writer);
                 let errors = errors.clone();
                 let failed = Arc::clone(&failed);
-                workers.push(scope.spawn(move || {
-                    general_worker(requests, monitor, guides, images, writer, errors, failed)
-                }));
+                workers.push(
+                    scope.spawn(move || general_worker(requests, services, writer, errors, failed)),
+                );
             }
 
             requests
@@ -923,8 +1003,14 @@ mod tests {
                 json!({"id": 2, "method": "guides.get", "params": {
                     "guide_id": GUIDE_ID, "force_refresh": false,
                 }}),
-                json!({"id": 3, "method": "ping"}),
-                json!({"id": 4, "method": "guides.get", "params": {
+                json!({"id": 3, "method": "guides.get_cached", "params": {
+                    "guide_id": GUIDE_ID,
+                }}),
+                json!({"id": 4, "method": "guides.remove", "params": {
+                    "guide_id": GUIDE_ID,
+                }}),
+                json!({"id": 5, "method": "ping"}),
+                json!({"id": 6, "method": "guides.get", "params": {
                     "guide_id": OTHER_GUIDE_ID, "force_refresh": false,
                 }}),
             ] {
@@ -948,18 +1034,25 @@ mod tests {
             .map(|response| (response["id"].as_u64().unwrap(), response))
             .collect();
         assert_eq!(before_release.len(), 2);
-        assert!(before_release.contains_key(&3));
-        assert!(before_release.contains_key(&4));
-        let responses: BTreeMap<_, _> = output_copy
-            .messages()
+        assert!(before_release.contains_key(&5));
+        assert!(before_release.contains_key(&6));
+        let messages = output_copy.messages();
+        let same_guide_order: Vec<_> = messages
+            .iter()
+            .filter_map(|response| response["id"].as_u64().filter(|id| *id <= 4))
+            .collect();
+        assert_eq!(same_guide_order, vec![1, 2, 3, 4]);
+        let responses: BTreeMap<_, _> = messages
             .into_iter()
             .map(|response| (response["id"].as_u64().unwrap(), response))
             .collect();
-        assert_eq!(responses.len(), 4);
+        assert_eq!(responses.len(), 6);
         assert_eq!(responses[&1]["error"]["kind"], "download");
         assert_eq!(responses[&2]["error"]["kind"], "download");
-        assert_eq!(responses[&3]["result"], protocol_info());
-        assert_eq!(responses[&4]["error"]["kind"], "download");
+        assert_eq!(responses[&3]["result"], Value::Null);
+        assert_eq!(responses[&4]["result"]["filesRemoved"], 0);
+        assert_eq!(responses[&5]["result"], protocol_info());
+        assert_eq!(responses[&6]["error"]["kind"], "download");
         assert_eq!(guide_calls.load(Ordering::SeqCst), 2);
         assert!(!failed.load(Ordering::Acquire));
     }
@@ -997,6 +1090,12 @@ mod tests {
             sysfs_root,
             proc_root,
         )));
+        let services = test_services(
+            &test_root,
+            Arc::clone(&monitor),
+            Arc::clone(&guides),
+            Arc::clone(&images),
+        );
         let requests = Arc::new(GeneralQueue::default());
         let failed = Arc::new(AtomicBool::new(false));
         let (errors, _error_receiver) = mpsc::sync_channel(1);
@@ -1009,15 +1108,13 @@ mod tests {
             let mut workers = Vec::new();
             for _ in 0..GENERAL_WORKERS {
                 let requests = Arc::clone(&requests);
-                let monitor = Arc::clone(&monitor);
-                let guides = Arc::clone(&guides);
-                let images = Arc::clone(&images);
+                let services = Arc::clone(&services);
                 let writer = Arc::clone(&writer);
                 let errors = errors.clone();
                 let failed = Arc::clone(&failed);
-                workers.push(scope.spawn(move || {
-                    general_worker(requests, monitor, guides, images, writer, errors, failed)
-                }));
+                workers.push(
+                    scope.spawn(move || general_worker(requests, services, writer, errors, failed)),
+                );
             }
 
             for id in 1..=3 {
@@ -1067,6 +1164,11 @@ mod tests {
     fn general_workers_can_respond_out_of_order() {
         let output = SharedOutput::default();
         let output_copy = output.clone();
+        let test_root = std::env::temp_dir().join(format!(
+            "grip-runtime-out-of-order-{}-{}",
+            std::process::id(),
+            crate::TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
         let (events, _event_receiver) = mpsc::channel();
         let (device_root, sysfs_root, proc_root) = missing_roots();
         let monitor = Arc::new(Mutex::new(L4HotkeyMonitor::new(
@@ -1075,10 +1177,14 @@ mod tests {
             sysfs_root,
             proc_root,
         )));
-        let guides = Arc::new(GuideReader::new(
-            std::env::temp_dir().join("grip-runtime-guides"),
-        ));
+        let guides = Arc::new(GuideReader::new(test_root.join("guides")));
         let images = empty_images();
+        let services = test_services(
+            &test_root,
+            Arc::clone(&monitor),
+            Arc::clone(&guides),
+            Arc::clone(&images),
+        );
         let requests = Arc::new(GeneralQueue::default());
         requests
             .send(Work::Request(json!({"id": 1, "method": "hotkey.status"})))
@@ -1098,15 +1204,13 @@ mod tests {
             let mut workers = Vec::new();
             for _ in 0..GENERAL_WORKERS {
                 let requests = Arc::clone(&requests);
-                let monitor = Arc::clone(&monitor);
-                let guides = Arc::clone(&guides);
-                let images = Arc::clone(&images);
+                let services = Arc::clone(&services);
                 let writer = Arc::clone(&writer);
                 let errors = errors.clone();
                 let failed = Arc::clone(&failed);
-                workers.push(scope.spawn(move || {
-                    general_worker(requests, monitor, guides, images, writer, errors, failed)
-                }));
+                workers.push(
+                    scope.spawn(move || general_worker(requests, services, writer, errors, failed)),
+                );
             }
 
             let deadline = Instant::now() + Duration::from_secs(5);

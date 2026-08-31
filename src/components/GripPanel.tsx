@@ -1,24 +1,30 @@
+import { useQuickAccessVisible } from "@decky/api";
 import { ButtonItem, PanelSection, PanelSectionRow } from "@decky/ui";
 import { useEffect, useState, useSyncExternalStore } from "react";
 
 import {
   getHotkeyStatus,
   type CacheClearResult,
+  type GuideLibraryEntry,
   type HotkeyStatus,
   type ReaderCacheStats,
 } from "../backend";
 import type { ReaderPerformanceTracker } from "../reader/performance";
 import type { GripRuntimeStatus, RuntimeStatusStore } from "../runtime-status";
+import type { GuideIdentity } from "../steam/guide-key";
 
 export interface GripPanelProps {
   status: RuntimeStatusStore;
   openReader: () => Promise<void>;
+  openGuide: (identity: GuideIdentity) => Promise<void>;
+  loadGuideLibrary: (appId: string | null) => Promise<GuideLibraryEntry[]>;
   retryPositions: () => Promise<boolean>;
   performance: ReaderPerformanceTracker;
   clearGuides: () => Promise<CacheClearResult>;
   clearImages: () => Promise<CacheClearResult>;
   getCacheStats: () => Promise<ReaderCacheStats>;
   repairPositions: () => Promise<string>;
+  removeGuideCache: (guideId: string) => Promise<CacheClearResult>;
 }
 
 function formatBytes(bytes: number): string {
@@ -33,30 +39,70 @@ function formatBytes(bytes: number): string {
 
 function describeLastAction(status: GripRuntimeStatus): string | null {
   if (status.lastRestored) {
-    return `Last restored: guide ${status.lastRestored.guideId} at ${Math.round(status.lastRestored.scrollTop)} px`;
+    return `最近恢复：指南 ${status.lastRestored.guideId}，位置 ${Math.round(status.lastRestored.scrollTop)} px`;
   }
   if (status.lastCaptured) {
-    return `Last captured: guide ${status.lastCaptured.guideId} at ${Math.round(status.lastCaptured.scrollTop)} px`;
+    return `最近保存：指南 ${status.lastCaptured.guideId}，位置 ${Math.round(status.lastCaptured.scrollTop)} px`;
   }
   return null;
+}
+
+function formatReadTime(updatedAt: number): string {
+  const date = new Date(updatedAt);
+  return Number.isNaN(date.getTime())
+    ? "时间未知"
+    : date.toLocaleString("zh-CN", {
+        month: "numeric",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+}
+
+function describeGuide(entry: GuideLibraryEntry): string {
+  const details = [
+    `游戏 ${entry.appId}`,
+    entry.cache
+      ? entry.cache.stale
+        ? "已缓存，可更新"
+        : "已缓存"
+      : "打开时联网下载",
+    `上次阅读 ${formatReadTime(entry.updatedAt)}`,
+  ];
+  if (entry.cache?.author) {
+    details.splice(1, 0, `作者：${entry.cache.author}`);
+  }
+  if (entry.cache?.sectionTitle) {
+    details.push(`章节：${entry.cache.sectionTitle}`);
+  }
+  return details.join(" · ");
 }
 
 export function GripPanel({
   status: statusStore,
   openReader,
+  openGuide,
+  loadGuideLibrary,
   retryPositions,
   performance,
   clearGuides,
   clearImages,
   getCacheStats,
   repairPositions,
+  removeGuideCache,
 }: GripPanelProps) {
   const status = useSyncExternalStore(
     statusStore.subscribe,
     statusStore.getSnapshot,
   );
-  const [readerBusy, setReaderBusy] = useState(false);
+  const quickAccessVisible = useQuickAccessVisible();
+  const [readerBusy, setReaderBusy] = useState<string | null>(null);
   const [readerError, setReaderError] = useState<string | null>(null);
+  const [guideLibrary, setGuideLibrary] = useState<GuideLibraryEntry[] | null>(
+    null,
+  );
+  const [libraryError, setLibraryError] = useState<string | null>(null);
+  const [libraryRevision, setLibraryRevision] = useState(0);
   const [hotkeyStatus, setHotkeyStatus] = useState<HotkeyStatus | null>(null);
   const [positionRetryBusy, setPositionRetryBusy] = useState(false);
   const [cacheBusy, setCacheBusy] = useState(false);
@@ -103,6 +149,37 @@ export function GripPanel({
     };
   }, [getCacheStats]);
 
+  useEffect(() => {
+    if (!quickAccessVisible) {
+      return;
+    }
+    let canceled = false;
+    setGuideLibrary(null);
+    setLibraryError(null);
+    void loadGuideLibrary(status.guideLibraryAppId)
+      .then((entries) => {
+        if (!canceled) {
+          setGuideLibrary(entries);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!canceled) {
+          setLibraryError(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [
+    libraryRevision,
+    loadGuideLibrary,
+    quickAccessVisible,
+    status.guideLibraryAppId,
+    status.guideLibraryRevision,
+  ]);
+
   const runCacheAction = async (
     action: () => Promise<CacheClearResult>,
     label: string,
@@ -125,6 +202,44 @@ export function GripPanel({
     } catch (error: unknown) {
       setCacheMessage(
         `${label}失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      setCacheBusy(false);
+    }
+  };
+
+  const runOpen = (key: string, action: () => Promise<void>): void => {
+    if (readerBusy !== null || cacheBusy) {
+      return;
+    }
+    setReaderBusy(key);
+    setReaderError(null);
+    void action()
+      .catch((error: unknown) => {
+        setReaderError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => setReaderBusy(null));
+  };
+
+  const removeCachedGuide = async (entry: GuideLibraryEntry): Promise<void> => {
+    if (cacheBusy) {
+      return;
+    }
+    setCacheBusy(true);
+    setCacheMessage(null);
+    try {
+      const result = await removeGuideCache(entry.guideId);
+      setCacheMessage(
+        `“${entry.cache?.title ?? `指南 ${entry.guideId}`}”缓存已移除：释放 ${formatBytes(result.bytesRemoved)}`,
+      );
+      try {
+        setCacheStats(await getCacheStats());
+      } catch {
+        setCacheStats(null);
+      }
+    } catch (error: unknown) {
+      setCacheMessage(
+        `移除指南缓存失败：${error instanceof Error ? error.message : String(error)}`,
       );
     } finally {
       setCacheBusy(false);
@@ -252,29 +367,103 @@ export function GripPanel({
           </PanelSectionRow>
         )}
       </PanelSection>
-      <PanelSection title="Guide resume">
+      <PanelSection title="指南库">
         <PanelSectionRow>
           <ButtonItem
-            disabled={readerBusy}
+            disabled={readerBusy !== null || cacheBusy}
             label={
-              readerBusy ? "正在打开 GRIP 阅读器…" : "在 GRIP 阅读器中继续"
+              readerBusy === "recent"
+                ? "正在打开 GRIP 阅读器…"
+                : "继续当前或最近指南"
             }
             layout="below"
-            onClick={() => {
-              setReaderBusy(true);
-              setReaderError(null);
-              void openReader()
-                .catch((error: unknown) => {
-                  setReaderError(
-                    error instanceof Error ? error.message : String(error),
-                  );
-                })
-                .finally(() => setReaderBusy(false));
-            }}
+            onClick={() => runOpen("recent", openReader)}
           >
-            独立页面，按正文位置继续阅读
+            优先继续当前游戏正在查看的指南
           </ButtonItem>
         </PanelSectionRow>
+        {guideLibrary === null && !libraryError && (
+          <PanelSectionRow>
+            <div style={{ opacity: 0.75 }}>正在读取最近指南…</div>
+          </PanelSectionRow>
+        )}
+        {libraryError && (
+          <PanelSectionRow>
+            <div style={{ color: "#f0b35a" }}>
+              <div>指南库读取失败：{libraryError}</div>
+              <ButtonItem
+                label="重试读取指南库"
+                layout="below"
+                onClick={() => setLibraryRevision((revision) => revision + 1)}
+              >
+                不会修改阅读位置或正文缓存
+              </ButtonItem>
+              <ButtonItem
+                disabled={positionRetryBusy}
+                label={positionRetryBusy ? "正在修复…" : "备份并修复位置文件"}
+                layout="below"
+                onClick={() => {
+                  setPositionRetryBusy(true);
+                  void repairPositions()
+                    .then(setCacheMessage)
+                    .catch((error: unknown) =>
+                      setLibraryError(
+                        `位置恢复失败：${error instanceof Error ? error.message : String(error)}`,
+                      ),
+                    )
+                    .finally(() => setPositionRetryBusy(false));
+                }}
+              >
+                仅在校验失败时备份原文件并重置，然后重新读取指南库
+              </ButtonItem>
+            </div>
+          </PanelSectionRow>
+        )}
+        {guideLibrary?.length === 0 && (
+          <PanelSectionRow>
+            <div style={{ opacity: 0.75 }}>
+              还没有阅读历史。先打开一次 Steam 指南，再进入 GRIP 阅读器。
+            </div>
+          </PanelSectionRow>
+        )}
+        {guideLibrary?.map((entry) => {
+          const guideKey = `${entry.appId}:${entry.guideId}`;
+          return (
+            <PanelSectionRow key={guideKey}>
+              <div style={{ width: "100%" }}>
+                <ButtonItem
+                  disabled={readerBusy !== null || cacheBusy}
+                  label={
+                    readerBusy === guideKey
+                      ? "正在打开…"
+                      : (entry.cache?.title ?? `Steam 指南 ${entry.guideId}`)
+                  }
+                  layout="below"
+                  onClick={() =>
+                    runOpen(guideKey, () =>
+                      openGuide({
+                        appId: entry.appId,
+                        guideId: entry.guideId,
+                      }),
+                    )
+                  }
+                >
+                  {describeGuide(entry)}
+                </ButtonItem>
+                {entry.cache && (
+                  <ButtonItem
+                    disabled={cacheBusy || readerBusy !== null}
+                    label="移除此指南的正文缓存"
+                    layout="below"
+                    onClick={() => void removeCachedGuide(entry)}
+                  >
+                    保留阅读位置；下次打开时重新下载
+                  </ButtonItem>
+                )}
+              </div>
+            </PanelSectionRow>
+          );
+        })}
         {readerError && (
           <PanelSectionRow>
             <div style={{ color: "#ff6b6b" }}>{readerError}</div>
@@ -288,15 +477,12 @@ export function GripPanel({
           </div>
         </PanelSectionRow>
         <PanelSectionRow>
-          <div>
-            {status.savedCount} saved guide position
-            {status.savedCount === 1 ? "" : "s"}
-          </div>
+          <div>已保存 {status.savedCount} 个原生 Steam 指南位置</div>
         </PanelSectionRow>
         {status.activeGuide && (
           <PanelSectionRow>
             <div style={{ opacity: 0.82 }}>
-              Active: app {status.activeGuide.appId}, guide{" "}
+              当前指南：游戏 {status.activeGuide.appId}，指南{" "}
               {status.activeGuide.guideId}
             </div>
           </PanelSectionRow>

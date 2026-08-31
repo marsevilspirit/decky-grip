@@ -12,11 +12,13 @@ import {
   clearImageCache,
   getCachedGuide,
   getGuide,
+  getGuideLibrary,
   getGuideImage,
   getPositions,
   getReaderCacheStats,
   getReaderPosition,
   repairPositionStores,
+  removeGuideCache,
   savePosition,
   saveReaderPosition,
 } from "./backend";
@@ -84,20 +86,42 @@ function BookmarkIcon() {
 
 export default definePlugin(() => {
   let mounted = true;
-  const status = new RuntimeStatusStore();
+  const status = new RuntimeStatusStore(currentRunningAppId() ?? null);
   const readerPerformance = new ReaderPerformanceTracker();
   const imageCacheControl = new ReaderImageCacheControl();
+  let guideCacheMutationActive = false;
   const readerCache = new ReaderSessionCache(
     {
       getCachedGuide,
       getGuide,
       getReaderPosition,
-      saveReaderPosition,
+      saveReaderPosition: async (
+        ...args: Parameters<typeof saveReaderPosition>
+      ) => {
+        const saved = await saveReaderPosition(...args);
+        status.refreshGuideLibrary();
+        return saved;
+      },
     },
     (error: unknown) => {
       console.warn("[GRIP] Could not persist the native reader handoff", error);
     },
   );
+  const mutateGuideCache = async <Result,>(
+    action: () => Promise<Result>,
+  ): Promise<Result> => {
+    if (guideCacheMutationActive) {
+      throw new Error("指南正文缓存正在清理，请稍后再试");
+    }
+    guideCacheMutationActive = true;
+    try {
+      return await action();
+    } finally {
+      readerCache.clear();
+      guideCacheMutationActive = false;
+      status.refreshGuideLibrary();
+    }
+  };
   const controller = new GripController({
     backend: {
       getPositions,
@@ -148,6 +172,7 @@ export default definePlugin(() => {
 
   const openReader = async (
     hotkeyPress?: InstrumentedHotkeyPress,
+    requestedIdentity?: GuideIdentity,
   ): Promise<void> => {
     const performanceTrace = hotkeyPress
       ? readerPerformance.begin(hotkeyPress)
@@ -159,6 +184,9 @@ export default definePlugin(() => {
       }
       if (currentRunningAppId() !== targetAppId) {
         throw new Error("运行中的游戏已经改变，请再按一次 L4");
+      }
+      if (guideCacheMutationActive) {
+        throw new Error("指南正文缓存正在清理，请稍后再打开阅读器");
       }
       return true;
     };
@@ -172,13 +200,17 @@ export default definePlugin(() => {
         return;
       }
 
-      const identity = resolveReaderIdentity(targetAppId);
+      const identity = requestedIdentity ?? resolveReaderIdentity(targetAppId);
       if (!identity) {
         throw new Error(
           targetAppId === undefined
             ? "请先打开一次 Steam 指南，再使用 GRIP 阅读器"
             : "当前游戏还没有可继续的指南，请先打开一次该游戏的 Steam 指南",
         );
+      }
+      makeGuideKey(identity);
+      if (targetAppId !== undefined && identity.appId !== targetAppId) {
+        throw new Error("游戏运行时只能打开当前游戏的指南");
       }
       if (performanceTrace) {
         readerPerformance.bind(performanceTrace, identity);
@@ -205,6 +237,7 @@ export default definePlugin(() => {
         readerPerformance.markRouteRequested(performanceTrace);
       }
       navigateMainWindow(getMainWindow(), readerPath(identity), true);
+      status.rememberGuide(identity);
       void readerCache
         .load(identity)
         .then((snapshot) => {
@@ -240,6 +273,7 @@ export default definePlugin(() => {
         status.getSnapshot().positionWarning ?? "位置文件重读失败",
       );
     }
+    status.refreshGuideLibrary();
     const backups = [
       result.positions.backup ? `原生位置：${result.positions.backup}` : null,
       result.readerPositions.backup
@@ -251,11 +285,10 @@ export default definePlugin(() => {
       : "位置文件校验正常，无需重置。";
   };
 
-  const clearGuides = async () => {
-    const result = await clearGuideCache();
-    readerCache.clear();
-    return result;
-  };
+  const clearGuides = () => mutateGuideCache(clearGuideCache);
+
+  const removeGuide = (guideId: string) =>
+    mutateGuideCache(() => removeGuideCache(guideId));
 
   const clearImages = async () => {
     const token = imageCacheControl.beginClear();
@@ -303,12 +336,25 @@ export default definePlugin(() => {
     lifetimeRegistration =
       globalThis.SteamClient?.GameSessions?.RegisterForAppLifetimeNotifications?.(
         ({ unAppID, bRunning }) => {
-          if (bRunning) {
-            void controllerReady.then(() => preloadReaderFor(String(unAppID)));
+          if (!mounted) {
             return;
           }
+          const appId = String(unAppID);
+          if (bRunning) {
+            status.setGuideLibraryAppId(appId);
+            void controllerReady.then(() => preloadReaderFor(appId));
+            return;
+          }
+          const runningAppId = currentRunningAppId();
+          if (status.getSnapshot().guideLibraryAppId === appId) {
+            status.setGuideLibraryAppId(
+              runningAppId && runningAppId !== appId ? runningAppId : null,
+            );
+          } else {
+            status.refreshGuideLibrary();
+          }
           const path = currentMainPath();
-          if (!mounted || !readerBelongsToStoppedApp(path, unAppID, bRunning)) {
+          if (!readerBelongsToStoppedApp(path, unAppID, bRunning)) {
             return;
           }
           try {
@@ -360,9 +406,12 @@ export default definePlugin(() => {
         clearGuides={clearGuides}
         clearImages={clearImages}
         getCacheStats={getReaderCacheStats}
+        loadGuideLibrary={getGuideLibrary}
+        openGuide={(identity) => openReader(undefined, identity)}
         openReader={openReader}
         performance={readerPerformance}
         repairPositions={repairPositions}
+        removeGuideCache={removeGuide}
         retryPositions={() => controller.retryPositions()}
         status={status}
       />

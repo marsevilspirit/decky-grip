@@ -37,6 +37,7 @@ def make_sidecar():
         "positions.repair": {"repaired": False, "backup": None},
         "reader_positions.get": None,
         "reader_positions.repair": {"repaired": False, "backup": None},
+        "guides.list": [],
         "hotkey.status": {
             "available": False,
             "button": "L4",
@@ -316,6 +317,25 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
         plugin._stop_preloading()
         self.assertIsNone(await plugin.get_cached_guide("3"))
 
+    async def test_guide_library_is_a_bounded_cache_only_sidecar_query(self):
+        plugin = self.plugin()
+        entries = [
+            {
+                "appId": "1113000",
+                "guideId": "3414883877",
+                "updatedAt": 300,
+                "cache": {"title": "完整攻略"},
+            }
+        ]
+        self.sidecar.responses["guides.list"] = entries
+
+        self.assertIs(await plugin.get_guide_library("1113000"), entries)
+        self.sidecar.request.assert_called_with(
+            "guides.list",
+            {"app_id": "1113000"},
+            timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
+        )
+
     async def test_cancelled_guide_rpc_does_not_wait_for_worker(self):
         plugin = self.plugin()
         started = threading.Event()
@@ -349,10 +369,37 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
         result = await asyncio.gather(task, return_exceptions=True)
         self.assertIsInstance(result[0], asyncio.CancelledError)
 
+    async def test_cancelled_cache_delete_waits_for_the_result(self):
+        plugin = self.plugin()
+        started = threading.Event()
+        release = threading.Event()
+
+        def request(method, params, *, timeout=None):
+            self.assertEqual(method, "guides.remove")
+            self.assertEqual(params, {"guide_id": "1"})
+            self.assertEqual(timeout, RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS)
+            started.set()
+            release.wait(timeout=2)
+            return {"filesRemoved": 1}
+
+        self.sidecar.request.side_effect = request
+        task = asyncio.create_task(plugin.remove_guide_cache("1"))
+        self.assertTrue(await asyncio.to_thread(started.wait, 1))
+        task.cancel()
+        await asyncio.sleep(0.02)
+        self.assertFalse(task.done())
+        release.set()
+
+        result = await asyncio.wait_for(
+            asyncio.gather(task, return_exceptions=True), timeout=2
+        )
+        self.assertIsInstance(result[0], asyncio.CancelledError)
+
     async def test_image_and_cache_admin_rpcs_forward_protocol_methods(self):
         plugin = self.plugin()
         self.sidecar.responses["images.get"] = {"fromCache": True}
         self.sidecar.responses["guides.clear"] = {"filesRemoved": 1}
+        self.sidecar.responses["guides.remove"] = {"filesRemoved": 1}
         self.sidecar.responses["images.clear"] = {"filesRemoved": 2}
         self.sidecar.responses["reader_cache.stats"] = {
             "guides": {"files": 0},
@@ -367,6 +414,7 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
             )["fromCache"]
         )
         self.assertEqual((await plugin.clear_guide_cache())["filesRemoved"], 1)
+        self.assertEqual((await plugin.remove_guide_cache("1"))["filesRemoved"], 1)
         self.assertEqual((await plugin.clear_image_cache())["filesRemoved"], 2)
         self.assertEqual((await plugin.get_reader_cache_stats())["guides"]["files"], 0)
         self.sidecar.request.assert_any_call(
@@ -377,6 +425,16 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
             },
             timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
         )
+        for method, params in (
+            ("guides.clear", {}),
+            ("guides.remove", {"guide_id": "1"}),
+            ("images.clear", {}),
+        ):
+            self.sidecar.request.assert_any_call(
+                method,
+                params,
+                timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
+            )
 
 
 if __name__ == "__main__":

@@ -186,10 +186,12 @@ fn cache_only_miss_and_special_files_never_download_or_follow_links() {
     fs::write(&outside, b"keep").unwrap();
     symlink(&outside, &cache_path).unwrap();
     assert!(harness.reader.get_cached(GUIDE_ID).is_err());
+    assert!(harness.reader.remove_guide_cache(GUIDE_ID).is_err());
 
     let fifo_path = harness.cache_path(OTHER_GUIDE_ID);
     make_fifo(&fifo_path);
     assert!(harness.reader.get_cached(OTHER_GUIDE_ID).is_err());
+    assert!(harness.reader.remove_guide_cache(OTHER_GUIDE_ID).is_err());
     assert_eq!(harness.call_count(), 0);
 
     let cleared = harness.reader.clear_guide_cache().unwrap();
@@ -216,6 +218,44 @@ fn reads_a_python_v1_cache_without_downloading() {
     assert_eq!(cached["fromCache"], true);
     assert_eq!(cached["stale"], false);
     assert_eq!(harness.call_count(), 0);
+}
+
+#[test]
+fn cached_summary_and_single_remove_reuse_the_validated_cache() {
+    let harness = Harness::new();
+    harness.reader.get(GUIDE_ID, false).unwrap();
+    harness.set_body("另一篇指南");
+    harness.reader.get(OTHER_GUIDE_ID, false).unwrap();
+
+    let summary = harness
+        .reader
+        .cached_summary(GUIDE_ID, Some("7667220"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        summary,
+        json!({
+            "author": "测试作者",
+            "fetchedAt": NOW_MS,
+            "sectionTitle": "四月",
+            "stale": false,
+            "title": "初始指南",
+        })
+    );
+    assert_eq!(harness.call_count(), 2);
+
+    let removed = harness.reader.remove_guide_cache(GUIDE_ID).unwrap();
+    assert_eq!(removed["filesRemoved"], 1);
+    assert!(removed["bytesRemoved"].as_u64().unwrap() > 0);
+    assert!(harness.reader.get_cached(GUIDE_ID).unwrap().is_none());
+    assert_eq!(
+        harness.reader.get_cached(OTHER_GUIDE_ID).unwrap().unwrap()["title"],
+        "另一篇指南"
+    );
+    assert_eq!(
+        harness.reader.remove_guide_cache(GUIDE_ID).unwrap(),
+        json!({"bytesRemoved": 0, "filesRemoved": 0})
+    );
 }
 
 #[test]

@@ -174,6 +174,8 @@ impl PositionStore {
             "scroll_top must be a finite non-negative number",
         ))?;
         let scroll_top = validate_scroll_top(scroll_top)?;
+        let _lock = acquire_store_lock(&self.path)
+            .map_err(|_| StoreError::Storage("could not lock positions.json"))?;
         let mut document = self.read_document()?;
         let updated_at_ms = now_ms()?;
         let position = Position {
@@ -191,6 +193,14 @@ impl PositionStore {
     }
 
     fn repair(&self) -> Result<Value, StoreError> {
+        if matches!(
+            fs::symlink_metadata(&self.path),
+            Err(error) if error.kind() == io::ErrorKind::NotFound
+        ) {
+            return Ok(json!({"backup": null, "repaired": false}));
+        }
+        let _lock = acquire_store_lock(&self.path)
+            .map_err(|_| StoreError::Storage("could not lock positions.json"))?;
         if self.read_document().is_ok() {
             return Ok(json!({"backup": null, "repaired": false}));
         }
@@ -244,6 +254,51 @@ enum ReadError {
     Missing,
     TooLarge,
     Unsafe,
+}
+
+struct StoreLock(File);
+
+impl Drop for StoreLock {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(self.0.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+fn acquire_store_lock(path: &Path) -> io::Result<StoreLock> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("position store has no parent"))?;
+    fs::create_dir_all(parent)?;
+    let mut lock_name = path
+        .file_name()
+        .ok_or_else(|| io::Error::other("position store has no filename"))?
+        .to_os_string();
+    lock_name.push(".lock");
+    let lock_path = parent.join(lock_name);
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(lock_path)?;
+    if !lock.metadata()?.is_file() {
+        return Err(io::Error::other(
+            "position store lock is not a regular file",
+        ));
+    }
+    make_private(&lock)?;
+    loop {
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            return Ok(StoreLock(lock));
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

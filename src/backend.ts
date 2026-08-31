@@ -34,6 +34,21 @@ export interface CacheClearResult {
   bytesRemoved: number;
 }
 
+export interface GuideLibraryCache {
+  title: string;
+  author: string;
+  fetchedAt: number;
+  sectionTitle: string | null;
+  stale: boolean;
+}
+
+export interface GuideLibraryEntry {
+  appId: string;
+  guideId: string;
+  updatedAt: number;
+  cache: GuideLibraryCache | null;
+}
+
 export interface ReaderCacheStats {
   guides: {
     files: number;
@@ -78,6 +93,11 @@ export const getCachedGuide = callable<
   DownloadedGuide | null
 >("get_cached_guide");
 
+export const getGuideLibrary = callable<
+  [appId: string | null],
+  GuideLibraryEntry[]
+>("get_guide_library");
+
 export const getGuideImage = callable<
   [url: string, allowDownload?: boolean],
   GuideImagePayload | null
@@ -85,6 +105,10 @@ export const getGuideImage = callable<
 
 export const clearGuideCache = callable<[], CacheClearResult>(
   "clear_guide_cache",
+);
+
+export const removeGuideCache = callable<[guideId: string], CacheClearResult>(
+  "remove_guide_cache",
 );
 
 export const clearImageCache = callable<[], CacheClearResult>(

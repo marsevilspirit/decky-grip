@@ -34,6 +34,16 @@ function isVisible(rect: DOMRect, viewport: DOMRect): boolean {
   return rect.bottom > viewport.top + 1 && rect.top < viewport.bottom - 1;
 }
 
+function distanceFromViewport(rect: DOMRect, viewport: DOMRect): number {
+  if (rect.bottom <= viewport.top + 1) {
+    return viewport.top + 1 - rect.bottom;
+  }
+  if (rect.top >= viewport.bottom - 1) {
+    return rect.top - (viewport.bottom - 1);
+  }
+  return 0;
+}
+
 /**
  * Text anchors are immutable for one rendered guide. Indexing each mounted
  * section once keeps scroll saves, image-driven restores, and TOC jumps from
@@ -136,6 +146,44 @@ export class ReaderAnchorIndex {
     return null;
   }
 
+  nearest(viewport: DOMRect): IndexedAnchor | null {
+    if (this.entries.length === 0) {
+      return null;
+    }
+
+    const start = Math.min(this.captureCursor, this.entries.length - 1);
+    let nearestIndex = start;
+    let nearestDistance = distanceFromViewport(
+      textRect(this.entries[start].node),
+      viewport,
+    );
+    for (let index = start - 1; index >= 0; index -= 1) {
+      const rect = textRect(this.entries[index].node);
+      const distance = distanceFromViewport(rect, viewport);
+      if (distance < nearestDistance) {
+        nearestIndex = index;
+        nearestDistance = distance;
+      }
+      if (rect.bottom <= viewport.top + 1 && distance > nearestDistance) {
+        break;
+      }
+    }
+    for (let index = start + 1; index < this.entries.length; index += 1) {
+      const rect = textRect(this.entries[index].node);
+      const distance = distanceFromViewport(rect, viewport);
+      if (distance < nearestDistance) {
+        nearestIndex = index;
+        nearestDistance = distance;
+      }
+      if (rect.top >= viewport.bottom - 1 && distance > nearestDistance) {
+        break;
+      }
+    }
+
+    this.captureCursor = nearestIndex;
+    return this.entries[nearestIndex];
+  }
+
   candidates(anchorText: string, sectionId: string | null): IndexedAnchor[] {
     const candidates = this.anchors.get(anchorText) ?? [];
     const textMatches = candidates.filter(
@@ -201,7 +249,7 @@ export function captureReaderPosition(
 ): CapturedReaderPosition {
   const index = anchorIndex(content, existingIndex);
   const viewport = scroller.getBoundingClientRect();
-  const anchor = index.firstVisible(viewport);
+  const anchor = index.firstVisible(viewport) ?? index.nearest(viewport);
   if (anchor) {
     const rect = textRect(anchor.node);
     return {

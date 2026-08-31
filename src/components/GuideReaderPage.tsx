@@ -19,6 +19,7 @@ import {
   ReaderAnchorIndex,
   restoreReaderPosition,
 } from "../reader/anchor";
+import { ReaderCheckpoint } from "../reader/checkpoint";
 import {
   ReaderImageHydrator,
   type GuideImageFetcher,
@@ -39,6 +40,15 @@ const RESTORE_TIMEOUT_MS = 10_000;
 const LOADING_INDICATOR_DELAY_MS = 180;
 const MAX_OBSERVED_GUIDE_IMAGES = 512;
 const SECTION_RENDER_BATCH = 8;
+const SCROLL_KEYS = new Set([
+  "ArrowDown",
+  "ArrowUp",
+  "End",
+  "Home",
+  "PageDown",
+  "PageUp",
+  " ",
+]);
 
 const READER_CSS = `
 .grip-reader-content { color: #dcdedf; font-size: 18px; line-height: 1.55; padding: 10px 34px 80px; }
@@ -128,6 +138,7 @@ export function GuideReaderPage({
   const pendingSectionJumpRef = useRef<string | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [imageHydrator] = useState(() => new ReaderImageHydrator(fetchImage));
+  const [checkpoint] = useState(() => new ReaderCheckpoint());
   const imageCachePausedRef = useRef(imageCacheControl.getSnapshot().paused);
   const imageObserverRef = useRef<IntersectionObserver | null>(null);
   const observedImageSectionsRef = useRef<WeakSet<Element>>(new WeakSet());
@@ -146,7 +157,6 @@ export function GuideReaderPage({
   const restoringRef = useRef(false);
   const stopRestoreRef = useRef<(() => void) | null>(null);
   const lastSavedSignatureRef = useRef<string | null>(null);
-  const saveChainRef = useRef<Promise<void>>(Promise.resolve());
   const latestQueuedSaveRef = useRef<{
     signature: string;
     promise: Promise<boolean>;
@@ -458,7 +468,12 @@ export function GuideReaderPage({
   }, [identity?.appId, identity?.guideId, loaded?.guide, performance]);
 
   const persistPosition = useCallback(async (): Promise<boolean> => {
-    if (!identity || !scrollerRef.current || !contentRef.current) {
+    if (
+      !checkpoint.canPersist ||
+      !identity ||
+      !scrollerRef.current ||
+      !contentRef.current
+    ) {
       return true;
     }
     const captured = captureReaderPosition(
@@ -478,17 +493,16 @@ export function GuideReaderPage({
     }
     const token = {};
     pendingSaveCountRef.current += 1;
-    const operation = saveChainRef.current
-      .then(async () => {
-        try {
-          await cache.savePosition(identity, captured);
-          lastSavedSignatureRef.current = signature;
-          setSaveError(null);
-          return true;
-        } catch (reason: unknown) {
-          setSaveError(errorMessage(reason));
-          return false;
-        }
+    const operation = cache
+      .savePosition(identity, captured)
+      .then(() => {
+        lastSavedSignatureRef.current = signature;
+        setSaveError(null);
+        return true;
+      })
+      .catch((reason: unknown) => {
+        setSaveError(errorMessage(reason));
+        return false;
       })
       .finally(() => {
         pendingSaveCountRef.current -= 1;
@@ -496,10 +510,9 @@ export function GuideReaderPage({
           latestQueuedSaveRef.current = null;
         }
       });
-    saveChainRef.current = operation.then(() => undefined);
     latestQueuedSaveRef.current = { signature, promise: operation, token };
     return operation;
-  }, [cache, identity?.appId, identity?.guideId]);
+  }, [cache, checkpoint, identity?.appId, identity?.guideId]);
 
   const cancelRestore = useCallback(() => {
     stopRestoreRef.current?.();
@@ -521,12 +534,18 @@ export function GuideReaderPage({
     const scroller = scrollerRef.current;
     const content = contentRef.current;
     const position = loaded?.position;
-    if (!scroller || !content) {
+    if (!scroller || !content || !loaded) {
       restoringRef.current = false;
+      checkpoint.block();
       return;
     }
     if (!position) {
       restoringRef.current = false;
+      if (loaded.positionWarning === null) {
+        checkpoint.settle();
+      } else {
+        checkpoint.block();
+      }
       if (identity) {
         performance.markPositionSettled(
           identity,
@@ -542,6 +561,7 @@ export function GuideReaderPage({
     }
 
     cancelRestore();
+    checkpoint.block();
     restoringRef.current = true;
     let stopped = false;
     let cleaned = false;
@@ -657,6 +677,7 @@ export function GuideReaderPage({
           }
           setRestoreWarning(null);
           stop();
+          checkpoint.settle();
           restoringRef.current = false;
           if (stopRestoreRef.current === stop) {
             stopRestoreRef.current = null;
@@ -705,8 +726,17 @@ export function GuideReaderPage({
       "vgp_onbuttondown",
       "vgp_ondirection",
     ];
-    const onInteraction = () =>
+    const onInteraction = (event: Event) => {
+      if (
+        event.type === "wheel" ||
+        event.type === "touchmove" ||
+        (event.type === "pointerdown" && event.target === scroller) ||
+        (event instanceof KeyboardEvent && SCROLL_KEYS.has(event.key))
+      ) {
+        checkpoint.intendScroll();
+      }
       failAndCancelRestore("用户在阅读位置稳定前开始操作");
+    };
     for (const event of interactionEvents) {
       scroller.addEventListener(event, onInteraction, true);
     }
@@ -727,6 +757,7 @@ export function GuideReaderPage({
     };
   }, [
     cancelRestore,
+    checkpoint,
     failAndCancelRestore,
     hydrateNearImages,
     identity?.appId,
@@ -741,15 +772,16 @@ export function GuideReaderPage({
         clearTimeout(saveTimerRef.current);
         saveTimerRef.current = null;
       }
-      if (!restoringRef.current) {
+      if (checkpoint.canPersist) {
         void persistPosition();
-      } else if (identity) {
+      } else if (identity && loadedRef.current?.position) {
         performance.failIdentity(identity, "页面在阅读位置稳定前关闭");
       }
       cancelRestore();
     },
     [
       cancelRestore,
+      checkpoint,
       identity?.appId,
       identity?.guideId,
       performance,
@@ -759,6 +791,10 @@ export function GuideReaderPage({
 
   const onScroll = () => {
     if (restoringRef.current || loading || refreshPending) {
+      return;
+    }
+    checkpoint.didScroll();
+    if (!checkpoint.canPersist) {
       return;
     }
     if (saveTimerRef.current !== null) {
@@ -789,6 +825,7 @@ export function GuideReaderPage({
     event.preventDefault();
     event.stopPropagation();
     failAndCancelRestore("用户在阅读位置稳定前翻页");
+    checkpoint.intendScroll();
     scroller.scrollTop = nextScrollTop;
     onScroll();
   };
@@ -866,6 +903,7 @@ export function GuideReaderPage({
     if (section) {
       const scrollerRect = scroller.getBoundingClientRect();
       const sectionRect = section.getBoundingClientRect();
+      checkpoint.intendScroll();
       scroller.scrollTop += sectionRect.top - scrollerRect.top;
       scroller.focus({ preventScroll: true });
       onScroll();

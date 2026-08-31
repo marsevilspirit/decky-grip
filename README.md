@@ -38,8 +38,9 @@ restore it when the guide is opened again.
   overwriting the saved value.
 - Guide and app ids stay decimal strings so large Steam ids never lose
   precision.
-- Recently observed guides are indexed per app, so switching A → B → A keeps
-  each game's own continuation target.
+- The panel lists up to five recent GRIP Reader guides for the running game (or
+  globally when no game is running), with cached title, chapter, and offline
+  state. Reader history remains available when a guide body cache is removed.
 - The plugin does not need root privileges.
 
 The current Steam UI findings and implementation boundaries are recorded in
@@ -76,7 +77,8 @@ Python tests use only the standard library.
 1. Open a Steam Community guide and leave it on the paragraph you want. For the
    first handoff, keep the guide visible and open Decky with the Quick Access
    button.
-2. Select **GRIP**, then choose **在 GRIP 阅读器中继续**.
+2. Select **GRIP**, then choose **继续当前或最近指南**, or open a specific
+   entry from **指南库**.
 3. Scroll normally in the full-screen reader. GRIP saves the first visible text
    and its exact viewport offset automatically.
 4. For instant in-game access after that first handoff, map the upper-left
@@ -136,8 +138,9 @@ near the viewport and keeps at most 32 MiB / 64 entries of estimated decoded
 frontend image residency. Animated image payloads are rejected, and the reader
 observes at most 512 inert image nodes while staging no more than 48 distinct
 image URLs at once. The panel shows cache usage and provides separate
-controls for clearing guide bodies or images; clearing images also invalidates
-in-flight frontend work, and neither control deletes saved reading positions.
+controls for clearing all guide bodies, one guide body, or images; clearing
+images also invalidates in-flight frontend work, and none of these controls
+deletes saved reading positions.
 
 `positions.json` has exactly one owner: the Rust sidecar. Backend RPC calls are
 serialized before entering the file store, so their arrival order is not

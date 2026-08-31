@@ -56,6 +56,13 @@ interface StagedHandoff {
   token: object;
 }
 
+interface PositionSaveState {
+  confirmed: ReaderPosition | null;
+  generation: number;
+  latestToken: object;
+  pending: number;
+}
+
 const STAGED_POSITION_UPDATED_AT = 0;
 const MAX_RETAINED_SESSIONS = 2;
 
@@ -85,6 +92,8 @@ export class ReaderSessionCache {
   private readonly activePreloads = new Map<string, ActivePreload>();
   private readonly stagedHandoffs = new Map<string, StagedHandoff>();
   private readonly stagedSaves = new Map<string, Promise<void>>();
+  private readonly positionOperations = new Map<string, Promise<void>>();
+  private readonly positionSaveStates = new Map<string, PositionSaveState>();
   private generation = 0;
 
   constructor(
@@ -190,12 +199,12 @@ export class ReaderSessionCache {
     position: CapturedReaderPosition,
   ): void {
     const guideKey = makeGuideKey(identity);
-    if (this.stagedHandoffs.has(guideKey)) {
-      return;
-    }
-
     const cached = this.snapshots.get(guideKey);
-    if (cached?.position) {
+    if (
+      this.positionSaveStates.has(guideKey) ||
+      (cached?.position &&
+        cached.position.updatedAt !== STAGED_POSITION_UPDATED_AT)
+    ) {
       return;
     }
 
@@ -217,21 +226,64 @@ export class ReaderSessionCache {
     }
   }
 
-  async savePosition(
+  savePosition(
     identity: GuideIdentity,
     position: CapturedReaderPosition,
   ): Promise<ReaderPosition> {
     const guideKey = makeGuideKey(identity);
     const generation = this.generation;
     this.stagedHandoffs.delete(guideKey);
-    const previous = this.snapshots.get(guideKey);
+    let state = this.positionSaveStates.get(guideKey);
+    if (!state || state.generation !== generation) {
+      const cachedPosition = this.snapshots.get(guideKey)?.position ?? null;
+      state = {
+        confirmed:
+          cachedPosition?.updatedAt === STAGED_POSITION_UPDATED_AT
+            ? null
+            : cachedPosition,
+        generation,
+        latestToken: {},
+        pending: 0,
+      };
+      this.positionSaveStates.set(guideKey, state);
+    }
+    const token = {};
+    state.latestToken = token;
+    state.pending += 1;
     const optimisticPosition = stagedReaderPosition(position);
-    if (previous) {
+    const cached = this.snapshots.get(guideKey);
+    if (cached) {
       this.rememberSnapshot(guideKey, {
-        ...previous,
+        ...cached,
         position: optimisticPosition,
       });
     }
+    return this.enqueuePositionOperation(guideKey, () =>
+      this.persistPosition(
+        guideKey,
+        position,
+        optimisticPosition,
+        state,
+        token,
+      ),
+    ).finally(() => {
+      state.pending -= 1;
+      if (
+        state.pending === 0 &&
+        this.positionSaveStates.get(guideKey) === state
+      ) {
+        this.positionSaveStates.delete(guideKey);
+      }
+    });
+  }
+
+  private async persistPosition(
+    guideKey: string,
+    position: CapturedReaderPosition,
+    optimisticPosition: ReaderPosition,
+    state: PositionSaveState,
+    token: object,
+  ): Promise<ReaderPosition> {
     try {
       const saved = await this.backend.saveReaderPosition(
         guideKey,
@@ -240,9 +292,13 @@ export class ReaderSessionCache {
         position.anchorText,
         position.anchorOffset,
       );
-      if (generation === this.generation) {
+      if (
+        state.generation === this.generation &&
+        this.positionSaveStates.get(guideKey) === state
+      ) {
+        state.confirmed = saved;
         const cached = this.snapshots.get(guideKey);
-        if (cached?.position === optimisticPosition) {
+        if (cached && state.latestToken === token) {
           this.rememberSnapshot(guideKey, {
             ...cached,
             position: saved,
@@ -253,14 +309,39 @@ export class ReaderSessionCache {
       return saved;
     } catch (error: unknown) {
       if (
-        generation === this.generation &&
-        previous &&
-        this.snapshots.get(guideKey)?.position === optimisticPosition
+        state.generation === this.generation &&
+        this.positionSaveStates.get(guideKey) === state &&
+        state.latestToken === token
       ) {
-        this.rememberSnapshot(guideKey, previous);
+        const cached = this.snapshots.get(guideKey);
+        if (cached?.position === optimisticPosition) {
+          this.rememberSnapshot(guideKey, {
+            ...cached,
+            position: state.confirmed,
+          });
+        }
       }
       throw error;
     }
+  }
+
+  private enqueuePositionOperation<T>(
+    guideKey: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.positionOperations.get(guideKey);
+    const pending = previous ? previous.then(operation) : operation();
+    const settled = pending.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.positionOperations.set(guideKey, settled);
+    void settled.then(() => {
+      if (this.positionOperations.get(guideKey) === settled) {
+        this.positionOperations.delete(guideKey);
+      }
+    });
+    return pending;
   }
 
   async retryPosition(identity: GuideIdentity): Promise<ReaderSessionSnapshot> {
@@ -270,22 +351,29 @@ export class ReaderSessionCache {
       return this.load(identity);
     }
     const generation = this.generation;
+    const previousPosition = existing.position;
     const positionResult = await this.loadPosition(guideKey);
+    const current = this.snapshots.get(guideKey) ?? existing;
+    const positionChanged = current.position !== previousPosition;
     const staged = this.stagedHandoffs.get(guideKey);
     const adoptedHandoff =
-      positionResult.position === null && positionResult.warning === null
+      !positionChanged &&
+      positionResult.position === null &&
+      positionResult.warning === null
         ? staged
         : undefined;
-    const current = this.snapshots.get(guideKey) ?? existing;
     const snapshot: ReaderSessionSnapshot = {
       ...current,
-      position:
-        positionResult.warning !== null
+      position: positionChanged
+        ? current.position
+        : positionResult.warning !== null
           ? current.position
           : adoptedHandoff
             ? stagedReaderPosition(adoptedHandoff.position)
             : positionResult.position,
-      positionWarning: positionResult.warning,
+      positionWarning: positionChanged
+        ? current.positionWarning
+        : positionResult.warning,
     };
     if (generation === this.generation) {
       this.rememberSnapshot(guideKey, snapshot);
@@ -303,6 +391,7 @@ export class ReaderSessionCache {
     this.activePreloads.clear();
     this.stagedHandoffs.clear();
     this.stagedSaves.clear();
+    this.positionSaveStates.clear();
   }
 
   private async fetch(
@@ -311,30 +400,38 @@ export class ReaderSessionCache {
     forceRefresh: boolean,
     generation: number,
   ): Promise<ReaderSessionSnapshot> {
+    const previousPosition = this.snapshots.get(guideKey)?.position ?? null;
     const [guide, positionResult] = await Promise.all([
       this.backend.getGuide(identity.guideId, forceRefresh),
       this.loadPosition(guideKey),
     ]);
     const backendPosition = positionResult.position;
-    const previousPosition = this.snapshots.get(guideKey)?.position ?? null;
+    const currentSnapshot = this.snapshots.get(guideKey) ?? null;
+    const positionChanged =
+      currentSnapshot !== null && currentSnapshot.position !== previousPosition;
     const staged = this.stagedHandoffs.get(guideKey);
-    const adoptedHandoff = backendPosition === null ? staged : undefined;
+    const adoptedHandoff =
+      !positionChanged && backendPosition === null ? staged : undefined;
     const snapshot = {
       guide,
-      position:
-        positionResult.warning !== null
-          ? (previousPosition ??
+      position: positionChanged
+        ? (currentSnapshot?.position ?? null)
+        : positionResult.warning !== null
+          ? (currentSnapshot?.position ??
+            previousPosition ??
             (adoptedHandoff
               ? stagedReaderPosition(adoptedHandoff.position)
               : null))
           : adoptedHandoff
             ? stagedReaderPosition(adoptedHandoff.position)
             : backendPosition,
-      positionWarning: positionResult.warning,
+      positionWarning: positionChanged
+        ? (currentSnapshot?.positionWarning ?? null)
+        : positionResult.warning,
     };
 
     if (generation === this.generation) {
-      if (backendPosition !== null && staged) {
+      if (!positionChanged && backendPosition !== null && staged) {
         this.stagedHandoffs.delete(guideKey);
       }
       this.rememberSnapshot(guideKey, snapshot);
@@ -404,33 +501,40 @@ export class ReaderSessionCache {
 
     const { position } = staged;
     let operation: Promise<void>;
-    operation = Promise.resolve()
-      .then(() =>
-        this.backend.saveReaderPosition(
-          guideKey,
-          position.scrollTop,
-          position.sectionId,
-          position.anchorText,
-          position.anchorOffset,
-        ),
-      )
-      .then((saved) => {
-        if (
-          generation !== this.generation ||
-          this.stagedHandoffs.get(guideKey)?.token !== staged.token
-        ) {
-          return;
-        }
-        this.stagedHandoffs.delete(guideKey);
-        const cached = this.snapshots.get(guideKey);
-        if (cached) {
-          this.rememberSnapshot(guideKey, {
-            ...cached,
-            position: saved,
-            positionWarning: null,
-          });
-        }
-      })
+    operation = this.enqueuePositionOperation(guideKey, async () => {
+      if (
+        generation !== this.generation ||
+        this.stagedHandoffs.get(guideKey)?.token !== staged.token
+      ) {
+        return;
+      }
+      const saved = await this.backend.saveReaderPosition(
+        guideKey,
+        position.scrollTop,
+        position.sectionId,
+        position.anchorText,
+        position.anchorOffset,
+      );
+      const saveState = this.positionSaveStates.get(guideKey);
+      if (saveState?.generation === generation) {
+        saveState.confirmed = saved;
+      }
+      if (
+        generation !== this.generation ||
+        this.stagedHandoffs.get(guideKey)?.token !== staged.token
+      ) {
+        return;
+      }
+      this.stagedHandoffs.delete(guideKey);
+      const cached = this.snapshots.get(guideKey);
+      if (cached) {
+        this.rememberSnapshot(guideKey, {
+          ...cached,
+          position: saved,
+          positionWarning: null,
+        });
+      }
+    })
       .catch((error: unknown) => {
         if (
           generation === this.generation &&
@@ -442,6 +546,14 @@ export class ReaderSessionCache {
       .finally(() => {
         if (this.stagedSaves.get(guideKey) === operation) {
           this.stagedSaves.delete(guideKey);
+          const latest = this.stagedHandoffs.get(guideKey);
+          if (
+            generation === this.generation &&
+            latest &&
+            latest.token !== staged.token
+          ) {
+            this.persistStagedHandoff(guideKey, latest, generation);
+          }
         }
       });
     this.stagedSaves.set(guideKey, operation);
@@ -463,16 +575,20 @@ export class ReaderSessionCache {
   }
 
   private async loadPosition(guideKey: string): Promise<PositionLoadResult> {
-    try {
-      return {
-        position: await this.backend.getReaderPosition(guideKey),
-        warning: null,
-      };
-    } catch (error: unknown) {
-      return {
-        position: null,
-        warning: `阅读位置加载失败，正文仍可使用：${errorMessage(error)}`,
-      };
-    }
+    return this.enqueuePositionOperation(guideKey, async () => {
+      try {
+        const position = await this.backend.getReaderPosition(guideKey);
+        const saveState = this.positionSaveStates.get(guideKey);
+        if (saveState?.generation === this.generation) {
+          saveState.confirmed = position;
+        }
+        return { position, warning: null };
+      } catch (error: unknown) {
+        return {
+          position: null,
+          warning: `阅读位置加载失败，正文仍可使用：${errorMessage(error)}`,
+        };
+      }
+    });
   }
 }

@@ -11,6 +11,7 @@ import {
   chooseObservedGuide,
   RecentGuideIndex,
 } from "../../src/reader/recent-guide";
+import { RuntimeStatusStore } from "../../src/runtime-status";
 import { shortSectionTitle } from "../../src/reader/toc-title";
 
 interface FakeAnchorText extends Partial<Text> {
@@ -173,6 +174,36 @@ describe("GRIP Reader helpers", () => {
     expect(dom.treeWalkerCalls()).toBe(2);
   });
 
+  it("anchors a text-free viewport to nearby text across layout changes", () => {
+    const source = makeAnchorDom();
+    source.addSection("10", [
+      { bottom: 20, text: "图片上方", top: 0 },
+      { bottom: 420, text: "图片下方", top: 400 },
+    ]);
+    source.scroller.scrollTop = 200;
+
+    const captured = captureReaderPosition(source.scroller, source.content);
+
+    expect(captured).toMatchObject({
+      anchorOffset: 200,
+      anchorText: "图片下方",
+      scrollTop: 200,
+      sectionId: "10",
+    });
+
+    const restored = makeAnchorDom();
+    restored.addSection("10", [
+      { bottom: 20, text: "图片上方", top: 0 },
+      { bottom: 520, text: "图片下方", top: 500 },
+    ]);
+    restoreReaderPosition(restored.scroller, restored.content, {
+      ...captured,
+      updatedAt: 1,
+    });
+
+    expect(restored.scroller.scrollTop).toBe(300);
+  });
+
   it("replaces persisted recent-guide seeds after a store repair", () => {
     const index = new RecentGuideIndex();
     index.seed([
@@ -224,6 +255,23 @@ describe("GRIP Reader helpers", () => {
     expect(
       chooseObservedGuide(null, recentGuides.find("1113000"), "1113000"),
     ).toEqual(runtimeGuideA);
+  });
+
+  it("tracks A to B library switches and ignores duplicate app events", () => {
+    const status = new RuntimeStatusStore("1113000");
+    let notifications = 0;
+    const unsubscribe = status.subscribe(() => {
+      notifications += 1;
+    });
+
+    status.setGuideLibraryAppId("222");
+    status.setGuideLibraryAppId("222");
+    status.refreshGuideLibrary();
+
+    expect(status.getSnapshot().guideLibraryAppId).toBe("222");
+    expect(status.getSnapshot().guideLibraryRevision).toBe(2);
+    expect(notifications).toBe(2);
+    unsubscribe();
   });
 
   it("keeps short month headings and limits long headings to four characters", () => {

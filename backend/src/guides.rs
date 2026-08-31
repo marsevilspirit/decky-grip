@@ -178,6 +178,29 @@ impl GuideReader {
         )))
     }
 
+    pub fn cached_summary(
+        &self,
+        guide_id: &str,
+        section_id: Option<&str>,
+    ) -> Result<Option<Value>, GuideError> {
+        validate_guide_id(guide_id)?;
+        let Some(document) = self.read_cache(guide_id)? else {
+            return Ok(None);
+        };
+        let section_title = section_id.and_then(|section_id| {
+            document["sections"].as_array()?.iter().find_map(|section| {
+                (section["id"].as_str() == Some(section_id)).then(|| section["title"].clone())
+            })
+        });
+        Ok(Some(json!({
+            "author": document["author"],
+            "fetchedAt": document["fetchedAt"],
+            "sectionTitle": section_title,
+            "stale": is_stale((self.now_ms)(), fetched_at(&document)),
+            "title": document["title"],
+        })))
+    }
+
     pub fn clear_guide_cache(&self) -> Result<Value, GuideError> {
         {
             let mut generation = lock(&self.generation);
@@ -218,6 +241,46 @@ impl GuideReader {
             "bytesRemoved": bytes_removed,
             "filesRemoved": files_removed,
         }))
+    }
+
+    pub fn remove_guide_cache(&self, guide_id: &str) -> Result<Value, GuideError> {
+        validate_guide_id(guide_id)?;
+        let guide_lock = self.guide_locks.retain(guide_id);
+        let result = {
+            let _guide = lock(&guide_lock);
+            (|| {
+                let _disk = lock(&self.disk_lock);
+                let path = self.cache_path(guide_id);
+                let metadata = match fs::symlink_metadata(&path) {
+                    Ok(metadata) if metadata.is_file() => Some(metadata),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                    _ => {
+                        return Err(GuideError::cache(
+                            "cached guide could not be removed safely",
+                        ));
+                    }
+                };
+                let (files_removed, bytes_removed) = if let Some(metadata) = metadata {
+                    fs::remove_file(path)
+                        .map_err(|_| GuideError::cache("cached guide could not be removed"))?;
+                    sync_directory(&self.cache_directory).map_err(|_| {
+                        GuideError::cache(
+                            "cached guide was removed but its directory could not be synced",
+                        )
+                    })?;
+                    (1, metadata.len())
+                } else {
+                    (0, 0)
+                };
+                lock(&self.memo).remove(guide_id);
+                Ok(json!({
+                    "bytesRemoved": bytes_removed,
+                    "filesRemoved": files_removed,
+                }))
+            })()
+        };
+        self.guide_locks.release(guide_id, &guide_lock);
+        result
     }
 
     pub fn cache_stats(&self) -> Result<Value, GuideError> {
