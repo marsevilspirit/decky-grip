@@ -226,7 +226,7 @@ describe("GRIP controller", () => {
     vi.useRealTimers();
   });
 
-  it("waits for stable reachable content, restores, then updates Steam state", async () => {
+  it("ignores passive pointer movement while waiting to restore", async () => {
     const harness = makeHarness({
       [GUIDE_KEY]: { scrollTop: 1_200, updatedAt: 900_000 },
     });
@@ -237,6 +237,7 @@ describe("GRIP controller", () => {
     await vi.advanceTimersByTimeAsync(500);
     expect(harness.runtime.scrollTop).toBe(0);
     expect(harness.backend.savePosition).not.toHaveBeenCalled();
+    harness.runtime.emitInteraction(false);
 
     harness.runtime.scrollHeight = 2_000;
     harness.runtime.emitLayout();

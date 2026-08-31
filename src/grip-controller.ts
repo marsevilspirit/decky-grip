@@ -533,8 +533,11 @@ export class GripController {
   }
 
   private handleGuideInteraction(scrollIntent: boolean): void {
+    if (!scrollIntent) {
+      return;
+    }
     const activeGuide = this.readActiveGuide();
-    if (scrollIntent && activeGuide) {
+    if (activeGuide) {
       this.lastScrollIntent = {
         guideKey: makeGuideKey(activeGuide),
         at: Date.now(),
