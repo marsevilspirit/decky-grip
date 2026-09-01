@@ -75,6 +75,11 @@ describe("Steam main-window navigation", () => {
         "/decky-grip/reader/1113000/3414883877",
         true,
       );
+      navigateMainWindow(
+        mainWindow,
+        "/decky-grip/reader/1113000/3414883878",
+        true,
+      );
       returnToRunningAppMainWindow(mainWindow);
     }
 

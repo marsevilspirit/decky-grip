@@ -244,15 +244,25 @@ impl ReaderPositionStore {
         )?;
         let _lock = acquire_store_lock(&self.path)
             .map_err(|_| StoreError::Storage("could not lock reader_positions.json"))?;
+        let mut document = self.read_document()?;
+        let updated_at_ms = document
+            .positions
+            .values()
+            .map(|position| position.updated_at_ms)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .filter(|value| *value <= JAVASCRIPT_MAX_SAFE_INTEGER)
+            .ok_or(StoreError::Validation("updated_at_ms is invalid"))?
+            .max(reader_now_ms()?);
         let position = ReaderPosition {
             scroll_top,
             section_id,
             anchor_text,
             anchor_offset,
-            updated_at_ms: reader_now_ms()?,
+            updated_at_ms,
         };
 
-        let mut document = self.read_document()?;
         document
             .positions
             .insert(guide_key.to_owned(), position.clone());
@@ -449,6 +459,38 @@ mod tests {
         assert_eq!(replacement["anchor_text"], Value::Null);
         let document: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         assert_eq!(document["schema_version"], 1);
+    }
+
+    #[test]
+    fn save_advances_the_latest_timestamp_even_within_one_millisecond() {
+        let directory = TestDirectory::new("reader_positions.json");
+        let store = ReaderPositionStore::new(directory.path());
+        let mut document = ReaderDocument::default();
+        document.positions.insert(
+            "1:1".to_owned(),
+            ReaderPosition {
+                scroll_top: 0.0,
+                section_id: None,
+                anchor_text: None,
+                anchor_offset: 0.0,
+                updated_at_ms: JAVASCRIPT_MAX_SAFE_INTEGER - 1,
+            },
+        );
+        store.write_atomic(&document).unwrap();
+
+        let saved = store
+            .save("1:2", &json!(0), &Value::Null, &Value::Null, &json!(0))
+            .unwrap();
+
+        assert_eq!(
+            saved["updated_at_ms"],
+            Value::from(JAVASCRIPT_MAX_SAFE_INTEGER)
+        );
+        assert!(matches!(
+            store.save("1:3", &json!(0), &Value::Null, &Value::Null, &json!(0),),
+            Err(StoreError::Validation("updated_at_ms is invalid"))
+        ));
+        assert_eq!(store.get("1:3").unwrap(), Value::Null);
     }
 
     #[test]

@@ -28,6 +28,10 @@ export class RecentGuideIndex {
   seed(entries: Iterable<RecentGuideSeed>): void {
     this.persistedByApp.clear();
     this.latestPersisted = null;
+    this.merge(entries);
+  }
+
+  merge(entries: Iterable<RecentGuideSeed>): void {
     for (const entry of entries) {
       const identity = copyIdentity(entry.identity);
       if (!Number.isSafeInteger(entry.updatedAt) || entry.updatedAt < 0) {
@@ -102,6 +106,22 @@ export function filterGuideLibraryEntries(
       entry.cache?.sectionTitle,
     ].some((value) => value?.toLocaleLowerCase().includes(needle));
   });
+}
+
+export function guideChoicesForReader(
+  entries: readonly GuideLibraryEntry[],
+  current: GuideLibraryEntry,
+): GuideLibraryEntry[] {
+  const sameApp = entries.filter((entry) => entry.appId === current.appId);
+  const savedCurrent = sameApp.find(
+    (entry) => entry.guideId === current.guideId,
+  );
+  return [
+    savedCurrent
+      ? { ...savedCurrent, cache: savedCurrent.cache ?? current.cache }
+      : current,
+    ...sameApp.filter((entry) => entry.guideId !== current.guideId),
+  ];
 }
 
 export type GuideCacheAction = "download" | "refresh";

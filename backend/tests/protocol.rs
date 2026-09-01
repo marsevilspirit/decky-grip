@@ -492,12 +492,12 @@ fn favorites_repair_and_set_are_durable_and_idempotent() {
 }
 
 #[test]
-fn guide_library_returns_all_favorites_then_five_recent_nonfavorites() {
+fn guide_library_returns_all_favorites_then_twenty_recent_nonfavorites() {
     let directory = TestDirectory::new();
     let positions_path = directory.0.join("positions.json");
     let reader_positions_path = directory.0.join("reader_positions.json");
     let favorites_path = directory.0.join("favorites.json");
-    let reader_positions = (1_u64..=7)
+    let reader_positions = (1_u64..=27)
         .map(|guide_id| {
             (
                 format!("1:{guide_id}"),
@@ -506,7 +506,7 @@ fn guide_library_returns_all_favorites_then_five_recent_nonfavorites() {
                     "anchor_text": null,
                     "scroll_top": 0,
                     "section_id": null,
-                    "updated_at_ms": 800 - guide_id * 100,
+                    "updated_at_ms": 3000 - guide_id * 100,
                 }),
             )
         })
@@ -524,8 +524,8 @@ fn guide_library_returns_all_favorites_then_five_recent_nonfavorites() {
         &favorites_path,
         serde_json::to_vec(&json!({
             "favorites": {
-                "1:7": {"favorited_at_ms": 900},
-                "1:8": {"favorited_at_ms": 1000},
+                "1:27": {"favorited_at_ms": 900},
+                "1:28": {"favorited_at_ms": 1000},
             },
             "schema_version": 1,
         }))
@@ -549,15 +549,15 @@ fn guide_library_returns_all_favorites_then_five_recent_nonfavorites() {
     );
     assert_eq!(response["ok"], true);
     let entries = response["result"].as_array().unwrap();
-    assert_eq!(entries.len(), 7);
-    assert_eq!(entries[0]["guideId"], "8");
+    assert_eq!(entries.len(), 22);
+    assert_eq!(entries[0]["guideId"], "28");
     assert_eq!(entries[0]["favorite"], true);
     assert_eq!(entries[0]["updatedAt"], 1000);
     assert_eq!(entries[0]["cache"], Value::Null);
-    assert_eq!(entries[1]["guideId"], "7");
+    assert_eq!(entries[1]["guideId"], "27");
     assert_eq!(entries[1]["favorite"], true);
-    assert_eq!(entries[1]["updatedAt"], 100);
-    for (entry, guide_id) in entries[2..].iter().zip(1_u64..=5) {
+    assert_eq!(entries[1]["updatedAt"], 300);
+    for (entry, guide_id) in entries[2..].iter().zip(1_u64..=20) {
         assert_eq!(entry["guideId"], guide_id.to_string());
         assert_eq!(entry["favorite"], false);
     }

@@ -11,6 +11,7 @@ import {
   chooseObservedGuide,
   filterGuideLibraryEntries,
   guideCacheAction,
+  guideChoicesForReader,
   guideCacheRefreshFellBack,
   RecentGuideIndex,
 } from "../../src/reader/recent-guide";
@@ -223,6 +224,34 @@ describe("GRIP Reader helpers", () => {
     expect(index.find("222")).toEqual({ appId: "222", guideId: "20" });
   });
 
+  it("merges newer reader history without dropping other app seeds", () => {
+    const index = new RecentGuideIndex();
+    index.seed([
+      {
+        identity: { appId: "1113000", guideId: "10" },
+        updatedAt: 100,
+      },
+      {
+        identity: { appId: "222", guideId: "20" },
+        updatedAt: 200,
+      },
+    ]);
+
+    index.merge([
+      {
+        identity: { appId: "1113000", guideId: "11" },
+        updatedAt: 300,
+      },
+    ]);
+
+    expect(index.find("1113000")).toEqual({
+      appId: "1113000",
+      guideId: "11",
+    });
+    expect(index.find("222")).toEqual({ appId: "222", guideId: "20" });
+    expect(index.find()).toEqual({ appId: "1113000", guideId: "11" });
+  });
+
   it("never selects another game's observed guide while a game is running", () => {
     const otherGame = { appId: "222", guideId: "20" };
     const runningGame = { appId: "1113000", guideId: "11" };
@@ -309,6 +338,47 @@ describe("GRIP Reader helpers", () => {
     ]);
     expect(filterGuideLibraryEntries(entries, "", true)).toEqual([entries[0]]);
     expect(filterGuideLibraryEntries(entries, "", false)).toEqual(entries);
+  });
+
+  it("keeps reader guide choices inside one app and puts the current guide first", () => {
+    const current = {
+      appId: "1113000",
+      guideId: "10",
+      updatedAt: 300,
+      favorite: false,
+      cache: {
+        author: "Alice",
+        fetchedAt: 1,
+        sectionTitle: "四月",
+        stale: false,
+        title: "当前攻略",
+      },
+    };
+    const sameGame = {
+      appId: "1113000",
+      guideId: "11",
+      updatedAt: 200,
+      favorite: true,
+      cache: null,
+    };
+    const otherGame = {
+      appId: "222",
+      guideId: "20",
+      updatedAt: 400,
+      favorite: true,
+      cache: null,
+    };
+
+    expect(guideChoicesForReader([sameGame, otherGame], current)).toEqual([
+      current,
+      sameGame,
+    ]);
+    expect(
+      guideChoicesForReader(
+        [{ ...current, favorite: true, cache: null }, sameGame, otherGame],
+        current,
+      ),
+    ).toEqual([{ ...current, favorite: true }, sameGame]);
   });
 
   it("chooses explicit cache actions and identifies an offline refresh fallback", () => {

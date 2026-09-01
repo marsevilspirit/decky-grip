@@ -38,7 +38,7 @@ restore it when the guide is opened again.
   overwriting the saved value.
 - Guide and app ids stay decimal strings so large Steam ids never lose
   precision.
-- The panel lists up to 20 local favorites before five recent GRIP Reader
+- The panel lists up to 20 local favorites before 20 recent GRIP Reader
   guides for the running game (or globally when no game is running), with
   cached title, chapter, and offline state. Reader history and favorites remain
   available when a guide body cache is removed.
@@ -82,8 +82,9 @@ Python tests use only the standard library.
    entry from **指南库**. Important guides can be kept at the top with the
    local **收藏** switch. Missing or stale guide bodies can be downloaded or
    updated there without opening the reader; filtering never contacts Steam.
-3. Scroll normally in the full-screen reader. GRIP saves the first visible text
-   and its exact viewport offset automatically.
+3. Scroll normally in the full-screen reader. Use **切换指南** to move between
+   guides for the same game; GRIP saves each guide's visible text and exact
+   viewport offset independently.
 4. For instant in-game access after that first handoff, map the upper-left
    rear button **L4** to **Scroll Lock** in the game's Steam Input layout. Press
    L4 once to open GRIP and press it again to return to the game. GRIP reads the

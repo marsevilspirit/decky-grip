@@ -21,7 +21,7 @@ const QUEUE_CAPACITY: usize = 64;
 // The reader can issue three image RPCs at once; keep one slot for foreground work.
 const GENERAL_WORKERS: usize = 4;
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
-const GUIDE_LIBRARY_LIMIT: usize = 5;
+const GUIDE_LIBRARY_LIMIT: usize = 20;
 
 enum Work {
     Request(Value),

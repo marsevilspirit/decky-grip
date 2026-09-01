@@ -55,6 +55,10 @@ export class RuntimeStatusStore {
     this.recentGuides.seed(entries);
   }
 
+  mergeRecentGuides(entries: Iterable<RecentGuideSeed>): void {
+    this.recentGuides.merge(entries);
+  }
+
   rememberGuide(identity: GuideIdentity): void {
     this.recentGuides.remember(identity);
   }

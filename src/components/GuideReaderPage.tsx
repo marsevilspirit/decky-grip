@@ -14,6 +14,7 @@ import {
   useState,
 } from "react";
 
+import type { GuideLibraryEntry } from "../backend";
 import {
   captureReaderPosition,
   ReaderAnchorIndex,
@@ -31,6 +32,7 @@ import {
   retainGuideForStaleRefresh,
   type ReaderSessionSnapshot,
 } from "../reader/session-cache";
+import { guideChoicesForReader } from "../reader/recent-guide";
 import { shortSectionTitle } from "../reader/toc-title";
 import { makeGuideKey, type GuideIdentity } from "../steam/guide-key";
 
@@ -73,6 +75,21 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function guideChoiceDetails(entry: GuideLibraryEntry): string {
+  return [
+    entry.favorite ? "已收藏" : null,
+    entry.cache
+      ? entry.cache.stale
+        ? "旧正文已缓存，可更新"
+        : "正文已缓存"
+      : "首次打开将下载正文",
+    entry.cache?.author ? `作者：${entry.cache.author}` : null,
+    entry.cache?.sectionTitle ? `上次：${entry.cache.sectionTitle}` : null,
+  ]
+    .filter((detail): detail is string => detail !== null)
+    .join(" · ");
+}
+
 function readIdentity(
   appId: string | undefined,
   guideId: string | undefined,
@@ -93,8 +110,10 @@ export interface GuideReaderPageProps {
   cache: ReaderSessionCache;
   fetchImage: GuideImageFetcher;
   imageCacheControl: ReaderImageCacheControl;
+  loadGuideLibrary: (appId: string) => Promise<GuideLibraryEntry[]>;
   onClose: () => void;
   onRepairPositions: () => Promise<string>;
+  onSwitchGuide: (identity: GuideIdentity) => Promise<void>;
   performance: ReaderPerformanceTracker;
 }
 
@@ -107,8 +126,10 @@ export function GuideReaderPage({
   cache,
   fetchImage,
   imageCacheControl,
+  loadGuideLibrary,
   onClose,
   onRepairPositions,
+  onSwitchGuide,
   performance,
 }: GuideReaderPageProps) {
   const params = useParams<{ appId?: string; guideId?: string }>();
@@ -126,12 +147,23 @@ export function GuideReaderPage({
   const [refreshGeneration, setRefreshGeneration] = useState(0);
   const [refreshPending, setRefreshPending] = useState(false);
   const [positionRepairBusy, setPositionRepairBusy] = useState(false);
+  const [guideSwitcherOpen, setGuideSwitcherOpen] = useState(false);
+  const [guideLibrary, setGuideLibrary] = useState<GuideLibraryEntry[] | null>(
+    null,
+  );
+  const [guideSwitcherError, setGuideSwitcherError] = useState<string | null>(
+    null,
+  );
+  const [guideSwitcherRevision, setGuideSwitcherRevision] = useState(0);
+  const [switchPending, setSwitchPending] = useState<string | null>(null);
   const [sectionRenderState, setSectionRenderState] =
     useState<SectionRenderState>(() => ({
       guide: initialSnapshot?.guide ?? null,
       count: Math.min(initialSnapshot?.guide.sections.length ?? 0, 1),
     }));
   const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const guideSwitcherRef = useRef<HTMLDivElement | null>(null);
+  const guideSwitcherButtonRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const anchorIndexRef = useRef<ReaderAnchorIndex | null>(null);
   const anchorGuideRef = useRef<ReaderSessionSnapshot["guide"] | null>(null);
@@ -148,11 +180,30 @@ export function GuideReaderPage({
   const imageViewportChangeRef = useRef<() => void>(() => undefined);
   const loadedRef = useRef(loaded);
   loadedRef.current = loaded;
+  const switchRequestRef = useRef<object | null>(null);
+
+  const closeGuideSwitcher = () => {
+    switchRequestRef.current = null;
+    setSwitchPending(null);
+    setGuideSwitcherOpen(false);
+    requestAnimationFrame(() => {
+      const target = guideSwitcherButtonRef.current ?? scrollerRef.current;
+      try {
+        target?.focus({ preventScroll: true });
+      } catch {
+        target?.focus();
+      }
+    });
+  };
 
   const cancelReader = (event: CustomEvent) => {
     event.preventDefault();
     event.stopPropagation();
-    onClose();
+    if (guideSwitcherOpen) {
+      closeGuideSwitcher();
+    } else {
+      onClose();
+    }
   };
   const restoringRef = useRef(false);
   const stopRestoreRef = useRef<(() => void) | null>(null);
@@ -218,6 +269,55 @@ export function GuideReaderPage({
     }, LOADING_INDICATOR_DELAY_MS);
     return () => clearTimeout(timer);
   }, [identity?.appId, identity?.guideId, loaded, loading, performance]);
+
+  useLayoutEffect(() => {
+    if (!guideSwitcherOpen) {
+      return;
+    }
+    const animationFrame = requestAnimationFrame(() => {
+      try {
+        guideSwitcherRef.current?.focus({ preventScroll: true });
+      } catch {
+        guideSwitcherRef.current?.focus();
+      }
+    });
+    return () => cancelAnimationFrame(animationFrame);
+  }, [guideSwitcherOpen]);
+
+  useEffect(() => {
+    if (!guideSwitcherOpen || !identity) {
+      return;
+    }
+    let canceled = false;
+    setGuideLibrary(null);
+    setGuideSwitcherError(null);
+    void loadGuideLibrary(identity.appId)
+      .then((entries) => {
+        if (!canceled) {
+          setGuideLibrary(entries);
+        }
+      })
+      .catch((reason: unknown) => {
+        if (!canceled) {
+          setGuideSwitcherError(errorMessage(reason));
+        }
+      });
+    return () => {
+      canceled = true;
+    };
+  }, [
+    guideSwitcherOpen,
+    guideSwitcherRevision,
+    identity?.appId,
+    loadGuideLibrary,
+  ]);
+
+  useEffect(
+    () => () => {
+      switchRequestRef.current = null;
+    },
+    [identity?.appId, identity?.guideId],
+  );
 
   useEffect(() => {
     if (!identity) {
@@ -874,6 +974,55 @@ export function GuideReaderPage({
     setRefreshGeneration((generation) => generation + 1);
   };
 
+  const switchGuide = async (entry: GuideLibraryEntry) => {
+    if (!identity || switchPending !== null) {
+      return;
+    }
+    if (entry.guideId === identity.guideId) {
+      closeGuideSwitcher();
+      return;
+    }
+
+    const target = { appId: identity.appId, guideId: entry.guideId };
+    const targetKey = makeGuideKey(target);
+    const request = {};
+    switchRequestRef.current = request;
+    setSwitchPending(targetKey);
+    setGuideSwitcherError(null);
+    try {
+      await cache.load(target);
+      if (switchRequestRef.current !== request) {
+        return;
+      }
+      if (saveTimerRef.current !== null) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      if (!(await persistPosition())) {
+        if (switchRequestRef.current === request) {
+          setGuideSwitcherError("当前指南位置保存失败，未切换指南。");
+        }
+        return;
+      }
+      if (switchRequestRef.current !== request) {
+        return;
+      }
+      await onSwitchGuide(target);
+      if (switchRequestRef.current === request) {
+        closeGuideSwitcher();
+      }
+    } catch (reason: unknown) {
+      if (switchRequestRef.current === request) {
+        setGuideSwitcherError(`指南打开失败：${errorMessage(reason)}`);
+      }
+    } finally {
+      if (switchRequestRef.current === request) {
+        switchRequestRef.current = null;
+        setSwitchPending(null);
+      }
+    }
+  };
+
   const retryReaderPosition = async (repair: boolean) => {
     if (!identity || positionRepairBusy) {
       return;
@@ -954,6 +1103,34 @@ export function GuideReaderPage({
     );
   }
 
+  const currentSnapshot =
+    loaded?.guide.guideId === identity.guideId ? loaded : null;
+  const currentSectionTitle = currentSnapshot?.position?.sectionId
+    ? (currentSnapshot.guide.sections.find(
+        (section) => section.id === currentSnapshot.position?.sectionId,
+      )?.title ?? null)
+    : null;
+  const currentGuideEntry: GuideLibraryEntry = {
+    appId: identity.appId,
+    guideId: identity.guideId,
+    updatedAt:
+      currentSnapshot?.position?.updatedAt ??
+      currentSnapshot?.guide.fetchedAt ??
+      0,
+    favorite: false,
+    cache: currentSnapshot
+      ? {
+          title: currentSnapshot.guide.title,
+          author: currentSnapshot.guide.author,
+          fetchedAt: currentSnapshot.guide.fetchedAt,
+          sectionTitle: currentSectionTitle,
+          stale: currentSnapshot.guide.stale,
+        }
+      : null,
+  };
+  const guideChoices = guideLibrary
+    ? guideChoicesForReader(guideLibrary, currentGuideEntry)
+    : null;
   const readerWarning =
     restoreWarning ?? loadWarning ?? loaded?.positionWarning ?? null;
 
@@ -967,6 +1144,7 @@ export function GuideReaderPage({
         flexDirection: "column",
         height: "100vh",
         overflow: "hidden",
+        position: "relative",
       }}
     >
       <style>{READER_CSS}</style>
@@ -980,7 +1158,19 @@ export function GuideReaderPage({
           padding: "0 28px",
         }}
       >
-        <Button onClick={onClose}>返回</Button>
+        <Button disabled={guideSwitcherOpen} onClick={onClose}>
+          返回
+        </Button>
+        <Button
+          onClick={() =>
+            guideSwitcherOpen
+              ? closeGuideSwitcher()
+              : setGuideSwitcherOpen(true)
+          }
+          ref={guideSwitcherButtonRef}
+        >
+          {guideSwitcherOpen ? "关闭选择" : "切换指南"}
+        </Button>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div
             style={{
@@ -1000,8 +1190,114 @@ export function GuideReaderPage({
         </div>
       </div>
 
+      {guideSwitcherOpen && (
+        <Focusable
+          aria-label="切换指南"
+          aria-modal="true"
+          preferredFocus
+          ref={guideSwitcherRef}
+          role="dialog"
+          style={{
+            background: "linear-gradient(180deg, #16202b 0%, #0d141c 100%)",
+            bottom: 0,
+            display: "flex",
+            flexDirection: "column",
+            left: 0,
+            padding: "24px 28px",
+            position: "absolute",
+            right: 0,
+            top: 70,
+            zIndex: 10,
+          }}
+          tabIndex={-1}
+        >
+          <div
+            style={{
+              alignItems: "center",
+              display: "flex",
+              gap: 12,
+              marginBottom: 18,
+            }}
+          >
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 24, fontWeight: 700 }}>本游戏指南</div>
+              <div style={{ opacity: 0.7 }}>
+                仅显示 AppID {identity.appId}；更多指南先在 Steam 中打开一次
+              </div>
+            </div>
+            <Button onClick={closeGuideSwitcher}>关闭</Button>
+          </div>
+          {guideLibrary === null && !guideSwitcherError && (
+            <div
+              style={{
+                alignItems: "center",
+                display: "flex",
+                flex: 1,
+                gap: 12,
+                justifyContent: "center",
+              }}
+            >
+              <Spinner /> 正在读取本游戏指南…
+            </div>
+          )}
+          {guideSwitcherError && (
+            <div style={{ color: "#ff8a8a", marginBottom: 16 }}>
+              <div>{guideSwitcherError}</div>
+              <Button
+                disabled={switchPending !== null}
+                onClick={() =>
+                  setGuideSwitcherRevision((revision) => revision + 1)
+                }
+              >
+                重试
+              </Button>
+            </div>
+          )}
+          {guideChoices && (
+            <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+              {guideChoices.map((entry) => {
+                const guideKey = makeGuideKey(entry);
+                const current = entry.guideId === identity.guideId;
+                const pending = switchPending === guideKey;
+                return (
+                  <Button
+                    aria-label={`${current ? "正在阅读" : "打开指南"}：${entry.cache?.title ?? entry.guideId}`}
+                    disabled={switchPending !== null}
+                    key={guideKey}
+                    onClick={() => void switchGuide(entry)}
+                    style={{
+                      boxSizing: "border-box",
+                      marginBottom: 12,
+                      minHeight: 72,
+                      padding: "12px 16px",
+                      textAlign: "left",
+                      width: "100%",
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontSize: 18, fontWeight: 700 }}>
+                        {pending
+                          ? "正在准备并打开…"
+                          : `${current ? "正在阅读 · " : ""}${entry.cache?.title ?? `Steam 指南 ${entry.guideId}`}`}
+                      </div>
+                      <div
+                        style={{ fontSize: 13, marginTop: 5, opacity: 0.72 }}
+                      >
+                        {guideChoiceDetails(entry)}
+                      </div>
+                    </div>
+                  </Button>
+                );
+              })}
+            </div>
+          )}
+        </Focusable>
+      )}
+
       {readerWarning && (
         <div
+          aria-hidden={guideSwitcherOpen}
+          inert={guideSwitcherOpen ? true : undefined}
           style={{
             alignItems: "center",
             background: "#5c471f",
@@ -1032,6 +1328,8 @@ export function GuideReaderPage({
 
       {loading && !loaded ? (
         <div
+          aria-hidden={guideSwitcherOpen}
+          inert={guideSwitcherOpen ? true : undefined}
           style={{
             alignItems: "center",
             display: "flex",
@@ -1047,13 +1345,21 @@ export function GuideReaderPage({
           ) : null}
         </div>
       ) : error ? (
-        <div style={{ padding: 48 }}>
+        <div
+          aria-hidden={guideSwitcherOpen}
+          inert={guideSwitcherOpen ? true : undefined}
+          style={{ padding: 48 }}
+        >
           <h2>无法打开该指南</h2>
           <p>{error}</p>
           <Button onClick={() => void refreshGuide()}>重试</Button>
         </div>
       ) : loaded ? (
-        <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
+        <div
+          aria-hidden={guideSwitcherOpen}
+          inert={guideSwitcherOpen ? true : undefined}
+          style={{ display: "flex", flex: 1, minHeight: 0 }}
+        >
           <Focusable
             aria-label="指南正文"
             ref={scrollerRef}
@@ -1061,12 +1367,15 @@ export function GuideReaderPage({
             onButtonDown={onReaderButton}
             onGamepadDirection={onReaderDirection}
             onScroll={onScroll}
-            preferredFocus
+            preferredFocus={!guideSwitcherOpen}
             style={{
               flex: 1,
               minWidth: 0,
               outline: "none",
-              overflowY: loading || refreshPending ? "hidden" : "auto",
+              overflowY:
+                loading || refreshPending || guideSwitcherOpen
+                  ? "hidden"
+                  : "auto",
               scrollBehavior: "auto",
             }}
             role="region"

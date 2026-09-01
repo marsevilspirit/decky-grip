@@ -94,6 +94,7 @@ export class ReaderSessionCache {
   private readonly stagedSaves = new Map<string, Promise<void>>();
   private readonly positionOperations = new Map<string, Promise<void>>();
   private readonly positionSaveStates = new Map<string, PositionSaveState>();
+  private accessOperation: Promise<void> = Promise.resolve();
   private generation = 0;
 
   constructor(
@@ -275,6 +276,28 @@ export class ReaderSessionCache {
         this.positionSaveStates.delete(guideKey);
       }
     });
+  }
+
+  rememberAccess(
+    identity: GuideIdentity,
+    position: ReaderPosition | null,
+  ): Promise<ReaderPosition> {
+    const saved = this.accessOperation.then(() =>
+      this.savePosition(
+        identity,
+        position ?? {
+          scrollTop: 0,
+          sectionId: null,
+          anchorText: null,
+          anchorOffset: 0,
+        },
+      ),
+    );
+    this.accessOperation = saved.then(
+      () => undefined,
+      () => undefined,
+    );
+    return saved;
   }
 
   private async persistPosition(

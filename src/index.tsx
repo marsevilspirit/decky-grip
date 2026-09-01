@@ -5,7 +5,7 @@ import {
   routerHook,
   toaster,
 } from "@decky/api";
-import { Router, staticClasses } from "@decky/ui";
+import { Router, staticClasses, useParams } from "@decky/ui";
 
 import {
   clearGuideCache,
@@ -131,6 +131,24 @@ export default definePlugin(() => {
     status,
   });
   const controllerReady = controller.start();
+  const mergeReaderRecentGuides = async (appId: string | null) => {
+    try {
+      const entries = await getGuideLibrary(appId);
+      if (mounted) {
+        status.mergeRecentGuides(
+          entries.map(({ appId, guideId, updatedAt }) => ({
+            identity: { appId, guideId },
+            updatedAt,
+          })),
+        );
+      }
+    } catch (error: unknown) {
+      console.warn("[GRIP] Could not read GRIP Reader history", error);
+    }
+  };
+  let recentGuidesReady = controllerReady.then(() =>
+    mergeReaderRecentGuides(currentRunningAppId() ?? null),
+  );
 
   const resolveReaderIdentity = (
     targetAppId: string | undefined,
@@ -168,18 +186,27 @@ export default definePlugin(() => {
   const stopPreloading = status.subscribe(() =>
     preloadReaderFor(currentRunningAppId()),
   );
-  void controllerReady.then(() => preloadReaderFor(currentRunningAppId()));
+  void recentGuidesReady.then(() => preloadReaderFor(currentRunningAppId()));
 
+  const retryPositions = async (): Promise<boolean> => {
+    const loaded = await controller.retryPositions();
+    await mergeReaderRecentGuides(currentRunningAppId() ?? null);
+    preloadReaderFor(currentRunningAppId());
+    return loaded;
+  };
+
+  let readerOpenGeneration = 0;
   const openReader = async (
     hotkeyPress?: InstrumentedHotkeyPress,
     requestedIdentity?: GuideIdentity,
   ): Promise<void> => {
+    const openGeneration = ++readerOpenGeneration;
     const performanceTrace = hotkeyPress
       ? readerPerformance.begin(hotkeyPress)
       : null;
     const targetAppId = currentRunningAppId();
     const canContinue = (): boolean => {
-      if (!mounted) {
+      if (!mounted || openGeneration !== readerOpenGeneration) {
         return false;
       }
       if (currentRunningAppId() !== targetAppId) {
@@ -192,7 +219,7 @@ export default definePlugin(() => {
     };
 
     try {
-      await controllerReady;
+      await recentGuidesReady;
       if (!canContinue()) {
         if (performanceTrace) {
           readerPerformance.abandon(performanceTrace);
@@ -241,14 +268,34 @@ export default definePlugin(() => {
       void readerCache
         .load(identity)
         .then((snapshot) => {
+          if (!mounted || openGeneration !== readerOpenGeneration) {
+            if (performanceTrace) {
+              readerPerformance.abandon(performanceTrace);
+            }
+            return;
+          }
           if (performanceTrace) {
             readerPerformance.markCacheReady(
               identity,
               snapshot.guide.fromCache ? "disk" : "network",
             );
           }
+          if (snapshot.positionWarning === null) {
+            // Opening without scrolling must still win the per-app recent order.
+            void readerCache
+              .rememberAccess(identity, snapshot.position)
+              .catch((error: unknown) => {
+                console.warn("[GRIP] Could not remember reader access", error);
+              });
+          }
         })
         .catch((error: unknown) => {
+          if (!mounted || openGeneration !== readerOpenGeneration) {
+            if (performanceTrace) {
+              readerPerformance.abandon(performanceTrace);
+            }
+            return;
+          }
           readerPerformance.failIdentity(
             identity,
             `指南正文加载失败：${errorMessage(error)}`,
@@ -268,6 +315,8 @@ export default definePlugin(() => {
     const positionsReloaded = result.positions.repaired
       ? await controller.reloadPositionsAfterRepair()
       : await controller.retryPositions();
+    await mergeReaderRecentGuides(currentRunningAppId() ?? null);
+    preloadReaderFor(currentRunningAppId());
     status.refreshGuideLibrary();
     const backups = [
       result.favorites.backup ? `本地收藏：${result.favorites.backup}` : null,
@@ -322,6 +371,7 @@ export default definePlugin(() => {
   const closeReader = (
     options: { forceLibrary?: boolean; ownerAppId?: string } = {},
   ): void => {
+    readerOpenGeneration += 1;
     const mainWindow = getMainWindow();
     const ownerAppId =
       options.ownerAppId ?? readerRouteAppId(currentMainPath());
@@ -336,16 +386,22 @@ export default definePlugin(() => {
     }
   };
 
-  const ReaderRoute = () => (
-    <GuideReaderPage
-      cache={readerCache}
-      fetchImage={getGuideImage}
-      imageCacheControl={imageCacheControl}
-      onClose={closeReader}
-      onRepairPositions={repairPositions}
-      performance={readerPerformance}
-    />
-  );
+  const ReaderRoute = () => {
+    const params = useParams<{ appId?: string; guideId?: string }>();
+    return (
+      <GuideReaderPage
+        cache={readerCache}
+        fetchImage={getGuideImage}
+        imageCacheControl={imageCacheControl}
+        key={`${params.appId ?? ""}:${params.guideId ?? ""}`}
+        loadGuideLibrary={getGuideLibrary}
+        onClose={closeReader}
+        onRepairPositions={repairPositions}
+        onSwitchGuide={(identity) => openReader(undefined, identity)}
+        performance={readerPerformance}
+      />
+    );
+  };
   routerHook.addRoute(READER_ROUTE, ReaderRoute);
 
   let lifetimeRegistration: { unregister(): void } | undefined;
@@ -359,7 +415,10 @@ export default definePlugin(() => {
           const appId = String(unAppID);
           if (bRunning) {
             status.setGuideLibraryAppId(appId);
-            void controllerReady.then(() => preloadReaderFor(appId));
+            recentGuidesReady = controllerReady.then(() =>
+              mergeReaderRecentGuides(appId),
+            );
+            void recentGuidesReady.then(() => preloadReaderFor(appId));
             return;
           }
           const runningAppId = currentRunningAppId();
@@ -430,7 +489,7 @@ export default definePlugin(() => {
         performance={readerPerformance}
         repairPositions={repairPositions}
         removeGuideCache={removeGuide}
-        retryPositions={() => controller.retryPositions()}
+        retryPositions={retryPositions}
         status={status}
       />
     ),

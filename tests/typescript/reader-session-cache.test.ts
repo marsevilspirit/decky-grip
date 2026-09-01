@@ -103,6 +103,70 @@ describe("ReaderSessionCache", () => {
     expect(injected.getReaderPosition).toHaveBeenCalledWith(guideKey);
   });
 
+  it("records reader access even when the position did not change", async () => {
+    const injected = backend();
+    const cache = new ReaderSessionCache(injected);
+    const loaded = await cache.load(identity);
+    const firstOpen = { appId: identity.appId, guideId: "3414883878" };
+
+    await cache.rememberAccess(identity, loaded.position);
+    await cache.rememberAccess(firstOpen, null);
+
+    expect(injected.saveReaderPosition).toHaveBeenNthCalledWith(
+      1,
+      guideKey,
+      120,
+      "10",
+      "Text",
+      12,
+    );
+    expect(injected.saveReaderPosition).toHaveBeenNthCalledWith(
+      2,
+      `${firstOpen.appId}:${firstOpen.guideId}`,
+      0,
+      null,
+      null,
+      0,
+    );
+  });
+
+  it("persists reader access in open order across different guides", async () => {
+    const firstSave = deferred<ReaderPosition>();
+    const secondIdentity = { appId: identity.appId, guideId: "3414883878" };
+    const saveReaderPosition = vi.fn<
+      ReaderSessionBackend["saveReaderPosition"]
+    >((key, scrollTop) =>
+      key === guideKey
+        ? firstSave.promise
+        : Promise.resolve(readerPosition(scrollTop, 302)),
+    );
+    const cache = new ReaderSessionCache(backend({ saveReaderPosition }));
+
+    const first = cache.rememberAccess(identity, null);
+    const second = cache.rememberAccess(secondIdentity, null);
+    await Promise.resolve();
+
+    expect(saveReaderPosition).toHaveBeenCalledTimes(1);
+    expect(saveReaderPosition).toHaveBeenLastCalledWith(
+      guideKey,
+      0,
+      null,
+      null,
+      0,
+    );
+
+    firstSave.resolve(readerPosition(0, 301));
+    await Promise.all([first, second]);
+    expect(saveReaderPosition).toHaveBeenNthCalledWith(
+      2,
+      `${secondIdentity.appId}:${secondIdentity.guideId}`,
+      0,
+      null,
+      null,
+      0,
+    );
+  });
+
   it("coalesces concurrent loads for the same guide key", async () => {
     const pendingGuide = deferred<DownloadedGuide>();
     const pendingPosition = deferred<ReaderPosition | null>();
@@ -300,6 +364,48 @@ describe("ReaderSessionCache", () => {
     );
     pendingPreload.resolve(null);
     await preloading;
+  });
+
+  it("keeps positions independent while switching A to B and back", async () => {
+    const secondIdentity = { appId: identity.appId, guideId: "3414883878" };
+    const positions = new Map<string, ReaderPosition>([
+      [guideKey, readerPosition(100)],
+      [
+        `${secondIdentity.appId}:${secondIdentity.guideId}`,
+        readerPosition(200),
+      ],
+    ]);
+    const saveReaderPosition = vi.fn<
+      ReaderSessionBackend["saveReaderPosition"]
+    >(async (key, scrollTop, sectionId, anchorText, anchorOffset) => {
+      const saved = {
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+        updatedAt: 300,
+      };
+      positions.set(key, saved);
+      return saved;
+    });
+    const cache = new ReaderSessionCache(
+      backend({
+        getGuide: vi.fn(async (guideId) => ({
+          ...guide(`Guide ${guideId}`),
+          guideId,
+        })),
+        getReaderPosition: vi.fn(async (key) => positions.get(key) ?? null),
+        saveReaderPosition,
+      }),
+    );
+
+    await cache.load(identity);
+    await cache.savePosition(identity, capturedPosition(111));
+    await cache.load(secondIdentity);
+    await cache.savePosition(secondIdentity, capturedPosition(222));
+
+    expect((await cache.load(identity)).position?.scrollTop).toBe(111);
+    expect(cache.peek(secondIdentity)?.position?.scrollTop).toBe(222);
   });
 
   it("never resurrects a late preload after a newer snapshot is evicted", async () => {
