@@ -167,6 +167,36 @@ describe("ReaderSessionCache", () => {
     );
   });
 
+  it("reserves access before a newer position save for the same guide", async () => {
+    const blocker = { appId: "222", guideId: "20" };
+    const blockerKey = `${blocker.appId}:${blocker.guideId}`;
+    const blockedSave = deferred<ReaderPosition>();
+    const saveReaderPosition = vi.fn<
+      ReaderSessionBackend["saveReaderPosition"]
+    >((key, scrollTop) =>
+      key === blockerKey
+        ? blockedSave.promise
+        : Promise.resolve(readerPosition(scrollTop, 302)),
+    );
+    const cache = new ReaderSessionCache(backend({ saveReaderPosition }));
+    const loaded = await cache.load(identity);
+
+    const blocking = cache.rememberAccess(blocker, null);
+    const staleAccess = cache.rememberAccess(identity, loaded.position);
+    const latestSave = cache.savePosition(identity, capturedPosition(800));
+    await Promise.resolve();
+
+    blockedSave.resolve(readerPosition(0, 301));
+    await Promise.all([blocking, staleAccess, latestSave]);
+
+    expect(
+      saveReaderPosition.mock.calls
+        .filter(([key]) => key === guideKey)
+        .map(([, scrollTop]) => scrollTop),
+    ).toEqual([120, 800]);
+    expect(cache.peek(identity)?.position?.scrollTop).toBe(800);
+  });
+
   it("coalesces concurrent loads for the same guide key", async () => {
     const pendingGuide = deferred<DownloadedGuide>();
     const pendingPosition = deferred<ReaderPosition | null>();

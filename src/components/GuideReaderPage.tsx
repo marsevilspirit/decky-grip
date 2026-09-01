@@ -20,7 +20,11 @@ import {
   ReaderAnchorIndex,
   restoreReaderPosition,
 } from "../reader/anchor";
-import { ReaderCheckpoint } from "../reader/checkpoint";
+import {
+  isReaderScrollInteraction,
+  ReaderCheckpoint,
+  readerRestoreCanSettle,
+} from "../reader/checkpoint";
 import {
   ReaderImageHydrator,
   type GuideImageFetcher,
@@ -42,16 +46,6 @@ const RESTORE_TIMEOUT_MS = 10_000;
 const LOADING_INDICATOR_DELAY_MS = 180;
 const MAX_OBSERVED_GUIDE_IMAGES = 512;
 const SECTION_RENDER_BATCH = 8;
-const SCROLL_KEYS = new Set([
-  "ArrowDown",
-  "ArrowUp",
-  "End",
-  "Home",
-  "PageDown",
-  "PageUp",
-  " ",
-]);
-
 const READER_CSS = `
 .grip-reader-content { color: #dcdedf; font-size: 18px; line-height: 1.55; padding: 10px 34px 80px; }
 .grip-reader-content img { display: block; max-width: 100%; height: auto; margin: 14px auto; border-radius: 4px; }
@@ -690,11 +684,13 @@ export function GuideReaderPage({
         scroller.scrollHeight - scroller.clientHeight,
       );
       const target = Math.min(position.scrollTop, maxScrollTop);
-      const pixelFallbackReady =
-        allSectionsRendered && Math.abs(scroller.scrollTop - target) <= 1;
-      return position.anchorText
-        ? anchorReady || pixelFallbackReady
-        : pixelFallbackReady;
+      const pixelFallbackReady = Math.abs(scroller.scrollTop - target) <= 1;
+      return readerRestoreCanSettle(
+        allSectionsRendered,
+        position.anchorText !== null,
+        anchorReady,
+        pixelFallbackReady,
+      );
     };
     const visibleImagesAreReady = () => {
       if (pendingObservedImagesRef.current.size > 0) {
@@ -818,23 +814,12 @@ export function GuideReaderPage({
     }, RESTORE_TIMEOUT_MS);
     stopRestoreRef.current = stop;
 
-    const interactionEvents = [
-      "wheel",
-      "touchmove",
-      "pointerdown",
-      "keydown",
-      "vgp_onbuttondown",
-      "vgp_ondirection",
-    ];
+    const interactionEvents = ["wheel", "touchmove", "pointerdown", "keydown"];
     const onInteraction = (event: Event) => {
-      if (
-        event.type === "wheel" ||
-        event.type === "touchmove" ||
-        (event.type === "pointerdown" && event.target === scroller) ||
-        (event instanceof KeyboardEvent && SCROLL_KEYS.has(event.key))
-      ) {
-        checkpoint.intendScroll();
+      if (!isReaderScrollInteraction(event, scroller)) {
+        return;
       }
+      checkpoint.intendScroll();
       failAndCancelRestore("用户在阅读位置稳定前开始操作");
     };
     for (const event of interactionEvents) {

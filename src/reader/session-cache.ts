@@ -231,6 +231,37 @@ export class ReaderSessionCache {
     identity: GuideIdentity,
     position: CapturedReaderPosition,
   ): Promise<ReaderPosition> {
+    return this.queuePositionSave(identity, position);
+  }
+
+  rememberAccess(
+    identity: GuideIdentity,
+    position: ReaderPosition | null,
+  ): Promise<ReaderPosition> {
+    const guideKey = makeGuideKey(identity);
+    const latestPosition = this.snapshots.get(guideKey)?.position ?? position;
+    const saved = this.queuePositionSave(
+      identity,
+      latestPosition ?? {
+        scrollTop: 0,
+        sectionId: null,
+        anchorText: null,
+        anchorOffset: 0,
+      },
+      this.accessOperation,
+    );
+    this.accessOperation = saved.then(
+      () => undefined,
+      () => undefined,
+    );
+    return saved;
+  }
+
+  private queuePositionSave(
+    identity: GuideIdentity,
+    position: CapturedReaderPosition,
+    before?: Promise<void>,
+  ): Promise<ReaderPosition> {
     const guideKey = makeGuideKey(identity);
     const generation = this.generation;
     this.stagedHandoffs.delete(guideKey);
@@ -259,15 +290,18 @@ export class ReaderSessionCache {
         position: optimisticPosition,
       });
     }
-    return this.enqueuePositionOperation(guideKey, () =>
-      this.persistPosition(
+    return this.enqueuePositionOperation(guideKey, async () => {
+      if (before) {
+        await before;
+      }
+      return this.persistPosition(
         guideKey,
         position,
         optimisticPosition,
         state,
         token,
-      ),
-    ).finally(() => {
+      );
+    }).finally(() => {
       state.pending -= 1;
       if (
         state.pending === 0 &&
@@ -276,28 +310,6 @@ export class ReaderSessionCache {
         this.positionSaveStates.delete(guideKey);
       }
     });
-  }
-
-  rememberAccess(
-    identity: GuideIdentity,
-    position: ReaderPosition | null,
-  ): Promise<ReaderPosition> {
-    const saved = this.accessOperation.then(() =>
-      this.savePosition(
-        identity,
-        position ?? {
-          scrollTop: 0,
-          sectionId: null,
-          anchorText: null,
-          anchorOffset: 0,
-        },
-      ),
-    );
-    this.accessOperation = saved.then(
-      () => undefined,
-      () => undefined,
-    );
-    return saved;
   }
 
   private async persistPosition(
