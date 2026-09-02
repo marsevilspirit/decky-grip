@@ -82,6 +82,7 @@ Python tests use only the standard library.
    entry from **指南库**. Important guides can be kept at the top with the
    local **收藏** switch. Missing or stale guide bodies can be downloaded or
    updated there without opening the reader; filtering never contacts Steam.
+   Choose **查找更多 Steam 指南** to open the running game's native guide list.
 3. Scroll normally in the full-screen reader. Use **切换指南** to move between
    guides for the same game; GRIP saves each guide's visible text and exact
    viewport offset independently.

@@ -45,6 +45,7 @@ import { makeGuideKey, type GuideIdentity } from "./steam/guide-key";
 import {
   mainWindowPath,
   navigateMainWindow,
+  openSteamGuideLibrary,
   returnToRunningAppMainWindow,
 } from "./steam/main-window";
 import { getMainWindow } from "./steam/main-window-store";
@@ -345,6 +346,14 @@ export default definePlugin(() => {
 
   const clearGuides = () => mutateGuideCache(clearGuideCache);
 
+  const openSteamGuides = async (): Promise<void> => {
+    const appId = currentRunningAppId();
+    if (!appId) {
+      throw new Error("请先运行一个游戏，再浏览它的 Steam 指南");
+    }
+    openSteamGuideLibrary(getMainWindow(), appId);
+  };
+
   const cacheGuide = async (identity: GuideIdentity) => {
     try {
       return (await readerCache.load(identity, { forceRefresh: true })).guide;
@@ -486,6 +495,7 @@ export default definePlugin(() => {
         loadGuideLibrary={getGuideLibrary}
         openGuide={(identity) => openReader(undefined, identity)}
         openReader={openReader}
+        openSteamGuides={openSteamGuides}
         performance={readerPerformance}
         repairPositions={repairPositions}
         removeGuideCache={removeGuide}
