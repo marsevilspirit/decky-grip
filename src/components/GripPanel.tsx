@@ -129,16 +129,21 @@ export function GripPanel({
   const [cacheBusy, setCacheBusy] = useState(false);
   const [cacheMessage, setCacheMessage] = useState<string | null>(null);
   const [cacheStats, setCacheStats] = useState<ReaderCacheStats | null>(null);
+  const [cacheStatsError, setCacheStatsError] = useState<string | null>(null);
   const performanceSnapshot = useSyncExternalStore(
     performance.subscribe,
     performance.getSnapshot,
   );
 
   const refreshCacheStats = async (): Promise<void> => {
+    setCacheStatsError(null);
     try {
       setCacheStats(await getCacheStats());
-    } catch {
+    } catch (error: unknown) {
       setCacheStats(null);
+      setCacheStatsError(
+        error instanceof Error ? error.message : String(error),
+      );
     }
   };
 
@@ -162,15 +167,20 @@ export function GripPanel({
 
   useEffect(() => {
     let canceled = false;
+    setCacheStatsError(null);
     void getCacheStats()
       .then((stats) => {
         if (!canceled) {
           setCacheStats(stats);
+          setCacheStatsError(null);
         }
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         if (!canceled) {
           setCacheStats(null);
+          setCacheStatsError(
+            error instanceof Error ? error.message : String(error),
+          );
         }
       });
     return () => {
@@ -391,9 +401,23 @@ export function GripPanel({
           <div style={{ opacity: 0.78 }}>
             {cacheStats
               ? `指南 ${cacheStats.guides.files} 个 / ${formatBytes(cacheStats.guides.bytes)}（上限 ${formatBytes(cacheStats.guides.diskLimitBytes)}）；图片 ${cacheStats.images.files} 个 / ${formatBytes(cacheStats.images.diskBytes)}（上限 ${formatBytes(cacheStats.images.diskLimitBytes)}）`
-              : "正在读取缓存用量…"}
+              : cacheStatsError
+                ? `缓存用量读取失败：${cacheStatsError}`
+                : "正在读取缓存用量…"}
           </div>
         </PanelSectionRow>
+        {cacheStatsError && (
+          <PanelSectionRow>
+            <ButtonItem
+              disabled={cacheBusy}
+              label="重试读取缓存用量"
+              layout="below"
+              onClick={() => void refreshCacheStats()}
+            >
+              仅重新读取统计，不会修改缓存或阅读位置
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
         <PanelSectionRow>
           <ButtonItem
             disabled={cacheBusy}

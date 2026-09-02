@@ -1,9 +1,16 @@
 // @vitest-environment happy-dom
 
-import { act, createElement, forwardRef, type ReactNode } from "react";
+import {
+  act,
+  createElement,
+  forwardRef,
+  type ChangeEventHandler,
+  type ReactNode,
+} from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { GuideLibraryEntry } from "../../src/backend";
 import { GuideReaderPage } from "../../src/components/GuideReaderPage";
 import { ReaderImageCacheControl } from "../../src/reader/image-cache-control";
 import { ReaderPerformanceTracker } from "../../src/reader/performance";
@@ -46,6 +53,22 @@ vi.mock("@decky/ui", () => {
       DIR_UP: 12,
     },
     Spinner: () => createElement("span", null, "loading"),
+    TextField: ({ label, onChange, value }: MockProps) =>
+      createElement("input", {
+        "aria-label": label as string,
+        onChange: onChange as ChangeEventHandler<HTMLInputElement>,
+        value: value as string,
+      }),
+    ToggleField: ({ checked, label, onChange }: MockProps) =>
+      createElement(
+        "button",
+        {
+          "aria-pressed": checked as boolean,
+          onClick: () =>
+            (onChange as (nextValue: boolean) => void)(!(checked as boolean)),
+        },
+        label as string,
+      ),
     useParams: () => ({ appId: "1113000", guideId: "3414883877" }),
   };
 });
@@ -196,6 +219,10 @@ describe("GuideReaderPage position lifecycle", () => {
     cache: ReaderSessionCache,
     fetchImage: () => Promise<null>,
     scrollHeight: number,
+    options: {
+      loadGuideLibrary?: (appId: string) => Promise<GuideLibraryEntry[]>;
+      onBrowseSteamGuides?: (appId: string) => Promise<void>;
+    } = {},
   ): Promise<HTMLElement> => {
     container = document.createElement("div");
     document.body.append(container);
@@ -206,7 +233,10 @@ describe("GuideReaderPage position lifecycle", () => {
           cache={cache}
           fetchImage={fetchImage}
           imageCacheControl={new ReaderImageCacheControl()}
-          loadGuideLibrary={async () => []}
+          loadGuideLibrary={options.loadGuideLibrary ?? (async () => [])}
+          onBrowseSteamGuides={
+            options.onBrowseSteamGuides ?? (async () => undefined)
+          }
           onClose={() => undefined}
           onRepairPositions={async () => ""}
           onSwitchGuide={async () => undefined}
@@ -245,6 +275,24 @@ describe("GuideReaderPage position lifecycle", () => {
     container?.remove();
     container = null;
     activeScroller = null;
+  };
+
+  const buttonNamed = (label: string): HTMLButtonElement => {
+    const button = [...(container?.querySelectorAll("button") ?? [])].find(
+      (candidate) => candidate.textContent === label,
+    );
+    if (!button) {
+      throw new Error(`button not found: ${label}`);
+    }
+    return button;
+  };
+
+  const flushMicrotasks = async (): Promise<void> => {
+    await act(async () => {
+      for (let index = 0; index < 8; index += 1) {
+        await Promise.resolve();
+      }
+    });
   };
 
   it("never persists top while a warm restore waits for progressive layout and survives reopen", async () => {
@@ -313,5 +361,188 @@ describe("GuideReaderPage position lifecycle", () => {
 
     expect(saves).toEqual([8_800]);
     expect(cache.peek(identity)?.position?.scrollTop).toBe(8_800);
+  });
+
+  it("keeps Steam discovery in the reader until the current position saves", async () => {
+    const guide = guideFixture();
+    const actions: string[] = [];
+    let failSave = true;
+    const backend: ReaderSessionBackend = {
+      getCachedGuide: async () => guide,
+      getGuide: async () => guide,
+      getReaderPosition: async () => null,
+      saveReaderPosition: async (
+        _guideKey,
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+      ) => {
+        if (failSave) {
+          actions.push("save failed");
+          throw new Error("disk full");
+        }
+        actions.push("save");
+        return {
+          scrollTop,
+          sectionId,
+          anchorText,
+          anchorOffset,
+          updatedAt: 2,
+        };
+      },
+    };
+    const cache = new ReaderSessionCache(backend);
+    await cache.load(identity);
+    const browse = vi.fn(async (appId: string) => {
+      actions.push(`browse ${appId}`);
+    });
+    await mount(cache, async () => null, 12_000, {
+      onBrowseSteamGuides: browse,
+    });
+
+    await act(async () => buttonNamed("切换指南").click());
+    await flushFrame();
+    expect(document.activeElement).toBe(buttonNamed("关闭"));
+
+    await act(async () => buttonNamed("查找更多 Steam 指南").click());
+    await flushMicrotasks();
+    expect(browse).not.toHaveBeenCalled();
+    expect(container?.textContent).toContain(
+      "当前指南位置保存失败，未打开 Steam 指南。",
+    );
+    const saveAlert = container?.querySelector('[role="alert"]');
+    expect(saveAlert?.getAttribute("aria-hidden")).toBe("true");
+    expect(saveAlert?.hasAttribute("inert")).toBe(true);
+
+    failSave = false;
+    await act(async () => buttonNamed("查找更多 Steam 指南").click());
+    await flushMicrotasks();
+    expect(browse).toHaveBeenCalledWith(identity.appId);
+    expect(actions).toEqual([
+      "save failed",
+      "save",
+      `browse ${identity.appId}`,
+    ]);
+  });
+
+  it("keeps an active guide filter available when the library shrinks", async () => {
+    const guide = guideFixture();
+    const backend: ReaderSessionBackend = {
+      getCachedGuide: async () => guide,
+      getGuide: async () => guide,
+      getReaderPosition: async () => null,
+      saveReaderPosition: async (
+        _guideKey,
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+      ) => ({
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+        updatedAt: 2,
+      }),
+    };
+    const cache = new ReaderSessionCache(backend);
+    await cache.load(identity);
+    const currentGuide: GuideLibraryEntry = {
+      appId: identity.appId,
+      guideId: identity.guideId,
+      updatedAt: 2,
+      favorite: false,
+      cache: null,
+    };
+    const otherGuide: GuideLibraryEntry = {
+      appId: identity.appId,
+      guideId: "123",
+      updatedAt: 1,
+      favorite: true,
+      cache: {
+        title: "另一篇指南",
+        author: "另一位作者",
+        fetchedAt: 1,
+        sectionTitle: null,
+        stale: false,
+      },
+    };
+    let library = [currentGuide, otherGuide];
+    await mount(cache, async () => null, 12_000, {
+      loadGuideLibrary: async () => library,
+    });
+
+    await act(async () => buttonNamed("切换指南").click());
+    await flushMicrotasks();
+    const filter = container?.querySelector<HTMLInputElement>(
+      'input[aria-label="筛选指南"]',
+    );
+    expect(filter).not.toBeNull();
+    await act(async () => {
+      const setValue = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      setValue?.call(filter, "另一篇");
+      filter?.dispatchEvent(new Event("input", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    await act(async () => buttonNamed("关闭").click());
+    library = [currentGuide];
+    await act(async () => buttonNamed("切换指南").click());
+    await flushMicrotasks();
+
+    expect(
+      container?.querySelector<HTMLInputElement>('input[aria-label="筛选指南"]')
+        ?.value,
+    ).toBe("另一篇");
+    expect(container?.textContent).toContain("没有匹配的指南。");
+  });
+
+  it("does not browse after the switcher closes while save is pending", async () => {
+    const guide = guideFixture();
+    let resolveSave!: (position: ReaderPosition) => void;
+    const save = vi.fn(
+      () =>
+        new Promise<ReaderPosition>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    const backend: ReaderSessionBackend = {
+      getCachedGuide: async () => guide,
+      getGuide: async () => guide,
+      getReaderPosition: async () => null,
+      saveReaderPosition: save,
+    };
+    const cache = new ReaderSessionCache(backend);
+    await cache.load(identity);
+    const browse = vi.fn(async () => undefined);
+    await mount(cache, async () => null, 12_000, {
+      onBrowseSteamGuides: browse,
+    });
+
+    await act(async () => buttonNamed("切换指南").click());
+    await flushMicrotasks();
+    await act(async () => buttonNamed("查找更多 Steam 指南").click());
+    await flushMicrotasks();
+    expect(save).toHaveBeenCalledOnce();
+    expect(browse).not.toHaveBeenCalled();
+
+    await act(async () => buttonNamed("关闭").click());
+    await act(async () => {
+      resolveSave({
+        scrollTop: 0,
+        sectionId: "1",
+        anchorText: "重复锚点",
+        anchorOffset: 0,
+        updatedAt: 2,
+      });
+      await Promise.resolve();
+    });
+    await flushMicrotasks();
+
+    expect(browse).not.toHaveBeenCalled();
   });
 });

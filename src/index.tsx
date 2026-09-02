@@ -345,8 +345,8 @@ export default definePlugin(() => {
 
   const clearGuides = () => mutateGuideCache(clearGuideCache);
 
-  const openSteamGuides = async (): Promise<void> => {
-    const appId = currentRunningAppId();
+  const openSteamGuides = async (requestedAppId?: string): Promise<void> => {
+    const appId = requestedAppId ?? currentRunningAppId();
     if (!appId) {
       throw new Error("请先运行一个游戏，再浏览它的 Steam 指南");
     }
@@ -403,6 +403,7 @@ export default definePlugin(() => {
         imageCacheControl={imageCacheControl}
         key={`${params.appId ?? ""}:${params.guideId ?? ""}`}
         loadGuideLibrary={getGuideLibrary}
+        onBrowseSteamGuides={openSteamGuides}
         onClose={closeReader}
         onRepairPositions={repairPositions}
         onSwitchGuide={(identity) => openReader(undefined, identity)}

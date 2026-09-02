@@ -3,6 +3,8 @@ import {
   Focusable,
   GamepadButton,
   Spinner,
+  TextField,
+  ToggleField,
   useParams,
   type GamepadEvent,
 } from "@decky/ui";
@@ -36,7 +38,10 @@ import {
   retainGuideForStaleRefresh,
   type ReaderSessionSnapshot,
 } from "../reader/session-cache";
-import { guideChoicesForReader } from "../reader/recent-guide";
+import {
+  filterGuideLibraryEntries,
+  guideChoicesForReader,
+} from "../reader/recent-guide";
 import { shortSectionTitle } from "../reader/toc-title";
 import { makeGuideKey, type GuideIdentity } from "../steam/guide-key";
 
@@ -116,6 +121,7 @@ export interface GuideReaderPageProps {
   fetchImage: GuideImageFetcher;
   imageCacheControl: ReaderImageCacheControl;
   loadGuideLibrary: (appId: string) => Promise<GuideLibraryEntry[]>;
+  onBrowseSteamGuides: (appId: string) => Promise<void>;
   onClose: () => void;
   onRepairPositions: () => Promise<string>;
   onSwitchGuide: (identity: GuideIdentity) => Promise<void>;
@@ -132,6 +138,7 @@ export function GuideReaderPage({
   fetchImage,
   imageCacheControl,
   loadGuideLibrary,
+  onBrowseSteamGuides,
   onClose,
   onRepairPositions,
   onSwitchGuide,
@@ -161,13 +168,15 @@ export function GuideReaderPage({
   );
   const [guideSwitcherRevision, setGuideSwitcherRevision] = useState(0);
   const [switchPending, setSwitchPending] = useState<string | null>(null);
+  const [guideFilter, setGuideFilter] = useState("");
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [sectionRenderState, setSectionRenderState] =
     useState<SectionRenderState>(() => ({
       guide: initialSnapshot?.guide ?? null,
       count: Math.min(initialSnapshot?.guide.sections.length ?? 0, 1),
     }));
   const scrollerRef = useRef<HTMLDivElement | null>(null);
-  const guideSwitcherRef = useRef<HTMLDivElement | null>(null);
+  const guideSwitcherCloseRef = useRef<HTMLDivElement | null>(null);
   const guideSwitcherButtonRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const anchorIndexRef = useRef<ReaderAnchorIndex | null>(null);
@@ -276,7 +285,7 @@ export function GuideReaderPage({
       return;
     }
     const animationFrame = requestAnimationFrame(() => {
-      focusWithoutScrolling(guideSwitcherRef.current);
+      focusWithoutScrolling(guideSwitcherCloseRef.current);
     });
     return () => cancelAnimationFrame(animationFrame);
   }, [guideSwitcherOpen]);
@@ -1003,6 +1012,40 @@ export function GuideReaderPage({
     }
   };
 
+  const browseSteamGuides = async () => {
+    if (!identity || switchPending !== null) {
+      return;
+    }
+    const request = {};
+    switchRequestRef.current = request;
+    setSwitchPending("browse");
+    setGuideSwitcherError(null);
+    try {
+      if (saveTimerRef.current !== null) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+      if (!(await persistPosition())) {
+        if (switchRequestRef.current === request) {
+          setGuideSwitcherError("当前指南位置保存失败，未打开 Steam 指南。");
+        }
+        return;
+      }
+      if (switchRequestRef.current === request) {
+        await onBrowseSteamGuides(identity.appId);
+      }
+    } catch (reason: unknown) {
+      if (switchRequestRef.current === request) {
+        setGuideSwitcherError(`Steam 指南打开失败：${errorMessage(reason)}`);
+      }
+    } finally {
+      if (switchRequestRef.current === request) {
+        switchRequestRef.current = null;
+        setSwitchPending(null);
+      }
+    }
+  };
+
   const retryReaderPosition = async (repair: boolean) => {
     if (!identity || positionRepairBusy) {
       return;
@@ -1111,6 +1154,9 @@ export function GuideReaderPage({
   const guideChoices = guideLibrary
     ? guideChoicesForReader(guideLibrary, currentGuideEntry)
     : null;
+  const visibleGuideChoices = guideChoices
+    ? filterGuideLibraryEntries(guideChoices, guideFilter, favoritesOnly)
+    : null;
   const readerWarning =
     restoreWarning ?? loadWarning ?? loaded?.positionWarning ?? null;
 
@@ -1174,8 +1220,6 @@ export function GuideReaderPage({
         <Focusable
           aria-label="切换指南"
           aria-modal="true"
-          preferredFocus
-          ref={guideSwitcherRef}
           role="dialog"
           style={{
             background: "linear-gradient(180deg, #16202b 0%, #0d141c 100%)",
@@ -1189,7 +1233,6 @@ export function GuideReaderPage({
             top: 70,
             zIndex: 10,
           }}
-          tabIndex={-1}
         >
           <div
             style={{
@@ -1205,7 +1248,21 @@ export function GuideReaderPage({
                 仅显示 AppID {identity.appId}；更多指南先在 Steam 中打开一次
               </div>
             </div>
-            <Button onClick={closeGuideSwitcher}>关闭</Button>
+            <Button
+              disabled={switchPending !== null}
+              onClick={() => void browseSteamGuides()}
+            >
+              {switchPending === "browse"
+                ? "正在打开 Steam 指南…"
+                : "查找更多 Steam 指南"}
+            </Button>
+            <Button
+              onClick={closeGuideSwitcher}
+              preferredFocus
+              ref={guideSwitcherCloseRef}
+            >
+              关闭
+            </Button>
           </div>
           {guideLibrary === null && !guideSwitcherError && (
             <div
@@ -1229,13 +1286,37 @@ export function GuideReaderPage({
                   setGuideSwitcherRevision((revision) => revision + 1)
                 }
               >
-                重试
+                重新读取指南列表
               </Button>
             </div>
           )}
-          {guideChoices && (
+          {guideChoices &&
+            (guideChoices.length > 1 ||
+              guideFilter.length > 0 ||
+              favoritesOnly) && (
+              <>
+                <TextField
+                  bShowClearAction
+                  label="筛选指南"
+                  onChange={(event) =>
+                    setGuideFilter(event.currentTarget.value)
+                  }
+                  value={guideFilter}
+                />
+                <ToggleField
+                  checked={favoritesOnly}
+                  description="仅显示当前游戏中收藏的指南"
+                  label="仅看收藏"
+                  onChange={setFavoritesOnly}
+                />
+              </>
+            )}
+          {guideChoices && visibleGuideChoices?.length === 0 && (
+            <div style={{ marginTop: 16, opacity: 0.75 }}>没有匹配的指南。</div>
+          )}
+          {visibleGuideChoices && visibleGuideChoices.length > 0 && (
             <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-              {guideChoices.map((entry) => {
+              {visibleGuideChoices.map((entry) => {
                 const guideKey = makeGuideKey(entry);
                 const current = entry.guideId === identity.guideId;
                 const pending = switchPending === guideKey;
@@ -1293,13 +1374,13 @@ export function GuideReaderPage({
                 disabled={positionRepairBusy}
                 onClick={() => void retryReaderPosition(false)}
               >
-                重试位置
+                {positionRepairBusy ? "正在处理…" : "重试位置"}
               </Button>
               <Button
                 disabled={positionRepairBusy}
                 onClick={() => void retryReaderPosition(true)}
               >
-                备份并重置
+                {positionRepairBusy ? "正在处理…" : "备份并重置"}
               </Button>
             </>
           )}
@@ -1407,7 +1488,7 @@ export function GuideReaderPage({
                 width: "100%",
               }}
             >
-              更新
+              {refreshPending ? "更新中…" : "更新"}
             </Button>
             {loaded.guide.sections
               .slice(0, renderedSectionCount)
@@ -1438,6 +1519,9 @@ export function GuideReaderPage({
 
       {saveError && (
         <div
+          aria-hidden={guideSwitcherOpen}
+          inert={guideSwitcherOpen ? true : undefined}
+          role="alert"
           style={{
             background: "#6d2525",
             bottom: 12,
@@ -1447,6 +1531,7 @@ export function GuideReaderPage({
           }}
         >
           阅读位置保存失败：{saveError}
+          <Button onClick={() => void persistPosition()}>重试保存</Button>
         </div>
       )}
     </Focusable>
