@@ -1,6 +1,11 @@
 // @vitest-environment happy-dom
 
-import { act, createElement, type ReactNode } from "react";
+import {
+  act,
+  createElement,
+  type ChangeEventHandler,
+  type ReactNode,
+} from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -24,9 +29,11 @@ vi.mock("@decky/ui", () => {
     description?: ReactNode;
     disabled?: boolean;
     label?: ReactNode;
-    onChange?: (value: boolean) => void;
+    onChange?:
+      ChangeEventHandler<HTMLInputElement> | ((value: boolean) => void);
     onClick?: () => void;
     title?: ReactNode;
+    value?: string;
   }
 
   return {
@@ -36,7 +43,12 @@ vi.mock("@decky/ui", () => {
       createElement("section", null, title, children),
     PanelSectionRow: ({ children }: MockProps) =>
       createElement("div", null, children),
-    TextField: ({ label }: MockProps) => createElement("label", null, label),
+    TextField: ({ label, onChange, value }: MockProps) =>
+      createElement("input", {
+        "aria-label": label,
+        onChange: onChange as ChangeEventHandler<HTMLInputElement>,
+        value,
+      }),
     ToggleField: ({
       checked,
       description,
@@ -49,7 +61,8 @@ vi.mock("@decky/ui", () => {
         {
           "aria-pressed": checked,
           disabled,
-          onClick: () => onChange?.(!checked),
+          onClick: () =>
+            (onChange as ((value: boolean) => void) | undefined)?.(!checked),
         },
         label,
         description,
@@ -254,5 +267,55 @@ describe("GripPanel", () => {
     expect(panelText()).toContain(
       "指南缓存已清除：删除 2 个文件，释放 1.0 KiB",
     );
+  });
+
+  it("clears the guide query but keeps favorites-only when the app changes", async () => {
+    const status = new RuntimeStatusStore("1113000");
+    await mount({
+      guides: [
+        {
+          appId: "1113000",
+          guideId: "1",
+          updatedAt: 2,
+          favorite: true,
+          cache: null,
+        },
+        {
+          appId: "1113000",
+          guideId: "2",
+          updatedAt: 1,
+          favorite: false,
+          cache: null,
+        },
+      ],
+      status,
+    });
+    const filter = container?.querySelector<HTMLInputElement>(
+      'input[aria-label="筛选指南"]',
+    );
+    await act(async () => {
+      const setValue = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      setValue?.call(filter, "攻略");
+      filter?.dispatchEvent(new Event("input", { bubbles: true }));
+      button("仅看收藏").click();
+      await Promise.resolve();
+    });
+    expect(filter?.value).toBe("攻略");
+    expect(button("仅看收藏").getAttribute("aria-pressed")).toBe("true");
+
+    await act(async () => {
+      status.setGuideLibraryAppId("222");
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(
+      container?.querySelector<HTMLInputElement>('input[aria-label="筛选指南"]')
+        ?.value,
+    ).toBe("");
+    expect(button("仅看收藏").getAttribute("aria-pressed")).toBe("true");
   });
 });

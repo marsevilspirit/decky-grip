@@ -191,6 +191,10 @@ export function GripPanel({
   }, [getCacheStats]);
 
   useEffect(() => {
+    setGuideFilter("");
+  }, [status.guideLibraryAppId]);
+
+  useEffect(() => {
     if (!quickAccessVisible) {
       return;
     }
