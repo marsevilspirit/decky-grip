@@ -9,17 +9,21 @@ import {
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type {
-  CacheClearResult,
-  GuideLibraryEntry,
-  ReaderCacheStats,
+import {
+  getHotkeyStatus,
+  type CacheClearResult,
+  type GuideLibraryEntry,
+  type HotkeyStatus,
+  type ReaderCacheStats,
 } from "../../src/backend";
 import { GripPanel } from "../../src/components/GripPanel";
 import { ReaderPerformanceTracker } from "../../src/reader/performance";
 import { RuntimeStatusStore } from "../../src/runtime-status";
 
+const deckyApiMock = vi.hoisted(() => ({ quickAccessVisible: true }));
+
 vi.mock("@decky/api", () => ({
-  useQuickAccessVisible: () => true,
+  useQuickAccessVisible: () => deckyApiMock.quickAccessVisible,
 }));
 
 vi.mock("@decky/ui", () => {
@@ -71,12 +75,12 @@ vi.mock("@decky/ui", () => {
 });
 
 vi.mock("../../src/backend", () => ({
-  getHotkeyStatus: async () => ({
+  getHotkeyStatus: vi.fn(async (): Promise<HotkeyStatus> => ({
     available: false,
     button: "L4",
     device: null,
     running: true,
-  }),
+  })),
   setGuideFavorite: vi.fn(),
 }));
 
@@ -164,6 +168,43 @@ describe("GripPanel", () => {
     container?.remove();
     root = null;
     container = null;
+    deckyApiMock.quickAccessVisible = true;
+  });
+
+  it("refreshes the hotkey status whenever quick access becomes visible", async () => {
+    const status = new RuntimeStatusStore("1113000");
+    const hotkeyStatus = vi.mocked(getHotkeyStatus);
+    hotkeyStatus.mockClear();
+    deckyApiMock.quickAccessVisible = false;
+    await mount({ status });
+    expect(hotkeyStatus).not.toHaveBeenCalled();
+
+    await act(async () => {
+      deckyApiMock.quickAccessVisible = true;
+      status.update({ message: "visible" });
+      await Promise.resolve();
+    });
+    expect(hotkeyStatus).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      status.update({ message: "still visible" });
+      await Promise.resolve();
+    });
+    expect(hotkeyStatus).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      deckyApiMock.quickAccessVisible = false;
+      status.update({ message: "hidden" });
+      await Promise.resolve();
+    });
+    expect(hotkeyStatus).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      deckyApiMock.quickAccessVisible = true;
+      status.update({ message: "visible again" });
+      await Promise.resolve();
+    });
+    expect(hotkeyStatus).toHaveBeenCalledTimes(2);
   });
 
   it("shows a failed initial read and retries it", async () => {

@@ -437,6 +437,79 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(cache.peek(identity)?.position?.scrollTop).toBe(8_800);
   });
 
+  it("keeps the old guide scrollable without rolling back during refresh", async () => {
+    const guide = guideFixture();
+    const saves: number[] = [];
+    let persistedPosition = savedPosition;
+    let blockRefresh = false;
+    let resolveRefresh!: (guide: DownloadedGuide) => void;
+    const backend: ReaderSessionBackend = {
+      getCachedGuide: async () => guide,
+      getGuide: async () =>
+        blockRefresh
+          ? new Promise<DownloadedGuide>((resolve) => {
+              resolveRefresh = resolve;
+            })
+          : guide,
+      getReaderPosition: async () => persistedPosition,
+      saveReaderPosition: async (
+        _guideKey,
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+      ) => {
+        saves.push(scrollTop);
+        persistedPosition = {
+          scrollTop,
+          sectionId,
+          anchorText,
+          anchorOffset,
+          updatedAt: 2,
+        };
+        return persistedPosition;
+      },
+    };
+    const cache = new ReaderSessionCache(backend);
+    await cache.load(identity);
+    const scroller = await mount(cache, async () => null, 12_000);
+    for (let frame = 0; frame < 8; frame += 1) {
+      await flushFrame();
+    }
+    await flushMicrotasks();
+    notifyResize();
+    await act(async () => vi.advanceTimersByTime(101));
+
+    blockRefresh = true;
+    await act(async () => buttonNamed("更新").click());
+    await flushMicrotasks();
+
+    expect(scroller.style.overflowY).toBe("auto");
+    expect(buttonNamed("搜索").disabled).toBe(true);
+    expect(buttonNamed("章节 1").disabled).toBe(true);
+
+    await act(async () => {
+      scroller.dispatchEvent(new Event("wheel", { bubbles: true }));
+      scroller.scrollTop = 4_600;
+      scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    await act(async () => {
+      resolveRefresh({ ...guide, fetchedAt: 2 });
+      await Promise.resolve();
+    });
+    await flushMicrotasks();
+    await flushFrame();
+    await flushFrame();
+
+    expect(scroller.scrollTop).toBe(4_600);
+    await act(async () => vi.advanceTimersByTime(400));
+    await unmount();
+    await flushMicrotasks();
+
+    expect(saves[saves.length - 1]).toBe(4_600);
+    expect(persistedPosition.scrollTop).toBe(4_600);
+  });
+
   it("keeps Steam discovery in the reader until the current position saves", async () => {
     const guide = guideFixture();
     const actions: string[] = [];

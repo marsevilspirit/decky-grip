@@ -85,6 +85,19 @@ export function chooseObservedGuide(
   );
 }
 
+export async function resolveGuideForReaderOpen(
+  requestedIdentity: GuideIdentity | undefined,
+  resolveIdentity: () => GuideIdentity | null,
+  recentGuidesReady: Promise<unknown>,
+): Promise<GuideIdentity | null> {
+  const identity = requestedIdentity ?? resolveIdentity();
+  if (identity) {
+    return identity;
+  }
+  await recentGuidesReady;
+  return resolveIdentity();
+}
+
 export function filterGuideLibraryEntries(
   entries: readonly GuideLibraryEntry[],
   query: string,

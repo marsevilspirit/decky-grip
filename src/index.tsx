@@ -32,7 +32,10 @@ import {
   readerRouteAppId,
   ReaderHotkeyToggle,
 } from "./hotkey/reader-toggle";
-import { chooseObservedGuide } from "./reader/recent-guide";
+import {
+  chooseObservedGuide,
+  resolveGuideForReaderOpen,
+} from "./reader/recent-guide";
 import { ReaderImageCacheControl } from "./reader/image-cache-control";
 import {
   parseInstrumentedHotkeyPress,
@@ -215,7 +218,11 @@ export default definePlugin(() => {
     };
 
     try {
-      await recentGuidesReady;
+      const identity = await resolveGuideForReaderOpen(
+        requestedIdentity,
+        () => resolveReaderIdentity(targetAppId),
+        recentGuidesReady,
+      );
       if (!canContinue()) {
         if (performanceTrace) {
           readerPerformance.abandon(performanceTrace);
@@ -223,7 +230,6 @@ export default definePlugin(() => {
         return;
       }
 
-      const identity = requestedIdentity ?? resolveReaderIdentity(targetAppId);
       if (!identity) {
         throw new Error(
           targetAppId === undefined

@@ -14,6 +14,7 @@ import {
   guideChoicesForReader,
   guideCacheRefreshFellBack,
   RecentGuideIndex,
+  resolveGuideForReaderOpen,
 } from "../../src/reader/recent-guide";
 import { RuntimeStatusStore } from "../../src/runtime-status";
 import { shortSectionTitle } from "../../src/reader/toc-title";
@@ -261,6 +262,44 @@ describe("GRIP Reader helpers", () => {
     );
     expect(chooseObservedGuide(otherGame, null, "1113000")).toBeNull();
     expect(chooseObservedGuide(otherGame, null)).toEqual(otherGame);
+  });
+
+  it("opens a known guide without waiting for pending recent-guide history", async () => {
+    const identity = { appId: "1113000", guideId: "11" };
+    const pendingHistory = new Promise<void>(() => undefined);
+
+    for (const requestedIdentity of [identity, undefined]) {
+      let opened: typeof identity | null | undefined;
+      void resolveGuideForReaderOpen(
+        requestedIdentity,
+        () => identity,
+        pendingHistory,
+      ).then((resolved) => {
+        opened = resolved;
+      });
+      await Promise.resolve();
+      expect(opened).toEqual(identity);
+    }
+  });
+
+  it("retries guide resolution after recent-guide history is ready", async () => {
+    const identity = { appId: "1113000", guideId: "11" };
+    let resolveHistory!: () => void;
+    const pendingHistory = new Promise<void>((resolve) => {
+      resolveHistory = resolve;
+    });
+    let resolveCalls = 0;
+    const resolveIdentity = () => (++resolveCalls === 1 ? null : identity);
+    const resolved = resolveGuideForReaderOpen(
+      undefined,
+      resolveIdentity,
+      pendingHistory,
+    );
+
+    expect(resolveCalls).toBe(1);
+    resolveHistory();
+    await expect(resolved).resolves.toEqual(identity);
+    expect(resolveCalls).toBe(2);
   });
 
   it("keeps runtime recent guides partitioned when switching A to B and back", () => {

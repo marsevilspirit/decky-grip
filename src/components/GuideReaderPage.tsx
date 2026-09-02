@@ -347,6 +347,7 @@ export function GuideReaderPage({
     token: object;
   } | null>(null);
   const pendingSaveCountRef = useRef(0);
+  const refreshScrolledRef = useRef(false);
 
   useLayoutEffect(() => {
     if (identity) {
@@ -481,11 +482,30 @@ export function GuideReaderPage({
       .load(identity, { forceRefresh: refreshGeneration > 0 })
       .then((snapshot) => {
         if (!canceled) {
-          const displaySnapshot = retainGuideForStaleRefresh(
+          let displaySnapshot = retainGuideForStaleRefresh(
             loadedRef.current,
             snapshot,
             refreshGeneration > 0,
           );
+          if (
+            refreshScrolledRef.current &&
+            scrollerRef.current &&
+            contentRef.current
+          ) {
+            const captured = captureReaderPosition(
+              scrollerRef.current,
+              contentRef.current,
+              anchorIndexRef.current ?? undefined,
+            );
+            void persistPosition(captured);
+            displaySnapshot = {
+              ...displaySnapshot,
+              position: {
+                ...captured,
+                updatedAt: 0,
+              },
+            };
+          }
           const { position } = displaySnapshot;
           lastSavedSignatureRef.current =
             position && position.updatedAt > 0
@@ -531,6 +551,7 @@ export function GuideReaderPage({
         if (!canceled) {
           setLoading(false);
           setRefreshPending(false);
+          refreshScrolledRef.current = false;
         }
       });
 
@@ -707,52 +728,59 @@ export function GuideReaderPage({
     return () => cancelAnimationFrame(animationFrame);
   }, [identity?.appId, identity?.guideId, loaded?.guide, performance]);
 
-  const persistPosition = useCallback(async (): Promise<boolean> => {
-    if (
-      !checkpoint.canPersist ||
-      !identity ||
-      !scrollerRef.current ||
-      !contentRef.current
-    ) {
-      return true;
-    }
-    const captured = captureReaderPosition(
-      scrollerRef.current,
-      contentRef.current,
-      anchorIndexRef.current ?? undefined,
-    );
-    const signature = JSON.stringify(captured);
-    if (latestQueuedSaveRef.current?.signature === signature) {
-      return latestQueuedSaveRef.current.promise;
-    }
-    if (
-      pendingSaveCountRef.current === 0 &&
-      signature === lastSavedSignatureRef.current
-    ) {
-      return true;
-    }
-    const token = {};
-    pendingSaveCountRef.current += 1;
-    const operation = cache
-      .savePosition(identity, captured)
-      .then(() => {
-        lastSavedSignatureRef.current = signature;
-        setSaveError(null);
+  const persistPosition = useCallback(
+    async (
+      capturedPosition?: ReturnType<typeof captureReaderPosition>,
+    ): Promise<boolean> => {
+      if (
+        !checkpoint.canPersist ||
+        !identity ||
+        !scrollerRef.current ||
+        !contentRef.current
+      ) {
         return true;
-      })
-      .catch((reason: unknown) => {
-        setSaveError(errorMessage(reason));
-        return false;
-      })
-      .finally(() => {
-        pendingSaveCountRef.current -= 1;
-        if (latestQueuedSaveRef.current?.token === token) {
-          latestQueuedSaveRef.current = null;
-        }
-      });
-    latestQueuedSaveRef.current = { signature, promise: operation, token };
-    return operation;
-  }, [cache, checkpoint, identity?.appId, identity?.guideId]);
+      }
+      const captured =
+        capturedPosition ??
+        captureReaderPosition(
+          scrollerRef.current,
+          contentRef.current,
+          anchorIndexRef.current ?? undefined,
+        );
+      const signature = JSON.stringify(captured);
+      if (latestQueuedSaveRef.current?.signature === signature) {
+        return latestQueuedSaveRef.current.promise;
+      }
+      if (
+        pendingSaveCountRef.current === 0 &&
+        signature === lastSavedSignatureRef.current
+      ) {
+        return true;
+      }
+      const token = {};
+      pendingSaveCountRef.current += 1;
+      const operation = cache
+        .savePosition(identity, captured)
+        .then(() => {
+          lastSavedSignatureRef.current = signature;
+          setSaveError(null);
+          return true;
+        })
+        .catch((reason: unknown) => {
+          setSaveError(errorMessage(reason));
+          return false;
+        })
+        .finally(() => {
+          pendingSaveCountRef.current -= 1;
+          if (latestQueuedSaveRef.current?.token === token) {
+            latestQueuedSaveRef.current = null;
+          }
+        });
+      latestQueuedSaveRef.current = { signature, promise: operation, token };
+      return operation;
+    },
+    [cache, checkpoint, identity?.appId, identity?.guideId],
+  );
 
   const cancelRestore = useCallback(() => {
     stopRestoreRef.current?.();
@@ -1011,12 +1039,15 @@ export function GuideReaderPage({
   );
 
   const onScroll = () => {
-    if (restoringRef.current || loading || refreshPending) {
+    if (restoringRef.current || loading) {
       return;
     }
     checkpoint.didScroll();
     if (!checkpoint.canPersist) {
       return;
+    }
+    if (refreshPending) {
+      refreshScrolledRef.current = true;
     }
     if (saveTimerRef.current !== null) {
       clearTimeout(saveTimerRef.current);
@@ -1029,7 +1060,7 @@ export function GuideReaderPage({
 
   const scrollReaderBy = (amount: number, event: GamepadEvent) => {
     const scroller = scrollerRef.current;
-    if (!scroller || loading || refreshPending) {
+    if (!scroller || loading) {
       return;
     }
     const maxScrollTop = Math.max(
@@ -1082,6 +1113,7 @@ export function GuideReaderPage({
     }
     stopGuideSearchAlignment();
     imageCacheControl.resume();
+    refreshScrolledRef.current = false;
     setRefreshPending(true);
     if (!restoringRef.current) {
       if (saveTimerRef.current !== null) {
@@ -1090,6 +1122,7 @@ export function GuideReaderPage({
       }
       const saved = await persistPosition();
       if (!saved) {
+        refreshScrolledRef.current = false;
         setRefreshPending(false);
         return;
       }
@@ -1818,10 +1851,7 @@ export function GuideReaderPage({
               flex: 1,
               minWidth: 0,
               outline: "none",
-              overflowY:
-                loading || refreshPending || guideSwitcherOpen
-                  ? "hidden"
-                  : "auto",
+              overflowY: loading || guideSwitcherOpen ? "hidden" : "auto",
               scrollBehavior: "auto",
             }}
             role="region"

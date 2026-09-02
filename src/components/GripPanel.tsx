@@ -150,6 +150,9 @@ export function GripPanel({
   };
 
   useEffect(() => {
+    if (!quickAccessVisible) {
+      return;
+    }
     let canceled = false;
     void getHotkeyStatus()
       .then((nextStatus) => {
@@ -165,7 +168,7 @@ export function GripPanel({
     return () => {
       canceled = true;
     };
-  }, []);
+  }, [quickAccessVisible]);
 
   useEffect(() => {
     let canceled = false;
