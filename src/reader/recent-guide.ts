@@ -101,13 +101,9 @@ export async function resolveGuideForReaderOpen(
 export function filterGuideLibraryEntries(
   entries: readonly GuideLibraryEntry[],
   query: string,
-  favoritesOnly: boolean,
 ): GuideLibraryEntry[] {
   const needle = query.trim().toLocaleLowerCase();
   return entries.filter((entry) => {
-    if (favoritesOnly && !entry.favorite) {
-      return false;
-    }
     if (!needle) {
       return true;
     }

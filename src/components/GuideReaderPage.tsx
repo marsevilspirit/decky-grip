@@ -4,7 +4,6 @@ import {
   GamepadButton,
   Spinner,
   TextField,
-  ToggleField,
   useParams,
   type GamepadEvent,
 } from "@decky/ui";
@@ -112,7 +111,6 @@ function selectionMatchesRange(selection: Selection, range: Range): boolean {
 
 function guideChoiceDetails(entry: GuideLibraryEntry): string {
   return [
-    entry.favorite ? "已收藏" : null,
     entry.cache
       ? entry.cache.stale
         ? "旧正文已缓存，可更新"
@@ -196,7 +194,6 @@ export function GuideReaderPage({
   const [guideSwitcherRevision, setGuideSwitcherRevision] = useState(0);
   const [switchPending, setSwitchPending] = useState<string | null>(null);
   const [guideFilter, setGuideFilter] = useState("");
-  const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [guideSearchOpen, setGuideSearchOpen] = useState(false);
   const [guideSearchQuery, setGuideSearchQuery] = useState("");
   const [activeGuideSearchResultIndex, setActiveGuideSearchResultIndex] =
@@ -1443,7 +1440,6 @@ export function GuideReaderPage({
       currentSnapshot?.position?.updatedAt ??
       currentSnapshot?.guide.fetchedAt ??
       0,
-    favorite: false,
     cache: currentSnapshot
       ? {
           title: currentSnapshot.guide.title,
@@ -1458,7 +1454,7 @@ export function GuideReaderPage({
     ? guideChoicesForReader(guideLibrary, currentGuideEntry)
     : null;
   const visibleGuideChoices = guideChoices
-    ? filterGuideLibraryEntries(guideChoices, guideFilter, favoritesOnly)
+    ? filterGuideLibraryEntries(guideChoices, guideFilter)
     : null;
   const stableGuideChoices = guideChoices
     ? [...guideChoices].sort((left, right) =>
@@ -1655,25 +1651,13 @@ export function GuideReaderPage({
             </div>
           )}
           {guideChoices &&
-            (guideChoices.length > 1 ||
-              guideFilter.length > 0 ||
-              favoritesOnly) && (
-              <>
-                <TextField
-                  bShowClearAction
-                  label="筛选指南"
-                  onChange={(event) =>
-                    setGuideFilter(event.currentTarget.value)
-                  }
-                  value={guideFilter}
-                />
-                <ToggleField
-                  checked={favoritesOnly}
-                  description="仅显示当前游戏中收藏的指南"
-                  label="仅看收藏"
-                  onChange={setFavoritesOnly}
-                />
-              </>
+            (guideChoices.length > 1 || guideFilter.length > 0) && (
+              <TextField
+                bShowClearAction
+                label="筛选指南"
+                onChange={(event) => setGuideFilter(event.currentTarget.value)}
+                value={guideFilter}
+              />
             )}
           {guideChoices && visibleGuideChoices?.length === 0 && (
             <div style={{ marginTop: 16, opacity: 0.75 }}>没有匹配的指南。</div>

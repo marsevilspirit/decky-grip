@@ -81,7 +81,6 @@ vi.mock("../../src/backend", () => ({
     device: null,
     running: true,
   })),
-  setGuideFavorite: vi.fn(),
 }));
 
 const cacheStats: ReaderCacheStats = {
@@ -236,7 +235,6 @@ describe("GripPanel", () => {
           appId: "1113000",
           guideId: "3414883877",
           updatedAt: 1,
-          favorite: false,
           cache: {
             author: "测试作者",
             fetchedAt: 1,
@@ -308,7 +306,7 @@ describe("GripPanel", () => {
     );
   });
 
-  it("clears the guide query but keeps favorites-only when the app changes", async () => {
+  it("clears the guide query when the app changes", async () => {
     const status = new RuntimeStatusStore("1113000");
     await mount({
       guides: [
@@ -316,14 +314,12 @@ describe("GripPanel", () => {
           appId: "1113000",
           guideId: "1",
           updatedAt: 2,
-          favorite: true,
           cache: null,
         },
         {
           appId: "1113000",
           guideId: "2",
           updatedAt: 1,
-          favorite: false,
           cache: null,
         },
       ],
@@ -339,11 +335,9 @@ describe("GripPanel", () => {
       )?.set;
       setValue?.call(filter, "攻略");
       filter?.dispatchEvent(new Event("input", { bubbles: true }));
-      button("仅看收藏").click();
       await Promise.resolve();
     });
     expect(filter?.value).toBe("攻略");
-    expect(button("仅看收藏").getAttribute("aria-pressed")).toBe("true");
 
     await act(async () => {
       status.setGuideLibraryAppId("222");
@@ -355,6 +349,5 @@ describe("GripPanel", () => {
       container?.querySelector<HTMLInputElement>('input[aria-label="筛选指南"]')
         ?.value,
     ).toBe("");
-    expect(button("仅看收藏").getAttribute("aria-pressed")).toBe("true");
   });
 });

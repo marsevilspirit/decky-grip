@@ -139,12 +139,11 @@ Guide and position reads fail independently: an unavailable or corrupt reader
 position does not block cached body rendering, and a failed refresh keeps the
 old body visible with an explicit warning. Store repair is user-triggered and
 backs up the invalid bytes before atomically writing an empty validated store.
-The panel's guide library is a cache-only Rust query over up to 20 entries from
-the independent `favorites.json` store followed by the 20 newest unpinned
+The panel's guide library is a cache-only Rust query over the 20 newest
 `reader_positions.json` entries. It joins only validated title, author, section,
 and staleness metadata from the existing guide cache; it never downloads in the
-background, and removing one cached body leaves its reader position and local
-favorite intact. Frontend filtering runs only over this bounded response.
+background, and removing one cached body leaves its reader position intact.
+Frontend filtering runs only over this bounded response.
 
 For a first-time handoff, the controller uses its native pixel bookmark only to
 probe the still-mounted native Steam DOM and capture the corresponding visible

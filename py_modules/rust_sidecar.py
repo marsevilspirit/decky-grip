@@ -25,7 +25,6 @@ class RustSidecar:
         {
             "positions",
             "reader_positions",
-            "favorites",
             "guides",
             "images",
             "hotkey",

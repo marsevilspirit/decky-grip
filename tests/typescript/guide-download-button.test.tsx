@@ -1,16 +1,15 @@
 // @vitest-environment happy-dom
 
-import { act, createElement, type ReactNode } from "react";
+import { act, createContext, createElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { GuideDownloadButton } from "../../src/components/GuideDownloadButton";
 import type { DownloadedGuide } from "../../src/reader/types";
-import { RuntimeStatusStore } from "../../src/runtime-status";
 import type { GuideIdentity } from "../../src/steam/guide-key";
 
 vi.mock("@decky/ui", () => ({
-  Button: ({
+  DialogButton: ({
     children,
     disabled,
     onClick,
@@ -38,24 +37,27 @@ function deferredGuide() {
 
 describe("GuideDownloadButton", () => {
   let container: HTMLDivElement | null = null;
+  let portalTarget: HTMLDivElement | null = null;
   let root: Root | null = null;
 
   const button = (): HTMLButtonElement | null =>
-    container?.querySelector("button") ?? null;
+    portalTarget?.querySelector("button") ?? null;
 
   afterEach(async () => {
     if (root) {
       await act(async () => root?.unmount());
     }
     container?.remove();
+    portalTarget?.remove();
     container = null;
+    portalTarget = null;
     root = null;
   });
 
-  it("shows download states and ignores a request from the previous guide", async () => {
-    const status = new RuntimeStatusStore("1113000");
+  it("portals download states without leaking an old A request into A → B → A", async () => {
     const first = deferredGuide();
-    const retry = deferredGuide();
+    const second = deferredGuide();
+    const failed = deferredGuide();
     const stale = deferredGuide();
     const cached = deferredGuide();
     const downloadGuide = vi
@@ -63,52 +65,74 @@ describe("GuideDownloadButton", () => {
         (identity: GuideIdentity) => Promise<Pick<DownloadedGuide, "stale">>
       >()
       .mockReturnValueOnce(first.promise)
-      .mockReturnValueOnce(retry.promise)
+      .mockReturnValueOnce(second.promise)
+      .mockReturnValueOnce(failed.promise)
       .mockReturnValueOnce(stale.promise)
       .mockReturnValueOnce(cached.promise);
+    const NavigationContext = createContext<unknown>(null);
+    const navigationNode = {};
 
     container = document.createElement("div");
-    document.body.append(container);
+    portalTarget = document.createElement("div");
+    document.body.append(container, portalTarget);
     root = createRoot(container);
-    await act(async () => {
-      root?.render(
-        <GuideDownloadButton downloadGuide={downloadGuide} status={status} />,
-      );
-    });
+    const render = async (identity: GuideIdentity | null) => {
+      await act(async () => {
+        root?.render(
+          <GuideDownloadButton
+            downloadGuide={downloadGuide}
+            identity={identity}
+            target={{
+              element: portalTarget!,
+              navigationNode,
+              navigationProvider: NavigationContext,
+            }}
+          />,
+        );
+      });
+    };
+
+    await render(null);
+    expect(container.querySelector("button")).toBeNull();
     expect(button()).toBeNull();
 
-    await act(async () => status.update({ activeGuide: firstGuide }));
-    expect(button()?.textContent).toBe("下载正文到 GRIP");
-    await act(async () => button()?.click());
+    await render(firstGuide);
+    expect(button()?.parentElement).toBe(portalTarget);
+    expect(button()?.textContent).toBe("下载到 GRIP");
+    await act(async () => {
+      button()?.click();
+    });
     expect(button()?.disabled).toBe(true);
-    expect(button()?.textContent).toBe("正在下载正文…");
+    expect(button()?.textContent).toBe("下载中…");
     await act(async () => button()?.click());
     expect(downloadGuide).toHaveBeenCalledOnce();
 
-    await act(async () => status.update({ activeGuide: secondGuide }));
+    await render(secondGuide);
     expect(button()?.disabled).toBe(false);
-    expect(button()?.textContent).toBe("下载正文到 GRIP");
-    await act(async () => first.resolve({ stale: false }));
-    expect(button()?.textContent).toBe("下载正文到 GRIP");
-    await act(async () => status.update({ activeGuide: firstGuide }));
+    await render(firstGuide);
     expect(button()?.disabled).toBe(false);
-    expect(button()?.textContent).toBe("下载正文到 GRIP");
-    await act(async () => status.update({ activeGuide: secondGuide }));
-
     await act(async () => button()?.click());
-    await act(async () => retry.reject(new Error("offline")));
-    expect(button()?.textContent).toBe("下载失败，点击重试");
+    await act(async () => first.resolve({ stale: true }));
+    expect(button()?.disabled).toBe(true);
+    expect(button()?.textContent).toBe("下载中…");
+    await act(async () => second.resolve({ stale: false }));
+    expect(button()?.textContent).toBe("已下载");
+
+    await render(secondGuide);
+    await act(async () => button()?.click());
+    await act(async () => failed.reject(new Error("offline")));
+    expect(button()?.textContent).toBe("重试下载");
 
     await act(async () => button()?.click());
     await act(async () => stale.resolve({ stale: true }));
-    expect(button()?.textContent).toBe("已缓存到 GRIP（旧版）");
+    expect(button()?.textContent).toBe("已下载（旧版）");
 
     await act(async () => button()?.click());
     await act(async () => cached.resolve({ stale: false }));
-    expect(button()?.textContent).toBe("正文已缓存到 GRIP");
-    expect(downloadGuide).toHaveBeenCalledTimes(4);
+    expect(button()?.textContent).toBe("已下载");
+    expect(downloadGuide).toHaveBeenCalledTimes(5);
 
-    await act(async () => status.update({ activeGuide: null }));
+    await render(null);
     expect(button()).toBeNull();
   });
 });

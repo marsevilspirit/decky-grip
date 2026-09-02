@@ -37,7 +37,6 @@ def make_sidecar():
         "positions.repair": {"repaired": False, "backup": None},
         "reader_positions.get": None,
         "reader_positions.repair": {"repaired": False, "backup": None},
-        "favorites.repair": {"repaired": False, "backup": None},
         "guides.list": [],
         "hotkey.status": {
             "available": False,
@@ -183,10 +182,6 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
         }
         self.sidecar.responses["reader_positions.get"] = saved
         self.sidecar.responses["reader_positions.save"] = saved
-        self.sidecar.responses["favorites.set"] = {
-            "favorite": True,
-            "guide_key": "1:2",
-        }
         self.sidecar.responses["positions.repair"] = {
             "repaired": True,
             "backup": "/tmp/positions.bak",
@@ -206,30 +201,18 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
             ),
             expected,
         )
-        self.assertEqual(
-            await plugin.set_guide_favorite("1:2", True),
-            {"favorite": True, "guide_key": "1:2"},
-        )
-        self.sidecar.request.assert_any_call(
-            "favorites.set", {"guide_key": "1:2", "favorite": True}
-        )
         repairs = await plugin.repair_position_stores()
-        self.assertFalse(repairs["favorites"]["repaired"])
         self.assertTrue(repairs["positions"]["repaired"])
         self.assertFalse(repairs["readerPositions"]["repaired"])
 
     async def test_store_repair_attempts_every_store_after_failures(self):
         plugin = self.plugin()
-        self.sidecar.responses["favorites.repair"] = RustSidecarError(
-            "favorites unavailable"
-        )
         self.sidecar.responses["reader_positions.repair"] = RustSidecarError(
             "reader unavailable"
         )
 
         repairs = await plugin.repair_position_stores()
 
-        self.assertEqual(repairs["favorites"]["error"], "favorites unavailable")
         self.assertFalse(repairs["positions"]["repaired"])
         self.assertEqual(repairs["readerPositions"]["error"], "reader unavailable")
         repair_calls = [
@@ -239,7 +222,7 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(
             repair_calls,
-            ["favorites.repair", "positions.repair", "reader_positions.repair"],
+            ["positions.repair", "reader_positions.repair"],
         )
 
     async def test_position_io_remains_serialized_when_cancelled(self):
@@ -361,7 +344,6 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
                 "appId": "1113000",
                 "guideId": "3414883877",
                 "updatedAt": 300,
-                "favorite": True,
                 "cache": {"title": "完整攻略"},
             }
         ]

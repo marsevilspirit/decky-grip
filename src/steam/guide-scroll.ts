@@ -64,3 +64,30 @@ export function findGuideScroller(document: Document): GuideScroller | null {
     },
   };
 }
+
+/** Locate the native vote/favorite row inside a mounted guide detail. */
+export function findGuideActionBar(
+  scrollerElement: HTMLElement,
+): HTMLElement | null {
+  const OwnerElement = scrollerElement.ownerDocument.defaultView?.HTMLElement;
+  if (!OwnerElement) {
+    return null;
+  }
+  const matches = Array.from(scrollerElement.children).filter((child) => {
+    if (
+      !child.isConnected ||
+      !child.matches(".Panel.Focusable") ||
+      !(child instanceof OwnerElement)
+    ) {
+      return false;
+    }
+
+    return (
+      Array.from(child.children).filter((button) =>
+        button.matches("button.DialogButton.Focusable"),
+      ).length >= 3
+    );
+  });
+
+  return matches.length === 1 ? (matches[0] as HTMLElement) : null;
+}

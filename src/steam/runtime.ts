@@ -5,6 +5,7 @@ import {
   isGuideScrollIntent,
 } from "./guide-interaction";
 import type { GuideIdentity } from "./guide-key";
+import { readNativeGuideView } from "./native-guide";
 import { findGuideScroller, type GuideScroller } from "./guide-scroll";
 import {
   normalizeGuideId,
@@ -120,20 +121,36 @@ export function createSteamGuideRuntime(): SteamGuideRuntime | null {
   const history = mainWindow.History;
   const menuStore = mainWindow.MenuStore.MainMenuStore;
   const browserWindow = mainWindow.BrowserWindow;
-  const document = browserWindow.document;
+  const initialNativeView = readNativeGuideView(mainWindow);
+  const nativeDocument = initialNativeView?.document ?? null;
+  const document = nativeDocument ?? browserWindow.document;
+  const ownerWindow = document.defaultView ?? browserWindow;
+  const currentNativeView = () => {
+    const view = readNativeGuideView(mainWindow);
+    return view?.document === nativeDocument ? view : null;
+  };
+  const currentLocation = () =>
+    currentNativeView()?.location ?? history.location;
+  const currentGuide = () =>
+    currentNativeView()?.identity ??
+    readActiveGuide(history.location.pathname, menuStore);
 
   return {
-    identity: mainWindow,
-    getLocation: () => history.location,
-    getActiveGuide: () => readActiveGuide(history.location.pathname, menuStore),
+    identity: document,
+    getLocation: currentLocation,
+    getActiveGuide: currentGuide,
     getGuideScroller: () => {
-      if (!readActiveGuide(history.location.pathname, menuStore)) {
+      if (!currentGuide()) {
         return null;
       }
       return findGuideScroller(document);
     },
     replaceLocationState: (state) => {
-      const location = history.location;
+      const nativeView = currentNativeView();
+      if (nativeView?.replaceLocationState(state)) {
+        return;
+      }
+      const location = currentLocation();
       history.replace(
         `${location.pathname}${location.search ?? ""}${location.hash ?? ""}`,
         state,
@@ -147,7 +164,7 @@ export function createSteamGuideRuntime(): SteamGuideRuntime | null {
       }),
     listenGuideScroll: (listener) => {
       const onScroll = (event: Event) => {
-        if (!readActiveGuide(history.location.pathname, menuStore)) {
+        if (!currentGuide()) {
           return;
         }
         const scroller = findGuideScroller(document);
@@ -162,15 +179,12 @@ export function createSteamGuideRuntime(): SteamGuideRuntime | null {
     },
     listenGuideInteraction: (listener) => {
       const onInteraction = (event: Event) => {
-        if (
-          !canTriggerGuideScroll(event) ||
-          !readActiveGuide(history.location.pathname, menuStore)
-        ) {
+        if (!canTriggerGuideScroll(event) || !currentGuide()) {
           return;
         }
         const scroller = findGuideScroller(document);
         const target = event.target;
-        if (!scroller || !(target instanceof browserWindow.Node)) {
+        if (!scroller || !(target instanceof ownerWindow.Node)) {
           return;
         }
         if (
@@ -199,7 +213,7 @@ export function createSteamGuideRuntime(): SteamGuideRuntime | null {
       };
     },
     listenGuideLayout: (listener) => {
-      const Observer = browserWindow.MutationObserver;
+      const Observer = ownerWindow.MutationObserver;
       let throttleTimer: ReturnType<typeof setTimeout> | null = null;
       const notify = () => {
         if (throttleTimer !== null) {
@@ -220,14 +234,14 @@ export function createSteamGuideRuntime(): SteamGuideRuntime | null {
         });
       }
       document.addEventListener("load", notify, true);
-      browserWindow.addEventListener("resize", notify);
+      ownerWindow.addEventListener("resize", notify);
       return () => {
         observer.disconnect();
         if (throttleTimer !== null) {
           clearTimeout(throttleTimer);
         }
         document.removeEventListener("load", notify, true);
-        browserWindow.removeEventListener("resize", notify);
+        ownerWindow.removeEventListener("resize", notify);
       };
     },
     listenWindowFocus: (listener) => {
@@ -235,17 +249,17 @@ export function createSteamGuideRuntime(): SteamGuideRuntime | null {
         invokeSafely("Focus listener failed", () => listener(true));
       const onBlur = () =>
         invokeSafely("Blur listener failed", () => listener(false));
-      browserWindow.addEventListener("focus", onFocus);
-      browserWindow.addEventListener("blur", onBlur);
+      ownerWindow.addEventListener("focus", onFocus);
+      ownerWindow.addEventListener("blur", onBlur);
       return () => {
-        browserWindow.removeEventListener("focus", onFocus);
-        browserWindow.removeEventListener("blur", onBlur);
+        ownerWindow.removeEventListener("focus", onFocus);
+        ownerWindow.removeEventListener("blur", onBlur);
       };
     },
     beforeGuideSelection: (listener) => {
       const patch = beforePatch(menuStore, "SetSelectedGuide", (args) => {
         invokeSafely("Guide selection listener failed", () => {
-          const route = parseGuideRoute(history.location.pathname);
+          const route = parseGuideRoute(currentLocation().pathname);
           if (!route || Number(args[0]) !== route.numericAppId) {
             return;
           }

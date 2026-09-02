@@ -213,13 +213,6 @@ class Plugin:
             timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
         )
 
-    async def set_guide_favorite(self, guide_key: str, favorite: bool):
-        return await self._run_io(
-            self._sidecar.request,
-            "favorites.set",
-            {"guide_key": guide_key, "favorite": favorite},
-        )
-
     async def get_guide_image(self, url: str, allow_download: bool = True):
         return await self._run_guide_io(
             self._sidecar.request,
@@ -245,7 +238,6 @@ class Plugin:
     def _repair_position_stores(self):
         repairs = {}
         for name, method in (
-            ("favorites", "favorites.repair"),
             ("positions", "positions.repair"),
             ("readerPositions", "reader_positions.repair"),
         ):

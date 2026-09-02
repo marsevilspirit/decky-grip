@@ -38,10 +38,9 @@ restore it when the guide is opened again.
   overwriting the saved value.
 - Guide and app ids stay decimal strings so large Steam ids never lose
   precision.
-- The panel lists up to 20 local favorites before 20 recent GRIP Reader
-  guides for the running game (or globally when no game is running), with
-  cached title, chapter, and offline state. Reader history and favorites remain
-  available when a guide body cache is removed.
+- The panel lists up to 20 recent GRIP Reader guides for the running game (or
+  globally when no game is running), with cached title, chapter, and offline
+  state. Reader history remains available when a guide body cache is removed.
 - The plugin does not need root privileges.
 
 The current Steam UI findings and implementation boundaries are recorded in
@@ -76,10 +75,9 @@ Python tests use only the standard library.
 ## Using GRIP Reader
 
 1. Open a Steam Community guide, scroll to the paragraph you want, then choose
-   **下载正文到 GRIP**. Images continue to cache on demand while reading.
+   **下载到 GRIP**. Images continue to cache on demand while reading.
 2. Select **GRIP**, then choose **继续当前或最近指南**, or open a specific
-   entry from **指南库**. Important guides can be kept at the top with the
-   local **收藏** switch. Open **高级选项** to download or update missing or
+   entry from **指南库**. Open **高级选项** to download or update missing or
    stale guide bodies without opening the reader, and to manage local caches;
    filtering never contacts Steam.
 3. Scroll normally in the full-screen reader. Press **Options** or choose
@@ -143,13 +141,6 @@ files. Reader bookmarks include `section_id`, `anchor_text`, and
 again whenever the cache file's identity or metadata changes. Guide bodies are
 limited to 20 MiB each, 256 MiB across the disk LRU, and 32 MiB in the Rust
 memory LRU. Opening a body promotes it; listing guide summaries does not.
-
-Local favorites are stored separately in `favorites.json`, capped at 20, and
-never synchronized to the Steam account. The Rust sidecar validates and writes
-the file with the same private, locked, atomic replacement used by the position
-stores, so an older plugin can still read existing position schemas after a
-rollback. Repair preserves invalid bytes in a same-directory backup before
-resetting only the damaged store.
 
 Images live under the guide cache's `images/` directory. Each image is limited
 to 8 MiB and a validated 8192-pixel / 16-megapixel canvas, the disk LRU to

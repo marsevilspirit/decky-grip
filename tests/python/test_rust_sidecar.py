@@ -23,7 +23,7 @@ import json
 import sys
 
 capabilities = [
-    "positions", "reader_positions", "favorites", "guides", "images", "hotkey", "multiplex"
+    "positions", "reader_positions", "guides", "images", "hotkey", "multiplex"
 ]
 for line in sys.stdin:
     request = json.loads(line)
@@ -68,7 +68,7 @@ import json
 import sys
 
 capabilities = [
-    "positions", "reader_positions", "favorites", "guides", "images", "hotkey", "multiplex"
+    "positions", "reader_positions", "guides", "images", "hotkey", "multiplex"
 ]
 pending = []
 for line in sys.stdin:
@@ -94,7 +94,7 @@ import sys
 import time
 
 capabilities = [
-    "positions", "reader_positions", "favorites", "guides", "images", "hotkey", "multiplex"
+    "positions", "reader_positions", "guides", "images", "hotkey", "multiplex"
 ]
 handled = 0
 for line in sys.stdin:
@@ -116,7 +116,7 @@ import json
 import sys
 
 capabilities = [
-    "positions", "reader_positions", "favorites", "guides", "images", "hotkey", "multiplex"
+    "positions", "reader_positions", "guides", "images", "hotkey", "multiplex"
 ]
 pending = 0
 for line in sys.stdin:
@@ -135,7 +135,7 @@ import json
 import sys
 
 capabilities = [
-    "positions", "reader_positions", "favorites", "guides", "images", "hotkey", "multiplex"
+    "positions", "reader_positions", "guides", "images", "hotkey", "multiplex"
 ]
 for line in sys.stdin:
     request = json.loads(line)

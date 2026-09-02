@@ -351,7 +351,6 @@ describe("GRIP Reader helpers", () => {
         appId: "1113000",
         guideId: "10",
         updatedAt: 200,
-        favorite: true,
         cache: {
           author: "Alice",
           fetchedAt: 1,
@@ -364,19 +363,13 @@ describe("GRIP Reader helpers", () => {
         appId: "222",
         guideId: "20",
         updatedAt: 100,
-        favorite: false,
         cache: null,
       },
     ];
 
-    expect(filterGuideLibraryEntries(entries, "ALICE", false)).toEqual([
-      entries[0],
-    ]);
-    expect(filterGuideLibraryEntries(entries, "20", false)).toEqual([
-      entries[1],
-    ]);
-    expect(filterGuideLibraryEntries(entries, "", true)).toEqual([entries[0]]);
-    expect(filterGuideLibraryEntries(entries, "", false)).toEqual(entries);
+    expect(filterGuideLibraryEntries(entries, "ALICE")).toEqual([entries[0]]);
+    expect(filterGuideLibraryEntries(entries, "20")).toEqual([entries[1]]);
+    expect(filterGuideLibraryEntries(entries, "")).toEqual(entries);
   });
 
   it("keeps reader guide choices inside one app and puts the current guide first", () => {
@@ -384,7 +377,6 @@ describe("GRIP Reader helpers", () => {
       appId: "1113000",
       guideId: "10",
       updatedAt: 300,
-      favorite: false,
       cache: {
         author: "Alice",
         fetchedAt: 1,
@@ -397,14 +389,12 @@ describe("GRIP Reader helpers", () => {
       appId: "1113000",
       guideId: "11",
       updatedAt: 200,
-      favorite: true,
       cache: null,
     };
     const otherGame = {
       appId: "222",
       guideId: "20",
       updatedAt: 400,
-      favorite: true,
       cache: null,
     };
 
@@ -414,10 +404,10 @@ describe("GRIP Reader helpers", () => {
     ]);
     expect(
       guideChoicesForReader(
-        [{ ...current, favorite: true, cache: null }, sameGame, otherGame],
+        [{ ...current, cache: null }, sameGame, otherGame],
         current,
       ),
-    ).toEqual([{ ...current, favorite: true }, sameGame]);
+    ).toEqual([current, sameGame]);
   });
 
   it("chooses explicit cache actions and identifies an offline refresh fallback", () => {
@@ -425,7 +415,6 @@ describe("GRIP Reader helpers", () => {
       appId: "1",
       guideId: "10",
       updatedAt: 1,
-      favorite: false,
       cache: null,
     };
     const fresh = {

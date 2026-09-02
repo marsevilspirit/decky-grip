@@ -569,14 +569,12 @@ describe("GuideReaderPage position lifecycle", () => {
       appId: identity.appId,
       guideId: identity.guideId,
       updatedAt: 2,
-      favorite: false,
       cache: null,
     };
     const otherGuide: GuideLibraryEntry = {
       appId: identity.appId,
       guideId: "123",
       updatedAt: 1,
-      favorite: true,
       cache: {
         title: "另一篇指南",
         author: "另一位作者",
@@ -707,7 +705,6 @@ describe("GuideReaderPage position lifecycle", () => {
       appId,
       guideId,
       updatedAt: Number(guideId),
-      favorite: false,
       cache: null,
     });
     const previous = entry(identity.appId, "20");
@@ -778,14 +775,12 @@ describe("GuideReaderPage position lifecycle", () => {
           appId: identity.appId,
           guideId: identity.guideId,
           updatedAt: 2,
-          favorite: false,
           cache: null,
         },
         {
           appId: identity.appId,
           guideId: "20",
           updatedAt: 1,
-          favorite: false,
           cache: null,
         },
       ],

@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-mod favorites;
 pub mod guide_html;
 pub mod guide_images;
 pub mod guides;
@@ -19,15 +18,13 @@ mod runtime;
 
 pub use runtime::{serve, serve_with_hotkey_roots};
 
-use favorites::FavoriteStore;
 use reader_positions::ReaderPositionStore;
 
 const SCHEMA_VERSION: u64 = 1;
 const PROTOCOL_VERSION: u64 = 2;
-const PROTOCOL_CAPABILITIES: [&str; 7] = [
+const PROTOCOL_CAPABILITIES: [&str; 6] = [
     "positions",
     "reader_positions",
-    "favorites",
     "guides",
     "images",
     "hotkey",
@@ -649,7 +646,6 @@ fn protocol_info() -> Value {
 fn dispatch(
     store: &PositionStore,
     reader_store: &ReaderPositionStore,
-    favorite_store: &FavoriteStore,
     method: &str,
     params: Option<&Value>,
 ) -> Result<Value, StoreError> {
@@ -706,24 +702,6 @@ fn dispatch(
         "reader_positions.repair" => {
             empty_params(params)?;
             reader_store.repair()
-        }
-        "favorites.set" => {
-            let object = params_with_fields(params, &["guide_key", "favorite"])?;
-            let guide_key =
-                object
-                    .get("guide_key")
-                    .and_then(Value::as_str)
-                    .ok_or(StoreError::Validation(
-                        "guide_key must have the form <app_id>:<guide_id>",
-                    ))?;
-            favorite_store.set(
-                guide_key,
-                object.get("favorite").expect("favorite was checked"),
-            )
-        }
-        "favorites.repair" => {
-            empty_params(params)?;
-            favorite_store.repair()
         }
         _ => Err(StoreError::Protocol("unknown method")),
     }

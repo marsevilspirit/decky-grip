@@ -22,7 +22,7 @@ import {
   savePosition,
   saveReaderPosition,
 } from "./backend";
-import { GuideDownloadButton } from "./components/GuideDownloadButton";
+import { NativeGuideDownloadButton } from "./components/GuideDownloadButton";
 import { GuideReaderPage } from "./components/GuideReaderPage";
 import { GripPanel } from "./components/GripPanel";
 import { GripController } from "./grip-controller";
@@ -326,14 +326,12 @@ export default definePlugin(() => {
     preloadReaderFor(currentRunningAppId());
     status.refreshGuideLibrary();
     const backups = [
-      result.favorites.backup ? `本地收藏：${result.favorites.backup}` : null,
       result.positions.backup ? `原生位置：${result.positions.backup}` : null,
       result.readerPositions.backup
         ? `阅读器位置：${result.readerPositions.backup}`
         : null,
     ].filter((value): value is string => value !== null);
     const errors = [
-      result.favorites.error ? `本地收藏：${result.favorites.error}` : null,
       result.positions.error ? `原生位置：${result.positions.error}` : null,
       result.readerPositions.error
         ? `阅读器位置：${result.readerPositions.error}`
@@ -420,7 +418,7 @@ export default definePlugin(() => {
   };
   routerHook.addRoute(READER_ROUTE, ReaderRoute);
   routerHook.addGlobalComponent(GUIDE_DOWNLOAD_COMPONENT, () => (
-    <GuideDownloadButton
+    <NativeGuideDownloadButton
       downloadGuide={(identity) => cacheGuide(identity, false)}
       status={status}
     />
