@@ -967,10 +967,6 @@ export function GuideReaderPage({
     if (!identity || switchPending !== null) {
       return;
     }
-    if (entry.guideId === identity.guideId) {
-      closeGuideSwitcher();
-      return;
-    }
 
     const target = { appId: identity.appId, guideId: entry.guideId };
     const targetKey = makeGuideKey(target);
@@ -1188,14 +1184,11 @@ export function GuideReaderPage({
           返回
         </Button>
         <Button
-          onClick={() =>
-            guideSwitcherOpen
-              ? closeGuideSwitcher()
-              : setGuideSwitcherOpen(true)
-          }
+          disabled={guideSwitcherOpen}
+          onClick={() => setGuideSwitcherOpen(true)}
           ref={guideSwitcherButtonRef}
         >
-          {guideSwitcherOpen ? "关闭选择" : "切换指南"}
+          切换指南
         </Button>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div
@@ -1320,33 +1313,42 @@ export function GuideReaderPage({
                 const guideKey = makeGuideKey(entry);
                 const current = entry.guideId === identity.guideId;
                 const pending = switchPending === guideKey;
+                const style = {
+                  boxSizing: "border-box" as const,
+                  marginBottom: 12,
+                  minHeight: 72,
+                  padding: "12px 16px",
+                  textAlign: "left" as const,
+                  width: "100%",
+                };
+                const content = (
+                  <div>
+                    <div style={{ fontSize: 18, fontWeight: 700 }}>
+                      {pending
+                        ? "正在准备并打开…"
+                        : `${current ? "正在阅读 · " : ""}${entry.cache?.title ?? `Steam 指南 ${entry.guideId}`}`}
+                    </div>
+                    <div style={{ fontSize: 13, marginTop: 5, opacity: 0.72 }}>
+                      {guideChoiceDetails(entry)}
+                    </div>
+                  </div>
+                );
+                if (current) {
+                  return (
+                    <div aria-current="page" key={guideKey} style={style}>
+                      {content}
+                    </div>
+                  );
+                }
                 return (
                   <Button
-                    aria-label={`${current ? "正在阅读" : "打开指南"}：${entry.cache?.title ?? entry.guideId}`}
+                    aria-label={`打开指南：${entry.cache?.title ?? entry.guideId}`}
                     disabled={switchPending !== null}
                     key={guideKey}
                     onClick={() => void switchGuide(entry)}
-                    style={{
-                      boxSizing: "border-box",
-                      marginBottom: 12,
-                      minHeight: 72,
-                      padding: "12px 16px",
-                      textAlign: "left",
-                      width: "100%",
-                    }}
+                    style={style}
                   >
-                    <div>
-                      <div style={{ fontSize: 18, fontWeight: 700 }}>
-                        {pending
-                          ? "正在准备并打开…"
-                          : `${current ? "正在阅读 · " : ""}${entry.cache?.title ?? `Steam 指南 ${entry.guideId}`}`}
-                      </div>
-                      <div
-                        style={{ fontSize: 13, marginTop: 5, opacity: 0.72 }}
-                      >
-                        {guideChoiceDetails(entry)}
-                      </div>
-                    </div>
+                    {content}
                   </Button>
                 );
               })}

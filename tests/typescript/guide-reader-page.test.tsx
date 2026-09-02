@@ -403,7 +403,15 @@ describe("GuideReaderPage position lifecycle", () => {
 
     await act(async () => buttonNamed("切换指南").click());
     await flushFrame();
+    await flushMicrotasks();
+    expect(buttonNamed("切换指南").disabled).toBe(true);
     expect(document.activeElement).toBe(buttonNamed("关闭"));
+    const currentGuide = container?.querySelector('[aria-current="page"]');
+    expect(currentGuide?.tagName).toBe("DIV");
+    expect(currentGuide?.textContent).toContain("正在阅读 · 组件回归指南");
+    expect(
+      container?.querySelector('button[aria-label^="正在阅读："]'),
+    ).toBeNull();
 
     await act(async () => buttonNamed("查找更多 Steam 指南").click());
     await flushMicrotasks();

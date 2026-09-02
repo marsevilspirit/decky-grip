@@ -126,6 +126,8 @@ export function GripPanel({
   const [favoriteBusy, setFavoriteBusy] = useState<string | null>(null);
   const [hotkeyStatus, setHotkeyStatus] = useState<HotkeyStatus | null>(null);
   const [positionRetryBusy, setPositionRetryBusy] = useState(false);
+  const [repairMessage, setRepairMessage] = useState<string | null>(null);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [cacheBusy, setCacheBusy] = useState(false);
   const [cacheMessage, setCacheMessage] = useState<string | null>(null);
   const [cacheStats, setCacheStats] = useState<ReaderCacheStats | null>(null);
@@ -313,151 +315,6 @@ export function GripPanel({
 
   return (
     <>
-      <PanelSection title="游戏内快捷键">
-        <PanelSectionRow>
-          <div>L4（左侧上背键）：按一次打开，再按一次关闭</div>
-        </PanelSectionRow>
-        {status.positionWarning && (
-          <PanelSectionRow>
-            <div style={{ color: "#f0b35a" }}>
-              <div>{status.positionWarning}</div>
-              <ButtonItem
-                disabled={positionRetryBusy}
-                label={positionRetryBusy ? "正在重试…" : "重试读取位置"}
-                layout="below"
-                onClick={() => {
-                  setPositionRetryBusy(true);
-                  void retryPositions().finally(() =>
-                    setPositionRetryBusy(false),
-                  );
-                }}
-              >
-                不会影响已缓存的指南正文
-              </ButtonItem>
-              <ButtonItem
-                disabled={positionRetryBusy}
-                label="备份并重置损坏位置"
-                layout="below"
-                onClick={() => {
-                  setPositionRetryBusy(true);
-                  void repairPositions()
-                    .then(setCacheMessage)
-                    .catch((error: unknown) =>
-                      setCacheMessage(
-                        `位置恢复失败：${error instanceof Error ? error.message : String(error)}`,
-                      ),
-                    )
-                    .finally(() => setPositionRetryBusy(false));
-                }}
-              >
-                仅在校验失败时备份原文件并重置
-              </ButtonItem>
-            </div>
-          </PanelSectionRow>
-        )}
-        <PanelSectionRow>
-          <div style={{ opacity: 0.75 }}>
-            {hotkeyStatus?.available
-              ? "硬件监听已就绪"
-              : "尚未检测到 Steam Deck 背键"}
-            。GRIP 只读监听物理 L4，Steam Input 映射仍会执行；请把 L4
-            留空，或映射为游戏未使用的 Scroll Lock。
-          </div>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <div style={{ opacity: 0.82 }}>
-            {performanceSnapshot.gate === "collecting"
-              ? `物理 L4 首屏门禁采集中：${performanceSnapshot.warmAttempts}/${performanceSnapshot.minimumSamples} 次暖缓存尝试（成功样本 ${performanceSnapshot.warmSamples} 次），打开失败 ${performanceSnapshot.warmOpenFailureCount} 次`
-              : `物理 L4 首屏门禁${performanceSnapshot.gate === "pass" ? "通过" : "失败"}：P95 ${Math.round(performanceSnapshot.warmP95Ms ?? 0)} ms，spinner ${performanceSnapshot.warmSpinnerCount} 次，位置失败 ${performanceSnapshot.warmPositionFailureCount} 次，打开失败 ${performanceSnapshot.warmOpenFailureCount} 次`}
-            （目标 P95 ≤ {performanceSnapshot.targetMs} ms 且无 spinner）
-          </div>
-        </PanelSectionRow>
-        {performanceSnapshot.latest && (
-          <PanelSectionRow>
-            <div style={{ opacity: 0.72 }}>
-              最近一次：首屏{" "}
-              {Math.round(performanceSnapshot.latest.firstScreenMs)}
-              ms · 路由 {Math.round(performanceSnapshot.latest.routeMountedMs)}
-              ms · 缓存 {Math.round(performanceSnapshot.latest.cacheReadyMs)}
-              ms · 正文帧{" "}
-              {Math.round(performanceSnapshot.latest.contentFirstFrameMs)}
-              ms · 位置{" "}
-              {Math.round(performanceSnapshot.latest.positionSettledMs)}
-              ms · {performanceSnapshot.latest.cacheKind}
-            </div>
-          </PanelSectionRow>
-        )}
-        {performanceSnapshot.latestFailure && (
-          <PanelSectionRow>
-            <div style={{ color: "#f0b35a", opacity: 0.82 }}>
-              最近失败：{performanceSnapshot.latestFailure.reason}（
-              {Math.round(performanceSnapshot.latestFailure.failedAtMs)} ms）
-            </div>
-          </PanelSectionRow>
-        )}
-      </PanelSection>
-      <PanelSection title="本地缓存">
-        <PanelSectionRow>
-          <div style={{ opacity: 0.78 }}>
-            {cacheStats
-              ? `指南 ${cacheStats.guides.files} 个 / ${formatBytes(cacheStats.guides.bytes)}（上限 ${formatBytes(cacheStats.guides.diskLimitBytes)}）；图片 ${cacheStats.images.files} 个 / ${formatBytes(cacheStats.images.diskBytes)}（上限 ${formatBytes(cacheStats.images.diskLimitBytes)}）`
-              : cacheStatsError
-                ? `缓存用量读取失败：${cacheStatsError}`
-                : "正在读取缓存用量…"}
-          </div>
-        </PanelSectionRow>
-        {cacheStatsError && (
-          <PanelSectionRow>
-            <ButtonItem
-              disabled={cacheBusy}
-              label="重试读取缓存用量"
-              layout="below"
-              onClick={() => void refreshCacheStats()}
-            >
-              仅重新读取统计，不会修改缓存或阅读位置
-            </ButtonItem>
-          </PanelSectionRow>
-        )}
-        <PanelSectionRow>
-          <ButtonItem
-            disabled={cacheBusy}
-            label="清除指南正文缓存"
-            layout="below"
-            onClick={() =>
-              void runCacheAction(
-                clearGuides,
-                (result) =>
-                  `指南缓存已清除：删除 ${result.filesRemoved} 个文件，释放 ${formatBytes(result.bytesRemoved)}`,
-                "清除指南缓存",
-              )
-            }
-          >
-            不删除阅读位置；下次打开会重新下载正文
-          </ButtonItem>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ButtonItem
-            disabled={cacheBusy}
-            label="清除图片缓存"
-            layout="below"
-            onClick={() =>
-              void runCacheAction(
-                clearImages,
-                (result) =>
-                  `图片缓存已清除：删除 ${result.filesRemoved} 个文件，释放 ${formatBytes(result.bytesRemoved)}`,
-                "清除图片缓存",
-              )
-            }
-          >
-            清除 Rust 内存 LRU 与磁盘图片；正文不受影响
-          </ButtonItem>
-        </PanelSectionRow>
-        {cacheMessage && (
-          <PanelSectionRow>
-            <div style={{ opacity: 0.82 }}>{cacheMessage}</div>
-          </PanelSectionRow>
-        )}
-      </PanelSection>
       <PanelSection title="指南库">
         <PanelSectionRow>
           <ButtonItem
@@ -489,31 +346,105 @@ export function GripPanel({
             </ButtonItem>
           </PanelSectionRow>
         )}
+        {status.positionWarning && (
+          <PanelSectionRow>
+            <div style={{ color: "#f0b35a" }}>
+              <div>{status.positionWarning}</div>
+              <ButtonItem
+                disabled={positionRetryBusy}
+                label={positionRetryBusy ? "正在重试…" : "重试读取位置"}
+                layout="below"
+                onClick={() => {
+                  setPositionRetryBusy(true);
+                  void retryPositions().finally(() =>
+                    setPositionRetryBusy(false),
+                  );
+                }}
+              >
+                不会影响已缓存的指南正文
+              </ButtonItem>
+              <ButtonItem
+                disabled={positionRetryBusy}
+                label="备份并重置损坏位置"
+                layout="below"
+                onClick={() => {
+                  setPositionRetryBusy(true);
+                  setRepairMessage(null);
+                  void repairPositions()
+                    .then(setRepairMessage)
+                    .catch((error: unknown) =>
+                      setRepairMessage(
+                        `位置恢复失败：${error instanceof Error ? error.message : String(error)}`,
+                      ),
+                    )
+                    .finally(() => setPositionRetryBusy(false));
+                }}
+              >
+                仅在校验失败时备份原文件并重置
+              </ButtonItem>
+            </div>
+          </PanelSectionRow>
+        )}
+        {repairMessage && (
+          <PanelSectionRow>
+            <div style={{ color: "#f0b35a", opacity: 0.88 }}>
+              {repairMessage}
+            </div>
+          </PanelSectionRow>
+        )}
+        {cacheMessage && (
+          <PanelSectionRow>
+            <div style={{ opacity: 0.82 }}>{cacheMessage}</div>
+          </PanelSectionRow>
+        )}
+        {status.phase === "error" && (
+          <PanelSectionRow>
+            <div style={{ color: "#ff6b6b" }}>{status.message}</div>
+          </PanelSectionRow>
+        )}
+        {readerError && (
+          <PanelSectionRow>
+            <div style={{ color: "#ff6b6b" }}>{readerError}</div>
+          </PanelSectionRow>
+        )}
+        <PanelSectionRow>
+          <ToggleField
+            checked={showAdvanced}
+            description="性能诊断、缓存维护和详细运行状态"
+            label="高级选项"
+            onChange={setShowAdvanced}
+          />
+        </PanelSectionRow>
         {guideLibrary === null && !libraryError && (
           <PanelSectionRow>
             <div style={{ opacity: 0.75 }}>正在读取最近指南…</div>
           </PanelSectionRow>
         )}
-        {guideLibrary && guideLibrary.length > 0 && (
-          <>
-            <PanelSectionRow>
-              <TextField
-                bShowClearAction
-                label="筛选指南"
-                onChange={(event) => setGuideFilter(event.currentTarget.value)}
-                value={guideFilter}
-              />
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <ToggleField
-                checked={favoritesOnly}
-                description="本地收藏固定显示在最近指南之前"
-                label="仅看收藏"
-                onChange={setFavoritesOnly}
-              />
-            </PanelSectionRow>
-          </>
-        )}
+        {guideLibrary &&
+          (guideLibrary.length > 1 ||
+            guideFilter.length > 0 ||
+            favoritesOnly) && (
+            <>
+              <PanelSectionRow>
+                <TextField
+                  bShowClearAction
+                  label="筛选指南"
+                  onChange={(event) =>
+                    setGuideFilter(event.currentTarget.value)
+                  }
+                  value={guideFilter}
+                />
+              </PanelSectionRow>
+              <PanelSectionRow>
+                <ToggleField
+                  checked={favoritesOnly}
+                  description="本地收藏固定显示在最近指南之前"
+                  label="仅看收藏"
+                  onChange={setFavoritesOnly}
+                />
+              </PanelSectionRow>
+            </>
+          )}
         {libraryError && (
           <PanelSectionRow>
             <div style={{ color: "#f0b35a" }}>
@@ -531,10 +462,11 @@ export function GripPanel({
                 layout="below"
                 onClick={() => {
                   setPositionRetryBusy(true);
+                  setRepairMessage(null);
                   void repairPositions()
-                    .then(setCacheMessage)
+                    .then(setRepairMessage)
                     .catch((error: unknown) =>
-                      setCacheMessage(
+                      setRepairMessage(
                         `本地数据恢复失败：${error instanceof Error ? error.message : String(error)}`,
                       ),
                     )
@@ -603,7 +535,7 @@ export function GripPanel({
                   }
                   onChange={(favorite) => void updateFavorite(entry, favorite)}
                 />
-                {cacheAction && (
+                {showAdvanced && cacheAction && (
                   <ButtonItem
                     disabled={cacheBusy || readerBusy !== null}
                     label={
@@ -619,7 +551,7 @@ export function GripPanel({
                       : "不打开阅读器，下载后可离线打开正文"}
                   </ButtonItem>
                 )}
-                {entry.cache && (
+                {showAdvanced && entry.cache && (
                   <ButtonItem
                     disabled={cacheBusy || readerBusy !== null}
                     label="移除此指南的正文缓存"
@@ -633,35 +565,139 @@ export function GripPanel({
             </PanelSectionRow>
           );
         })}
-        {readerError && (
-          <PanelSectionRow>
-            <div style={{ color: "#ff6b6b" }}>{readerError}</div>
-          </PanelSectionRow>
-        )}
-        <PanelSectionRow>
-          <div
-            style={{ color: status.phase === "error" ? "#ff6b6b" : undefined }}
-          >
-            {status.message}
-          </div>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <div>已保存 {status.savedCount} 个原生 Steam 指南位置</div>
-        </PanelSectionRow>
-        {status.activeGuide && (
-          <PanelSectionRow>
-            <div style={{ opacity: 0.82 }}>
-              当前指南：游戏 {status.activeGuide.appId}，指南{" "}
-              {status.activeGuide.guideId}
-            </div>
-          </PanelSectionRow>
-        )}
-        {lastAction && (
-          <PanelSectionRow>
-            <div style={{ opacity: 0.72 }}>{lastAction}</div>
-          </PanelSectionRow>
-        )}
       </PanelSection>
+      {showAdvanced && (
+        <>
+          <PanelSection title="游戏内快捷键">
+            <PanelSectionRow>
+              <div>L4（左侧上背键）：按一次打开，再按一次关闭</div>
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <div style={{ opacity: 0.75 }}>
+                {hotkeyStatus?.available
+                  ? "硬件监听已就绪"
+                  : "尚未检测到 Steam Deck 背键"}
+                。GRIP 只读监听物理 L4，Steam Input 映射仍会执行；请把 L4
+                留空，或映射为游戏未使用的 Scroll Lock。
+              </div>
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <div style={{ opacity: 0.82 }}>
+                {performanceSnapshot.gate === "collecting"
+                  ? `物理 L4 首屏门禁采集中：${performanceSnapshot.warmAttempts}/${performanceSnapshot.minimumSamples} 次暖缓存尝试（成功样本 ${performanceSnapshot.warmSamples} 次），打开失败 ${performanceSnapshot.warmOpenFailureCount} 次`
+                  : `物理 L4 首屏门禁${performanceSnapshot.gate === "pass" ? "通过" : "失败"}：P95 ${Math.round(performanceSnapshot.warmP95Ms ?? 0)} ms，spinner ${performanceSnapshot.warmSpinnerCount} 次，位置失败 ${performanceSnapshot.warmPositionFailureCount} 次，打开失败 ${performanceSnapshot.warmOpenFailureCount} 次`}
+                （目标 P95 ≤ {performanceSnapshot.targetMs} ms 且无 spinner）
+              </div>
+            </PanelSectionRow>
+            {performanceSnapshot.latest && (
+              <PanelSectionRow>
+                <div style={{ opacity: 0.72 }}>
+                  最近一次：首屏{" "}
+                  {Math.round(performanceSnapshot.latest.firstScreenMs)}
+                  ms · 路由{" "}
+                  {Math.round(performanceSnapshot.latest.routeMountedMs)}
+                  ms · 缓存{" "}
+                  {Math.round(performanceSnapshot.latest.cacheReadyMs)}
+                  ms · 正文帧{" "}
+                  {Math.round(performanceSnapshot.latest.contentFirstFrameMs)}
+                  ms · 位置{" "}
+                  {Math.round(performanceSnapshot.latest.positionSettledMs)}
+                  ms · {performanceSnapshot.latest.cacheKind}
+                </div>
+              </PanelSectionRow>
+            )}
+            {performanceSnapshot.latestFailure && (
+              <PanelSectionRow>
+                <div style={{ color: "#f0b35a", opacity: 0.82 }}>
+                  最近失败：{performanceSnapshot.latestFailure.reason}（
+                  {Math.round(performanceSnapshot.latestFailure.failedAtMs)}{" "}
+                  ms）
+                </div>
+              </PanelSectionRow>
+            )}
+          </PanelSection>
+          <PanelSection title="本地缓存">
+            <PanelSectionRow>
+              <div style={{ opacity: 0.78 }}>
+                {cacheStats
+                  ? `指南 ${cacheStats.guides.files} 个 / ${formatBytes(cacheStats.guides.bytes)}（上限 ${formatBytes(cacheStats.guides.diskLimitBytes)}）；图片 ${cacheStats.images.files} 个 / ${formatBytes(cacheStats.images.diskBytes)}（上限 ${formatBytes(cacheStats.images.diskLimitBytes)}）`
+                  : cacheStatsError
+                    ? `缓存用量读取失败：${cacheStatsError}`
+                    : "正在读取缓存用量…"}
+              </div>
+            </PanelSectionRow>
+            {cacheStatsError && (
+              <PanelSectionRow>
+                <ButtonItem
+                  disabled={cacheBusy}
+                  label="重试读取缓存用量"
+                  layout="below"
+                  onClick={() => void refreshCacheStats()}
+                >
+                  仅重新读取统计，不会修改缓存或阅读位置
+                </ButtonItem>
+              </PanelSectionRow>
+            )}
+            <PanelSectionRow>
+              <ButtonItem
+                disabled={cacheBusy}
+                label="清除指南正文缓存"
+                layout="below"
+                onClick={() =>
+                  void runCacheAction(
+                    clearGuides,
+                    (result) =>
+                      `指南缓存已清除：删除 ${result.filesRemoved} 个文件，释放 ${formatBytes(result.bytesRemoved)}`,
+                    "清除指南缓存",
+                  )
+                }
+              >
+                不删除阅读位置；下次打开会重新下载正文
+              </ButtonItem>
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem
+                disabled={cacheBusy}
+                label="清除图片缓存"
+                layout="below"
+                onClick={() =>
+                  void runCacheAction(
+                    clearImages,
+                    (result) =>
+                      `图片缓存已清除：删除 ${result.filesRemoved} 个文件，释放 ${formatBytes(result.bytesRemoved)}`,
+                    "清除图片缓存",
+                  )
+                }
+              >
+                清除 Rust 内存 LRU 与磁盘图片；正文不受影响
+              </ButtonItem>
+            </PanelSectionRow>
+          </PanelSection>
+          <PanelSection title="详细状态">
+            {status.phase !== "error" && (
+              <PanelSectionRow>
+                <div>{status.message}</div>
+              </PanelSectionRow>
+            )}
+            <PanelSectionRow>
+              <div>已保存 {status.savedCount} 个原生 Steam 指南位置</div>
+            </PanelSectionRow>
+            {status.activeGuide && (
+              <PanelSectionRow>
+                <div style={{ opacity: 0.82 }}>
+                  当前指南：游戏 {status.activeGuide.appId}，指南{" "}
+                  {status.activeGuide.guideId}
+                </div>
+              </PanelSectionRow>
+            )}
+            {lastAction && (
+              <PanelSectionRow>
+                <div style={{ opacity: 0.72 }}>{lastAction}</div>
+              </PanelSectionRow>
+            )}
+          </PanelSection>
+        </>
+      )}
     </>
   );
 }
