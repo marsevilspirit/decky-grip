@@ -13,7 +13,7 @@
     "test:backend": "python3 -m unittest discover -s tests/python -p 'test_*.py'",
     "test:rust": "cargo test --locked --manifest-path backend/Cargo.toml && GRIP_RUST_SIDECAR=${CARGO_TARGET_DIR:-backend/target}/debug/grip-sidecar python3 -m unittest tests.python.test_rust_sidecar.RustSidecarProcessIntegrationTests",
     "lint:rust": "cargo fmt --manifest-path backend/Cargo.toml -- --check && cargo clippy --locked --manifest-path backend/Cargo.toml --all-targets -- -D warnings",
-    "check": "pnpm run typecheck && pnpm run test && pnpm run lint:rust && pnpm run build",
+    "check": "pnpm run format:check && pnpm run typecheck && pnpm run test && pnpm run lint:rust && pnpm run build",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
   },

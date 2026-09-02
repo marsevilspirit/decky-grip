@@ -80,11 +80,13 @@ Python tests use only the standard library.
    button.
 2. Select **GRIP**, then choose **继续当前或最近指南**, or open a specific
    entry from **指南库**. Important guides can be kept at the top with the
-   local **收藏** switch. Missing or stale guide bodies can be downloaded or
-   updated there without opening the reader; filtering never contacts Steam.
-   Choose **查找更多 Steam 指南** to open the running game's native guide list.
+   local **收藏** switch. Open **高级选项** to download or update missing or
+   stale guide bodies without opening the reader, and to manage local caches;
+   filtering never contacts Steam. Choose **查找更多 Steam 指南** to open the
+   running game's native guide list.
 3. Scroll normally in the full-screen reader. Use **切换指南** to move between
-   guides for the same game; GRIP saves each guide's visible text and exact
+   guides for the same game, or choose **查找更多 Steam 指南** there to return
+   to the native guide list. GRIP saves each guide's visible text and exact
    viewport offset independently.
 4. For instant in-game access after that first handoff, map the upper-left
    rear button **L4** to **Scroll Lock** in the game's Steam Input layout. Press
@@ -102,12 +104,12 @@ on later frames; each section has its own parser budget, and text anchors are
 indexed incrementally rather than rescanning the whole article on every save or
 restore.
 
-The panel records only real, versioned physical-L4 opens. It reports the route,
-cache, first-content-frame, and position-restoration timings, then evaluates a
-20-attempt warm-cache gate: first-screen P95 must be at most 300 ms with no
-spinner, position failure, canceled open, or load timeout. Failed physical opens
-remain in the same rolling 50-attempt window instead of disappearing from the
-measurement.
+The panel records only real, versioned physical-L4 opens. Under **高级选项**, it
+reports the route, cache, first-content-frame, and position-restoration timings,
+then evaluates a 20-attempt warm-cache gate: first-screen P95 must be at most
+300 ms with no spinner, position failure, canceled open, or load timeout. Failed
+physical opens remain in the same rolling 50-attempt window instead of
+disappearing from the measurement.
 
 ## Storage
 
@@ -151,10 +153,10 @@ to 8 MiB and a validated 8192-pixel / 16-megapixel canvas, the disk LRU to
 near the viewport and keeps at most 32 MiB / 64 entries of estimated decoded
 frontend image residency. Animated image payloads are rejected, and the reader
 observes at most 512 inert image nodes while staging no more than 48 distinct
-image URLs at once. The panel shows cache usage and provides separate
-controls for clearing all guide bodies, one guide body, or images; clearing
-images also invalidates in-flight frontend work, and none of these controls
-deletes saved reading positions.
+image URLs at once. Under **高级选项**, the panel shows cache usage and provides
+separate controls for clearing all guide bodies, one guide body, or images;
+clearing images also invalidates in-flight frontend work, and none of these
+controls deletes saved reading positions.
 
 `positions.json` has exactly one owner: the Rust sidecar. Backend RPC calls are
 serialized before entering the file store, so their arrival order is not
