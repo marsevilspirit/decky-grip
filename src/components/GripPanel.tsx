@@ -209,10 +209,11 @@ export function GripPanel({
     status.guideLibraryRevision,
   ]);
 
-  const runCacheAction = async (
-    action: () => Promise<CacheClearResult>,
-    label: string,
-  ) => {
+  const runCacheAction = async <Result,>(
+    action: () => Promise<Result>,
+    successMessage: (result: Result) => string,
+    failureLabel: string,
+  ): Promise<void> => {
     if (cacheBusy) {
       return;
     }
@@ -220,15 +221,13 @@ export function GripPanel({
     setCacheMessage(null);
     try {
       const result = await action();
-      setCacheMessage(
-        `${label}：删除 ${result.filesRemoved} 个文件，释放 ${formatBytes(result.bytesRemoved)}`,
-      );
-      await refreshCacheStats();
+      setCacheMessage(successMessage(result));
     } catch (error: unknown) {
       setCacheMessage(
-        `${label}失败：${error instanceof Error ? error.message : String(error)}`,
+        `${failureLabel}失败：${error instanceof Error ? error.message : String(error)}`,
       );
     } finally {
+      await refreshCacheStats();
       setCacheBusy(false);
     }
   };
@@ -247,53 +246,30 @@ export function GripPanel({
   };
 
   const removeCachedGuide = async (entry: GuideLibraryEntry): Promise<void> => {
-    if (cacheBusy) {
-      return;
-    }
-    setCacheBusy(true);
-    setCacheMessage(null);
-    try {
-      const result = await removeGuideCache(entry.guideId);
-      setCacheMessage(
-        `“${entry.cache?.title ?? `指南 ${entry.guideId}`}”缓存已移除：释放 ${formatBytes(result.bytesRemoved)}`,
-      );
-      await refreshCacheStats();
-    } catch (error: unknown) {
-      setCacheMessage(
-        `移除指南缓存失败：${error instanceof Error ? error.message : String(error)}`,
-      );
-    } finally {
-      setCacheBusy(false);
-    }
+    const title = entry.cache?.title ?? `指南 ${entry.guideId}`;
+    await runCacheAction(
+      () => removeGuideCache(entry.guideId),
+      (result) =>
+        `“${title}”缓存已移除：释放 ${formatBytes(result.bytesRemoved)}`,
+      "移除指南缓存",
+    );
   };
 
   const cacheGuideBody = async (
     entry: GuideLibraryEntry,
     action: GuideCacheAction,
   ): Promise<void> => {
-    if (cacheBusy) {
-      return;
-    }
     const title = entry.cache?.title ?? `指南 ${entry.guideId}`;
-    setCacheBusy(true);
-    setCacheMessage(null);
-    try {
-      const guide = await cacheGuide(entry);
-      setCacheMessage(
+    await runCacheAction(
+      () => cacheGuide(entry),
+      (guide) =>
         guideCacheRefreshFellBack(action, guide)
           ? `“${title}”更新失败，继续保留本地旧缓存`
           : action === "refresh"
             ? `“${title}”正文缓存已更新`
             : `“${title}”正文已缓存到本机`,
-      );
-    } catch (error: unknown) {
-      setCacheMessage(
-        `${action === "refresh" ? "更新" : "下载"}正文缓存失败：${error instanceof Error ? error.message : String(error)}`,
-      );
-    } finally {
-      await refreshCacheStats();
-      setCacheBusy(false);
-    }
+      `${action === "refresh" ? "更新" : "下载"}正文缓存`,
+    );
   };
 
   const updateFavorite = async (
@@ -423,7 +399,14 @@ export function GripPanel({
             disabled={cacheBusy}
             label="清除指南正文缓存"
             layout="below"
-            onClick={() => void runCacheAction(clearGuides, "指南缓存已清除")}
+            onClick={() =>
+              void runCacheAction(
+                clearGuides,
+                (result) =>
+                  `指南缓存已清除：删除 ${result.filesRemoved} 个文件，释放 ${formatBytes(result.bytesRemoved)}`,
+                "清除指南缓存",
+              )
+            }
           >
             不删除阅读位置；下次打开会重新下载正文
           </ButtonItem>
@@ -433,7 +416,14 @@ export function GripPanel({
             disabled={cacheBusy}
             label="清除图片缓存"
             layout="below"
-            onClick={() => void runCacheAction(clearImages, "图片缓存已清除")}
+            onClick={() =>
+              void runCacheAction(
+                clearImages,
+                (result) =>
+                  `图片缓存已清除：删除 ${result.filesRemoved} 个文件，释放 ${formatBytes(result.bytesRemoved)}`,
+                "清除图片缓存",
+              )
+            }
           >
             清除 Rust 内存 LRU 与磁盘图片；正文不受影响
           </ButtonItem>

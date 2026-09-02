@@ -53,11 +53,6 @@ import { createSteamGuideRuntime } from "./steam/runtime";
 
 const READER_ROUTE = "/decky-grip/reader/:appId/:guideId";
 
-function readerPath(identity: GuideIdentity): string {
-  makeGuideKey(identity);
-  return `/decky-grip/reader/${identity.appId}/${identity.guideId}`;
-}
-
 function currentMainPath(): string | null {
   return mainWindowPath(getMainWindow());
 }
@@ -264,7 +259,11 @@ export default definePlugin(() => {
       if (performanceTrace) {
         readerPerformance.markRouteRequested(performanceTrace);
       }
-      navigateMainWindow(getMainWindow(), readerPath(identity), true);
+      navigateMainWindow(
+        getMainWindow(),
+        `/decky-grip/reader/${identity.appId}/${identity.guideId}`,
+        true,
+      );
       status.rememberGuide(identity);
       void readerCache
         .load(identity)

@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { isGuideScrollIntent } from "../../src/steam/guide-interaction";
+import {
+  canTriggerGuideScroll,
+  isGuideScrollIntent,
+} from "../../src/steam/guide-interaction";
 
 function event(
   type: string,
-  options: { buttons?: number; target?: EventTarget | null } = {},
+  options: { buttons?: number; key?: string; target?: EventTarget | null } = {},
 ): Event {
   return { type, ...options } as unknown as Event;
 }
@@ -13,12 +16,9 @@ describe("Steam guide interaction classification", () => {
   const scroller = {} as HTMLElement;
   const child = {} as HTMLElement;
 
-  it.each(["wheel", "touchmove", "keydown"])(
-    "treats %s as scroll intent",
-    (type) => {
-      expect(isGuideScrollIntent(event(type), scroller)).toBe(true);
-    },
-  );
+  it.each(["wheel", "touchmove"])("treats %s as scroll intent", (type) => {
+    expect(isGuideScrollIntent(event(type), scroller)).toBe(true);
+  });
 
   it("requires a pressed pointer button for pointer movement", () => {
     expect(
@@ -26,6 +26,19 @@ describe("Steam guide interaction classification", () => {
     ).toBe(false);
     expect(
       isGuideScrollIntent(event("pointermove", { buttons: 1 }), scroller),
+    ).toBe(true);
+  });
+
+  it("filters passive pointer movement and unrelated keys before DOM lookup", () => {
+    expect(canTriggerGuideScroll(event("pointermove", { buttons: 0 }))).toBe(
+      false,
+    );
+    expect(canTriggerGuideScroll(event("keydown", { key: "a" }))).toBe(false);
+    expect(canTriggerGuideScroll(event("keydown", { key: "PageDown" }))).toBe(
+      true,
+    );
+    expect(
+      isGuideScrollIntent(event("keydown", { key: "PageDown" }), scroller),
     ).toBe(true);
   });
 

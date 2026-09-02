@@ -1,3 +1,4 @@
+use crate::{KeyLockPool, lock};
 use base64::Engine as _;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -10,7 +11,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use url::Url;
 
@@ -153,32 +154,6 @@ impl MemoryState {
         self.entries.clear();
         self.order.clear();
         self.bytes = 0;
-    }
-}
-
-#[derive(Default)]
-struct KeyLockPool {
-    entries: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-}
-
-impl KeyLockPool {
-    fn retain(&self, key: &str) -> Arc<Mutex<()>> {
-        let mut entries = lock(&self.entries);
-        entries
-            .entry(key.to_owned())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
-    }
-
-    fn release(&self, key: &str, entry: &Arc<Mutex<()>>) {
-        let mut entries = lock(&self.entries);
-        if Arc::strong_count(entry) == 2
-            && entries
-                .get(key)
-                .is_some_and(|current| Arc::ptr_eq(current, entry))
-        {
-            entries.remove(key);
-        }
     }
 }
 
@@ -1109,12 +1084,6 @@ fn sync_directory(path: &Path) -> io::Result<()> {
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)?
         .sync_all()
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {

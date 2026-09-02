@@ -76,12 +76,8 @@ describe("physical L4 reader performance gate", () => {
     tracker.markContentFirstFrame(identity);
 
     expect(tracker.getSnapshot().latest).toEqual({
-      sequence: 4,
-      guideKey: "1113000:3414883877",
       cacheKind: "memory",
       spinnerSeen: false,
-      detectedAtUnixMs: 900,
-      routeRequestedMs: 20,
       routeMountedMs: 55,
       cacheReadyMs: 70,
       contentFirstFrameMs: 220,
@@ -238,7 +234,6 @@ describe("physical L4 reader performance gate", () => {
       gate: "fail",
       latestFailure: {
         reason: "没有可继续的指南",
-        guideKey: null,
       },
     });
   });

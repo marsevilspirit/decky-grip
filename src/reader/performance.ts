@@ -21,12 +21,8 @@ export type ReaderPositionOutcome = "restored" | "skipped" | "unavailable";
 export type ReaderPerformanceGate = "collecting" | "pass" | "fail";
 
 export interface ReaderPerformanceSample {
-  sequence: number;
-  guideKey: string;
   cacheKind: ReaderCacheKind;
   spinnerSeen: boolean;
-  detectedAtUnixMs: number;
-  routeRequestedMs: number;
   routeMountedMs: number;
   cacheReadyMs: number;
   contentFirstFrameMs: number;
@@ -36,11 +32,7 @@ export interface ReaderPerformanceSample {
 }
 
 export interface ReaderPerformanceFailure {
-  sequence: number;
-  guideKey: string | null;
   cacheKind: ReaderCacheKind | null;
-  spinnerSeen: boolean;
-  detectedAtUnixMs: number;
   failedAtMs: number;
   reason: string;
 }
@@ -65,7 +57,6 @@ export interface ReaderPerformanceTrace {
 
 interface MutableTrace {
   token: object;
-  sequence: number;
   detectedAtUnixMs: number;
   guideKey: string | null;
   cacheKind: ReaderCacheKind | null;
@@ -200,7 +191,6 @@ export class ReaderPerformanceTracker {
     }, TRACE_TIMEOUT_MS);
     const trace: MutableTrace = {
       token,
-      sequence: event.sequence,
       detectedAtUnixMs: event.detectedAtUnixMs,
       guideKey: null,
       cacheKind: null,
@@ -340,15 +330,8 @@ export class ReaderPerformanceTracker {
       trace.positionSettledAtUnixMs,
     );
     const sample: ReaderPerformanceSample = {
-      sequence: trace.sequence,
-      guideKey,
       cacheKind: trace.cacheKind,
       spinnerSeen: trace.spinnerSeen,
-      detectedAtUnixMs: trace.detectedAtUnixMs,
-      routeRequestedMs: elapsed(
-        trace.detectedAtUnixMs,
-        trace.routeRequestedAtUnixMs,
-      ),
       routeMountedMs: elapsed(
         trace.detectedAtUnixMs,
         trace.routeMountedAtUnixMs,
@@ -379,11 +362,7 @@ export class ReaderPerformanceTracker {
     const now = this.clock();
     this.attempts.push({
       failure: {
-        sequence: trace.sequence,
-        guideKey: trace.guideKey,
         cacheKind: trace.cacheKind,
-        spinnerSeen: trace.spinnerSeen,
-        detectedAtUnixMs: trace.detectedAtUnixMs,
         failedAtMs: elapsed(trace.detectedAtUnixMs, now),
         reason,
       },

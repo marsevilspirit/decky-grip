@@ -45,7 +45,6 @@ class RustSidecar:
         self._closed = False
         self._pending: Dict[int, Future[Dict[str, Any]]] = {}
         self._event_callback: Optional[Callable[[str, Any], None]] = None
-        self.capabilities = frozenset()
         self._process = subprocess.Popen(
             [str(binary), str(positions_path)],
             stdin=subprocess.PIPE,
@@ -82,7 +81,6 @@ class RustSidecar:
                 or not cls.REQUIRED_CAPABILITIES.issubset(hello["capabilities"])
             ):
                 raise RustSidecarError("GRIP Rust sidecar uses an unsupported protocol")
-            client.capabilities = frozenset(hello["capabilities"])
         except Exception as error:
             if client is not None:
                 client.close()

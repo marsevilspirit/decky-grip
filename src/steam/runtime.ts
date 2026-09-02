@@ -1,6 +1,9 @@
 import { beforePatch, Router } from "@decky/ui";
 
-import { isGuideScrollIntent } from "./guide-interaction";
+import {
+  canTriggerGuideScroll,
+  isGuideScrollIntent,
+} from "./guide-interaction";
 import type { GuideIdentity } from "./guide-key";
 import { findGuideScroller, type GuideScroller } from "./guide-scroll";
 import {
@@ -98,12 +101,6 @@ function asGuideWindow(value: unknown): GuideWindowRouter | null {
   return candidate as GuideWindowRouter;
 }
 
-function isScrollKey(key: string): boolean {
-  return ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(
-    key,
-  );
-}
-
 function invokeSafely(label: string, listener: () => void): void {
   try {
     listener();
@@ -165,19 +162,15 @@ export function createSteamGuideRuntime(): SteamGuideRuntime | null {
     },
     listenGuideInteraction: (listener) => {
       const onInteraction = (event: Event) => {
-        if (!readActiveGuide(history.location.pathname, menuStore)) {
+        if (
+          !canTriggerGuideScroll(event) ||
+          !readActiveGuide(history.location.pathname, menuStore)
+        ) {
           return;
         }
         const scroller = findGuideScroller(document);
         const target = event.target;
         if (!scroller || !(target instanceof browserWindow.Node)) {
-          return;
-        }
-        if (
-          event.type === "keydown" &&
-          (!(event as KeyboardEvent).key ||
-            !isScrollKey((event as KeyboardEvent).key))
-        ) {
           return;
         }
         if (

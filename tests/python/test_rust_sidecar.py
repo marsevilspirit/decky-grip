@@ -18,16 +18,6 @@ sys.path.insert(0, str(PROJECT_ROOT / "py_modules"))
 from rust_sidecar import RustSidecar, RustSidecarError  # noqa: E402
 
 
-CAPABILITIES = [
-    "positions",
-    "reader_positions",
-    "favorites",
-    "guides",
-    "images",
-    "hotkey",
-    "multiplex",
-]
-
 FAKE_SIDECAR = r"""#!/usr/bin/env python3
 import json
 import sys
@@ -177,8 +167,7 @@ class RustSidecarTests(unittest.TestCase):
         return client
 
     def test_start_requires_protocol_v2_and_all_capabilities(self):
-        client = self.start()
-        self.assertEqual(client.capabilities, frozenset(CAPABILITIES))
+        self.start()
         self.logger.info.assert_called_once_with("GRIP Rust sidecar ready")
 
         self.write_sidecar(
@@ -352,9 +341,6 @@ class RustSidecarProcessIntegrationTests(unittest.TestCase):
                 Path(os.environ["GRIP_RUST_SIDECAR"]), path, mock.Mock()
             )
             try:
-                self.assertTrue(
-                    RustSidecar.REQUIRED_CAPABILITIES <= client.capabilities
-                )
                 self.assertEqual(client.request("hotkey.status", {})["button"], "L4")
                 self.assertEqual(
                     client.request("positions.snapshot", {})["1:90071992547409931234"][

@@ -1,11 +1,12 @@
 use serde_json::{Map, Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod favorites;
@@ -155,13 +156,14 @@ impl PositionStore {
     }
 
     fn read_document(&self) -> Result<Document, StoreError> {
-        match read_bounded_regular_file(&self.path, MAX_FILE_BYTES) {
-            Ok(payload) => Document::from_bytes(&payload),
+        match read_bounded_regular_file(&self.path, MAX_FILE_BYTES, None) {
+            Ok((Some(payload), _)) => Document::from_bytes(&payload),
+            Ok((None, _)) => unreachable!("a read without a known signature returns bytes"),
             Err(ReadError::Missing) => Ok(Document::default()),
             Err(ReadError::TooLarge) => Err(StoreError::Storage(
                 "positions.json is larger than the safety limit",
             )),
-            Err(ReadError::Unsafe) => Err(StoreError::Storage(
+            Err(ReadError::Changed | ReadError::Unsafe) => Err(StoreError::Storage(
                 "positions.json could not be read safely",
             )),
         }
@@ -223,40 +225,58 @@ impl PositionStore {
             ));
         }
 
-        let parent = self.path.parent().ok_or(StoreError::Storage(
-            "could not create a temporary positions file",
-        ))?;
-        fs::create_dir_all(parent)
-            .map_err(|_| StoreError::Storage("could not create a temporary positions file"))?;
-        let (mut temporary, temporary_path) = create_temp(parent, ".positions-", ".tmp")
-            .map_err(|_| StoreError::Storage("could not create a temporary positions file"))?;
-
-        let replace_result = (|| -> io::Result<()> {
-            make_private(&temporary)?;
-            temporary.write_all(&payload)?;
-            temporary.sync_all()?;
-            drop(temporary);
-            fs::rename(&temporary_path, &self.path)
-        })();
-        if replace_result.is_err() {
-            let _ = fs::remove_file(&temporary_path);
-            return Err(StoreError::Storage(
+        match atomic_replace(&self.path, ".positions-", ".tmp", &payload) {
+            Ok(()) => Ok(()),
+            Err(AtomicReplaceError::Prepare) => Err(StoreError::Storage(
+                "could not create a temporary positions file",
+            )),
+            Err(AtomicReplaceError::Replace) => Err(StoreError::Storage(
                 "could not atomically replace positions.json",
-            ));
-        }
-
-        sync_directory(parent).map_err(|_| {
-            StoreError::Durability(
+            )),
+            Err(AtomicReplaceError::Durability) => Err(StoreError::Durability(
                 "positions.json was replaced, but its directory could not be synced",
-            )
-        })
+            )),
+        }
     }
 }
 
 enum ReadError {
     Missing,
     TooLarge,
+    Changed,
     Unsafe,
+}
+
+enum AtomicReplaceError {
+    Prepare,
+    Replace,
+    Durability,
+}
+
+#[derive(Default)]
+struct KeyLockPool {
+    entries: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+}
+
+impl KeyLockPool {
+    fn retain(&self, key: &str) -> Arc<Mutex<()>> {
+        let mut entries = lock(&self.entries);
+        entries
+            .entry(key.to_owned())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    fn release(&self, key: &str, entry: &Arc<Mutex<()>>) {
+        let mut entries = lock(&self.entries);
+        if Arc::strong_count(entry) == 2
+            && entries
+                .get(key)
+                .is_some_and(|current| Arc::ptr_eq(current, entry))
+        {
+            entries.remove(key);
+        }
+    }
 }
 
 struct StoreLock(File);
@@ -327,7 +347,11 @@ fn signature(metadata: &Metadata) -> FileSignature {
     }
 }
 
-fn read_bounded_regular_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, ReadError> {
+fn read_bounded_regular_file(
+    path: &Path,
+    max_bytes: u64,
+    known_signature: Option<FileSignature>,
+) -> Result<(Option<Vec<u8>>, FileSignature), ReadError> {
     let mut file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
@@ -346,27 +370,41 @@ fn read_bounded_regular_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, Rea
     }
     let initial_signature = signature(&initial);
 
-    let mut payload = Vec::with_capacity(initial.len() as usize);
-    (&mut file)
-        .take(max_bytes + 1)
-        .read_to_end(&mut payload)
-        .map_err(|_| ReadError::Unsafe)?;
-    if payload.len() as u64 > max_bytes {
-        return Err(ReadError::TooLarge);
-    }
+    let payload = if known_signature == Some(initial_signature) {
+        None
+    } else {
+        let mut payload = Vec::with_capacity(initial.len() as usize);
+        (&mut file)
+            .take(max_bytes + 1)
+            .read_to_end(&mut payload)
+            .map_err(|_| ReadError::Unsafe)?;
+        if payload.len() as u64 > max_bytes {
+            return Err(ReadError::TooLarge);
+        }
+        Some(payload)
+    };
 
     let final_metadata = file.metadata().map_err(|_| ReadError::Unsafe)?;
+    let final_signature = signature(&final_metadata);
     if !final_metadata.is_file()
-        || signature(&final_metadata) != initial_signature
-        || payload.len() as u64 != final_metadata.len()
+        || final_signature != initial_signature
+        || payload
+            .as_ref()
+            .is_some_and(|payload| payload.len() as u64 != final_metadata.len())
     {
-        return Err(ReadError::Unsafe);
+        return Err(ReadError::Changed);
     }
-    let path_metadata = fs::symlink_metadata(path).map_err(|_| ReadError::Unsafe)?;
-    if !path_metadata.is_file() || signature(&path_metadata) != signature(&final_metadata) {
-        return Err(ReadError::Unsafe);
+    let path_metadata = fs::symlink_metadata(path).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            ReadError::Changed
+        } else {
+            ReadError::Unsafe
+        }
+    })?;
+    if !path_metadata.is_file() || signature(&path_metadata) != final_signature {
+        return Err(ReadError::Changed);
     }
-    Ok(payload)
+    Ok((payload, final_signature))
 }
 
 fn create_temp(parent: &Path, prefix: &str, suffix: &str) -> io::Result<(File, PathBuf)> {
@@ -397,6 +435,30 @@ fn create_temp(parent: &Path, prefix: &str, suffix: &str) -> io::Result<(File, P
     Err(last_error.unwrap_or_else(|| io::Error::other("could not create temporary file")))
 }
 
+fn atomic_replace(
+    path: &Path,
+    temporary_prefix: &str,
+    temporary_suffix: &str,
+    payload: &[u8],
+) -> Result<(), AtomicReplaceError> {
+    let parent = path.parent().ok_or(AtomicReplaceError::Prepare)?;
+    fs::create_dir_all(parent).map_err(|_| AtomicReplaceError::Prepare)?;
+    let (mut temporary, temporary_path) = create_temp(parent, temporary_prefix, temporary_suffix)
+        .map_err(|_| AtomicReplaceError::Prepare)?;
+    let replace_result = (|| -> io::Result<()> {
+        make_private(&temporary)?;
+        temporary.write_all(payload)?;
+        temporary.sync_all()?;
+        drop(temporary);
+        fs::rename(&temporary_path, path)
+    })();
+    if replace_result.is_err() {
+        let _ = fs::remove_file(temporary_path);
+        return Err(AtomicReplaceError::Replace);
+    }
+    sync_directory(parent).map_err(|_| AtomicReplaceError::Durability)
+}
+
 fn make_private(file: &File) -> io::Result<()> {
     if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } == 0 {
         Ok(())
@@ -411,6 +473,12 @@ fn sync_directory(path: &Path) -> io::Result<()> {
         .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
         .open(path)?
         .sync_all()
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn backup_corrupt_file(path: &Path) -> io::Result<PathBuf> {

@@ -69,6 +69,17 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function focusWithoutScrolling(element: HTMLElement | null | undefined): void {
+  if (!element) {
+    return;
+  }
+  try {
+    element.focus({ preventScroll: true });
+  } catch {
+    element.focus();
+  }
+}
+
 function guideChoiceDetails(entry: GuideLibraryEntry): string {
   return [
     entry.favorite ? "已收藏" : null,
@@ -182,11 +193,7 @@ export function GuideReaderPage({
     setGuideSwitcherOpen(false);
     requestAnimationFrame(() => {
       const target = guideSwitcherButtonRef.current ?? scrollerRef.current;
-      try {
-        target?.focus({ preventScroll: true });
-      } catch {
-        target?.focus();
-      }
+      focusWithoutScrolling(target);
     });
   };
 
@@ -269,11 +276,7 @@ export function GuideReaderPage({
       return;
     }
     const animationFrame = requestAnimationFrame(() => {
-      try {
-        guideSwitcherRef.current?.focus({ preventScroll: true });
-      } catch {
-        guideSwitcherRef.current?.focus();
-      }
+      focusWithoutScrolling(guideSwitcherRef.current);
     });
     return () => cancelAnimationFrame(animationFrame);
   }, [guideSwitcherOpen]);
@@ -406,6 +409,7 @@ export function GuideReaderPage({
       ? sectionRenderState.count
       : Math.min(loaded.guide.sections.length, 1)
     : 0;
+  const renderedSectionCountRef = useRef(renderedSectionCount);
 
   useEffect(() => {
     const guide = loaded?.guide ?? null;
@@ -442,6 +446,7 @@ export function GuideReaderPage({
   }, [loaded?.guide]);
 
   useLayoutEffect(() => {
+    renderedSectionCountRef.current = renderedSectionCount;
     const guide = loaded?.guide ?? null;
     const content = contentRef.current;
     if (!guide || !content) {
@@ -646,11 +651,7 @@ export function GuideReaderPage({
           loaded?.positionWarning ? "unavailable" : "skipped",
         );
       }
-      try {
-        scroller.focus({ preventScroll: true });
-      } catch {
-        scroller.focus();
-      }
+      focusWithoutScrolling(scroller);
       return;
     }
 
@@ -677,8 +678,7 @@ export function GuideReaderPage({
         (index?.candidates(position.anchorText, position.sectionId).length ??
           0) > 0;
       const allSectionsRendered =
-        content.querySelectorAll("[data-guide-section-id]").length >=
-        (loaded?.guide.sections.length ?? 0);
+        renderedSectionCountRef.current >= loaded.guide.sections.length;
       const maxScrollTop = Math.max(
         0,
         scroller.scrollHeight - scroller.clientHeight,
@@ -709,7 +709,6 @@ export function GuideReaderPage({
       });
     };
     const applyRestore = () => {
-      anchorIndexRef.current?.refresh();
       const restored = restoreReaderPosition(
         scroller,
         content,
@@ -825,11 +824,7 @@ export function GuideReaderPage({
     for (const event of interactionEvents) {
       scroller.addEventListener(event, onInteraction, true);
     }
-    try {
-      scroller.focus({ preventScroll: true });
-    } catch {
-      scroller.focus();
-    }
+    focusWithoutScrolling(scroller);
 
     return () => {
       stop();
@@ -1042,7 +1037,7 @@ export function GuideReaderPage({
       const sectionRect = section.getBoundingClientRect();
       checkpoint.intendScroll();
       scroller.scrollTop += sectionRect.top - scrollerRect.top;
-      scroller.focus({ preventScroll: true });
+      focusWithoutScrolling(scroller);
       onScroll();
       return true;
     }

@@ -39,9 +39,10 @@ class Plugin:
         *args: Any,
         executor: Optional[concurrent.futures.Executor] = None,
         wait_on_cancel: bool = False,
+        **kwargs: Any,
     ) -> Any:
         loop = asyncio.get_running_loop()
-        work = functools.partial(function, *args)
+        work = functools.partial(function, *args, **kwargs)
         source: Optional[concurrent.futures.Future] = None
         if executor is None:
             operation = loop.run_in_executor(None, work)
@@ -81,20 +82,22 @@ class Plugin:
     async def _run_io(self, function: Callable[..., Any], *args: Any) -> Any:
         return await self._run_locked_io(self._io_lock, function, *args)
 
-    async def _run_guide_io(self, function: Callable[..., Any], *args: Any) -> Any:
+    async def _run_guide_io(
+        self, function: Callable[..., Any], *args: Any, **kwargs: Any
+    ) -> Any:
         # GuideReader serializes only operations for the same guide id. Keeping
         # a second global asyncio lock here would let one slow Steam request
         # delay an unrelated, already-cached guide.
-        return await self._run_executor_io(function, *args)
+        return await self._run_executor_io(function, *args, **kwargs)
 
     async def _run_destructive_guide_io(self, method: str, params: dict) -> Any:
-        request = functools.partial(
+        return await self._run_executor_io(
             self._sidecar.request,
             method,
             params,
             timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
+            wait_on_cancel=True,
         )
-        return await self._run_executor_io(request, wait_on_cancel=True)
 
     async def _main(self) -> None:
         self._event_loop = asyncio.get_running_loop()
@@ -178,13 +181,12 @@ class Plugin:
         )
 
     async def get_guide(self, guide_id: str, force_refresh: bool = False):
-        request = functools.partial(
+        return await self._run_guide_io(
             self._sidecar.request,
             "guides.get",
             {"guide_id": guide_id, "force_refresh": force_refresh},
             timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
         )
-        return await self._run_guide_io(request)
 
     async def get_cached_guide(self, guide_id: str):
         # Cache-only warming has its own single worker, so even a large cache
@@ -193,27 +195,23 @@ class Plugin:
         if executor is None:
             return None
         try:
-            request = functools.partial(
+            return await self._run_executor_io(
                 self._sidecar.request,
                 "guides.get_cached",
                 {"guide_id": guide_id},
                 timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
-            )
-            return await self._run_executor_io(
-                request,
                 executor=executor,
             )
         except _ExecutorUnavailable:
             return None
 
     async def get_guide_library(self, app_id: Optional[str]):
-        request = functools.partial(
+        return await self._run_guide_io(
             self._sidecar.request,
             "guides.list",
             {"app_id": app_id},
             timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
         )
-        return await self._run_guide_io(request)
 
     async def set_guide_favorite(self, guide_key: str, favorite: bool):
         return await self._run_io(
@@ -223,13 +221,12 @@ class Plugin:
         )
 
     async def get_guide_image(self, url: str, allow_download: bool = True):
-        request = functools.partial(
+        return await self._run_guide_io(
             self._sidecar.request,
             "images.get",
             {"url": url, "allow_download": allow_download},
             timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
         )
-        return await self._run_guide_io(request)
 
     async def clear_guide_cache(self):
         return await self._run_destructive_guide_io("guides.clear", {})

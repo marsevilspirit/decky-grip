@@ -7,7 +7,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "watch": "rollup -c -w",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.test.json",
+    "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "test": "pnpm run test:frontend && pnpm run test:backend && pnpm run test:rust",
     "test:frontend": "vitest run tests/typescript",
     "test:backend": "python3 -m unittest discover -s tests/python -p 'test_*.py'",

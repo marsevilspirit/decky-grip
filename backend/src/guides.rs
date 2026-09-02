@@ -3,16 +3,19 @@ use crate::guide_html::{
     localize_guide_images, parse_guide_html, sanitize_fragment_with_stats,
     source_url as guide_source_url, valid_guide_id,
 };
-use crate::{FileSignature, create_temp, make_private, signature, sync_directory};
+use crate::{
+    AtomicReplaceError, FileSignature, KeyLockPool, ReadError, atomic_replace, lock,
+    read_bounded_regular_file, signature, sync_directory,
+};
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, FileTimes, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
@@ -85,7 +88,6 @@ impl fmt::Display for GuideError {
 
 impl Error for GuideError {}
 
-#[derive(Clone)]
 struct MemoEntry {
     signature: FileSignature,
     document: Value,
@@ -100,12 +102,27 @@ struct MemoState {
 }
 
 impl MemoState {
-    fn get(&mut self, guide_id: &str, promote: bool) -> Option<MemoEntry> {
-        let entry = self.entries.get(guide_id)?.clone();
+    fn signature(&self, guide_id: &str) -> Option<FileSignature> {
+        Some(self.entries.get(guide_id)?.signature)
+    }
+
+    fn clone_if_signature(
+        &mut self,
+        guide_id: &str,
+        expected: FileSignature,
+        updated: FileSignature,
+        promote: bool,
+    ) -> Option<Value> {
+        let entry = self.entries.get_mut(guide_id)?;
+        if entry.signature != expected {
+            return None;
+        }
+        entry.signature = updated;
+        let document = entry.document.clone();
         if promote {
             self.touch(guide_id);
         }
-        Some(entry)
+        Some(document)
     }
 
     fn store(&mut self, guide_id: &str, entry: MemoEntry, limit: usize) {
@@ -170,46 +187,12 @@ impl Default for GuideLimits {
     }
 }
 
-#[derive(Debug)]
-enum CacheReadError {
-    Missing,
-    TooLarge,
-    Changed,
-    Unsafe,
-}
-
-#[derive(Default)]
-struct GuideLockPool {
-    entries: Mutex<HashMap<String, Arc<Mutex<()>>>>,
-}
-
-impl GuideLockPool {
-    fn retain(&self, guide_id: &str) -> Arc<Mutex<()>> {
-        let mut entries = lock(&self.entries);
-        entries
-            .entry(guide_id.to_owned())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
-    }
-
-    fn release(&self, guide_id: &str, entry: &Arc<Mutex<()>>) {
-        let mut entries = lock(&self.entries);
-        if Arc::strong_count(entry) == 2
-            && entries
-                .get(guide_id)
-                .is_some_and(|current| Arc::ptr_eq(current, entry))
-        {
-            entries.remove(guide_id);
-        }
-    }
-}
-
 pub struct GuideReader {
     cache_directory: PathBuf,
     fetcher: Arc<Fetcher>,
     now_ms: Arc<Clock>,
     limits: GuideLimits,
-    guide_locks: GuideLockPool,
+    guide_locks: KeyLockPool,
     memo: Mutex<MemoState>,
     disk_lock: Mutex<()>,
     generation: Mutex<u64>,
@@ -243,7 +226,7 @@ impl GuideReader {
             fetcher: Arc::new(fetcher),
             now_ms: Arc::new(now_ms),
             limits,
-            guide_locks: GuideLockPool::default(),
+            guide_locks: KeyLockPool::default(),
             memo: Mutex::new(MemoState::default()),
             disk_lock: Mutex::new(()),
             generation: Mutex::new(0),
@@ -472,46 +455,46 @@ impl GuideReader {
     ) -> Result<Option<Value>, GuideError> {
         let path = self.cache_path(guide_id);
         for attempt in 0..2 {
-            let memoized = lock(&self.memo).get(guide_id, memoize);
-            let known = memoized.as_ref().map(|entry| entry.signature);
+            let known = lock(&self.memo).signature(guide_id);
             let (payload, signature) =
                 match read_bounded_regular_file(&path, MAX_CACHE_BYTES, known) {
                     Ok(value) => value,
-                    Err(CacheReadError::Missing) => {
+                    Err(ReadError::Missing) => {
                         lock(&self.memo).remove(guide_id);
                         return Ok(None);
                     }
-                    Err(CacheReadError::TooLarge) => {
+                    Err(ReadError::TooLarge) => {
                         lock(&self.memo).remove(guide_id);
                         return Err(GuideError::cache("cached guide exceeds the size limit"));
                     }
-                    Err(CacheReadError::Changed) => {
+                    Err(ReadError::Changed) => {
                         lock(&self.memo).remove(guide_id);
                         if attempt == 0 {
                             continue;
                         }
                         return Err(GuideError::cache("cached guide changed while being read"));
                     }
-                    Err(CacheReadError::Unsafe) => {
+                    Err(ReadError::Unsafe) => {
                         lock(&self.memo).remove(guide_id);
                         return Err(GuideError::cache("cached guide could not be read safely"));
                     }
                 };
             if payload.is_none() {
-                let entry = memoized.expect("matching signature requires a memo entry");
-                if memoize {
-                    let touched = self.touch_cache_file(&path, signature).unwrap_or(signature);
-                    lock(&self.memo).store(
-                        guide_id,
-                        MemoEntry {
-                            signature: touched,
-                            document: entry.document.clone(),
-                            bytes: entry.bytes,
-                        },
-                        self.limits.max_memory_bytes,
-                    );
+                let expected = known.expect("matching signature requires a memo entry");
+                let touched = if memoize {
+                    self.touch_cache_file(&path, signature).unwrap_or(signature)
+                } else {
+                    signature
+                };
+                if let Some(document) =
+                    lock(&self.memo).clone_if_signature(guide_id, expected, touched, memoize)
+                {
+                    return Ok(Some(document));
                 }
-                return Ok(Some(entry.document));
+                if attempt == 0 {
+                    continue;
+                }
+                return Err(GuideError::cache("cached guide changed while being read"));
             }
             let parsed: Value =
                 serde_json::from_slice(payload.as_ref().unwrap()).map_err(|_| {
@@ -704,31 +687,27 @@ impl GuideReader {
                 "cached guide would exceed the size limit",
             ));
         }
-        fs::create_dir_all(&self.cache_directory)
-            .map_err(|_| GuideError::cache("could not create a guide cache file"))?;
-        let (mut temporary, temporary_path) = create_temp(&self.cache_directory, ".guide-", ".tmp")
-            .map_err(|_| GuideError::cache("could not create a guide cache file"))?;
         let cache_path = self.cache_path(
             document["guideId"]
                 .as_str()
                 .expect("validated document has a guide id"),
         );
-        let replace_result = (|| -> io::Result<()> {
-            make_private(&temporary)?;
-            temporary.write_all(&payload)?;
-            temporary.sync_all()?;
-            drop(temporary);
-            fs::rename(&temporary_path, &cache_path)
-        })();
-        if replace_result.is_err() {
-            let _ = fs::remove_file(&temporary_path);
-            return Err(GuideError::cache(
-                "could not atomically replace guide cache",
-            ));
+        match atomic_replace(&cache_path, ".guide-", ".tmp", &payload) {
+            Ok(()) => {}
+            Err(AtomicReplaceError::Prepare) => {
+                return Err(GuideError::cache("could not create a guide cache file"));
+            }
+            Err(AtomicReplaceError::Replace) => {
+                return Err(GuideError::cache(
+                    "could not atomically replace guide cache",
+                ));
+            }
+            Err(AtomicReplaceError::Durability) => {
+                return Err(GuideError::cache(
+                    "guide cache was replaced but its directory could not be synced",
+                ));
+            }
         }
-        sync_directory(&self.cache_directory).map_err(|_| {
-            GuideError::cache("guide cache was replaced but its directory could not be synced")
-        })?;
         match fs::symlink_metadata(&cache_path) {
             Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_CACHE_BYTES => {
                 lock(&self.memo).store(
@@ -814,12 +793,6 @@ struct GuideDiskEntry {
     modified_nanoseconds: i64,
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 fn validate_guide_id(guide_id: &str) -> Result<(), GuideError> {
     if valid_guide_id(guide_id) {
         Ok(())
@@ -903,66 +876,6 @@ fn read_cache_directory(path: &Path) -> Result<Option<fs::ReadDir>, GuideError> 
         }
         Err(_) => Err(GuideError::cache("guide cache could not be inspected")),
     }
-}
-
-fn read_bounded_regular_file(
-    path: &Path,
-    max_bytes: u64,
-    known_signature: Option<FileSignature>,
-) -> Result<(Option<Vec<u8>>, FileSignature), CacheReadError> {
-    let mut file = match OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Err(CacheReadError::Missing);
-        }
-        Err(_) => return Err(CacheReadError::Unsafe),
-    };
-    let initial = file.metadata().map_err(|_| CacheReadError::Unsafe)?;
-    if !initial.is_file() {
-        return Err(CacheReadError::Unsafe);
-    }
-    if initial.len() > max_bytes {
-        return Err(CacheReadError::TooLarge);
-    }
-    let initial_signature = signature(&initial);
-    let payload = if known_signature == Some(initial_signature) {
-        None
-    } else {
-        let mut payload = Vec::with_capacity(initial.len() as usize);
-        (&mut file)
-            .take(max_bytes + 1)
-            .read_to_end(&mut payload)
-            .map_err(|_| CacheReadError::Unsafe)?;
-        if payload.len() as u64 > max_bytes {
-            return Err(CacheReadError::TooLarge);
-        }
-        Some(payload)
-    };
-    let final_metadata = file.metadata().map_err(|_| CacheReadError::Unsafe)?;
-    let final_signature = signature(&final_metadata);
-    if !final_metadata.is_file()
-        || final_signature != initial_signature
-        || payload
-            .as_ref()
-            .is_some_and(|payload| payload.len() as u64 != final_metadata.len())
-    {
-        return Err(CacheReadError::Changed);
-    }
-    let path_metadata = fs::symlink_metadata(path).map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            CacheReadError::Changed
-        } else {
-            CacheReadError::Unsafe
-        }
-    })?;
-    if !path_metadata.is_file() || signature(&path_metadata) != final_signature {
-        return Err(CacheReadError::Changed);
-    }
-    Ok((payload, final_signature))
 }
 
 fn system_now_ms() -> u64 {
@@ -1108,7 +1021,7 @@ mod tests {
     }
 
     #[test]
-    fn memo_is_a_byte_bounded_lru() {
+    fn memo_is_a_byte_bounded_lru_and_does_not_restore_cleared_entries() {
         let entry = |bytes| MemoEntry {
             signature: FileSignature {
                 device: 0,
@@ -1125,7 +1038,11 @@ mod tests {
         let mut memo = MemoState::default();
         memo.store("1", entry(4), 8);
         memo.store("2", entry(4), 8);
-        assert!(memo.get("1", true).is_some());
+        let first_signature = memo.signature("1").unwrap();
+        assert!(
+            memo.clone_if_signature("1", first_signature, first_signature, true)
+                .is_some()
+        );
 
         memo.store("3", entry(4), 8);
 
@@ -1133,6 +1050,13 @@ mod tests {
         assert!(!memo.entries.contains_key("2"));
         assert!(memo.entries.contains_key("3"));
         assert_eq!(memo.bytes, 8);
+
+        memo.clear();
+        assert!(
+            memo.clone_if_signature("1", first_signature, first_signature, true)
+                .is_none()
+        );
+        assert!(memo.is_empty());
     }
 
     #[test]

@@ -1,25 +1,20 @@
 use super::{
-    JAVASCRIPT_MAX_SAFE_INTEGER, ReadError, SCHEMA_VERSION, StoreError, acquire_store_lock,
-    backup_corrupt_file, create_temp, make_private, now_ms, read_bounded_regular_file,
-    sync_directory, validate_guide_key,
+    AtomicReplaceError, JAVASCRIPT_MAX_SAFE_INTEGER, ReadError, SCHEMA_VERSION, StoreError,
+    acquire_store_lock, atomic_replace, backup_corrupt_file, now_ms, read_bounded_regular_file,
+    validate_guide_key,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::PathBuf;
 
 const MAX_FILE_BYTES: u64 = 64 * 1024;
 const MAX_FAVORITES: usize = 20;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Favorite {
-    favorited_at_ms: u64,
-}
-
 #[derive(Debug, Default)]
 struct FavoriteDocument {
-    favorites: BTreeMap<String, Favorite>,
+    favorites: BTreeMap<String, u64>,
 }
 
 impl FavoriteDocument {
@@ -62,15 +57,15 @@ impl FavoriteDocument {
                 .ok_or(StoreError::Storage(
                     "favorites.json has an invalid favorite",
                 ))?;
-            favorites.insert(guide_key.clone(), Favorite { favorited_at_ms });
+            favorites.insert(guide_key.clone(), favorited_at_ms);
         }
         Ok(Self { favorites })
     }
 
     fn to_value(&self) -> Value {
         json!({
-            "favorites": self.favorites.iter().map(|(guide_key, favorite)| {
-                (guide_key.clone(), json!({"favorited_at_ms": favorite.favorited_at_ms}))
+            "favorites": self.favorites.iter().map(|(guide_key, favorited_at_ms)| {
+                (guide_key.clone(), json!({"favorited_at_ms": favorited_at_ms}))
             }).collect::<serde_json::Map<_, _>>(),
             "schema_version": SCHEMA_VERSION,
         })
@@ -87,13 +82,14 @@ impl FavoriteStore {
     }
 
     fn read_document(&self) -> Result<FavoriteDocument, StoreError> {
-        match read_bounded_regular_file(&self.path, MAX_FILE_BYTES) {
-            Ok(payload) => FavoriteDocument::from_bytes(&payload),
+        match read_bounded_regular_file(&self.path, MAX_FILE_BYTES, None) {
+            Ok((Some(payload), _)) => FavoriteDocument::from_bytes(&payload),
+            Ok((None, _)) => unreachable!("a read without a known signature returns bytes"),
             Err(ReadError::Missing) => Ok(FavoriteDocument::default()),
             Err(ReadError::TooLarge) => {
                 Err(StoreError::Storage("favorites.json exceeds the size limit"))
             }
-            Err(ReadError::Unsafe) => Err(StoreError::Storage(
+            Err(ReadError::Changed | ReadError::Unsafe) => Err(StoreError::Storage(
                 "favorites.json could not be read safely",
             )),
         }
@@ -102,12 +98,7 @@ impl FavoriteStore {
     pub(super) fn entries(&self) -> Result<BTreeMap<String, u64>, StoreError> {
         let _lock = acquire_store_lock(&self.path)
             .map_err(|_| StoreError::Storage("could not lock favorites.json"))?;
-        Ok(self
-            .read_document()?
-            .favorites
-            .into_iter()
-            .map(|(guide_key, favorite)| (guide_key, favorite.favorited_at_ms))
-            .collect())
+        Ok(self.read_document()?.favorites)
     }
 
     pub(super) fn set(&self, guide_key: &str, favorite: &Value) -> Result<Value, StoreError> {
@@ -126,12 +117,7 @@ impl FavoriteStore {
                 if document.favorites.len() >= MAX_FAVORITES {
                     return Err(StoreError::Storage("favorite limit reached"));
                 }
-                document.favorites.insert(
-                    guide_key.to_owned(),
-                    Favorite {
-                        favorited_at_ms: now_ms()?,
-                    },
-                );
+                document.favorites.insert(guide_key.to_owned(), now_ms()?);
                 true
             }
         } else {
@@ -171,33 +157,18 @@ impl FavoriteStore {
             ));
         }
 
-        let parent = self
-            .path
-            .parent()
-            .ok_or(StoreError::Storage("could not create a favorites file"))?;
-        fs::create_dir_all(parent)
-            .map_err(|_| StoreError::Storage("could not create a favorites file"))?;
-        let (mut temporary, temporary_path) = create_temp(parent, ".favorites-", ".tmp")
-            .map_err(|_| StoreError::Storage("could not create a favorites file"))?;
-
-        let replace_result = (|| -> io::Result<()> {
-            make_private(&temporary)?;
-            temporary.write_all(&payload)?;
-            temporary.sync_all()?;
-            drop(temporary);
-            fs::rename(&temporary_path, &self.path)
-        })();
-        if replace_result.is_err() {
-            let _ = fs::remove_file(&temporary_path);
-            return Err(StoreError::Storage(
+        match atomic_replace(&self.path, ".favorites-", ".tmp", &payload) {
+            Ok(()) => Ok(()),
+            Err(AtomicReplaceError::Prepare) => {
+                Err(StoreError::Storage("could not create a favorites file"))
+            }
+            Err(AtomicReplaceError::Replace) => Err(StoreError::Storage(
                 "could not atomically replace favorites.json",
-            ));
-        }
-        sync_directory(parent).map_err(|_| {
-            StoreError::Durability(
+            )),
+            Err(AtomicReplaceError::Durability) => Err(StoreError::Durability(
                 "favorites.json was replaced but its directory could not be synced",
-            )
-        })
+            )),
+        }
     }
 }
 

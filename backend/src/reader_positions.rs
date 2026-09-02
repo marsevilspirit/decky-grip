@@ -1,12 +1,12 @@
 use super::{
-    JAVASCRIPT_MAX_SAFE_INTEGER, MAX_POSITIONS, MAX_SCROLL_TOP, ReadError, SCHEMA_VERSION,
-    StoreError, acquire_store_lock, backup_corrupt_file, create_temp, make_private,
-    read_bounded_regular_file, sync_directory, valid_guide_key, validate_guide_key,
+    AtomicReplaceError, JAVASCRIPT_MAX_SAFE_INTEGER, MAX_POSITIONS, MAX_SCROLL_TOP, ReadError,
+    SCHEMA_VERSION, StoreError, acquire_store_lock, atomic_replace, backup_corrupt_file,
+    read_bounded_regular_file, valid_guide_key, validate_guide_key,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -154,13 +154,14 @@ impl ReaderPositionStore {
     }
 
     fn read_document(&self) -> Result<ReaderDocument, StoreError> {
-        match read_bounded_regular_file(&self.path, MAX_FILE_BYTES) {
-            Ok(payload) => ReaderDocument::from_bytes(&payload),
+        match read_bounded_regular_file(&self.path, MAX_FILE_BYTES, None) {
+            Ok((Some(payload), _)) => ReaderDocument::from_bytes(&payload),
+            Ok((None, _)) => unreachable!("a read without a known signature returns bytes"),
             Err(ReadError::Missing) => Ok(ReaderDocument::default()),
             Err(ReadError::TooLarge) => Err(StoreError::Storage(
                 "reader_positions.json exceeds the size limit",
             )),
-            Err(ReadError::Unsafe) => Err(StoreError::Storage(
+            Err(ReadError::Changed | ReadError::Unsafe) => Err(StoreError::Storage(
                 "reader_positions.json could not be read safely",
             )),
         }
@@ -301,33 +302,18 @@ impl ReaderPositionStore {
             ));
         }
 
-        let parent = self.path.parent().ok_or(StoreError::Storage(
-            "could not create a reader position file",
-        ))?;
-        fs::create_dir_all(parent)
-            .map_err(|_| StoreError::Storage("could not create a reader position file"))?;
-        let (mut temporary, temporary_path) = create_temp(parent, ".reader-positions-", ".tmp")
-            .map_err(|_| StoreError::Storage("could not create a reader position file"))?;
-
-        let replace_result = (|| -> io::Result<()> {
-            make_private(&temporary)?;
-            temporary.write_all(&payload)?;
-            temporary.sync_all()?;
-            drop(temporary);
-            fs::rename(&temporary_path, &self.path)
-        })();
-        if replace_result.is_err() {
-            let _ = fs::remove_file(&temporary_path);
-            return Err(StoreError::Storage(
+        match atomic_replace(&self.path, ".reader-positions-", ".tmp", &payload) {
+            Ok(()) => Ok(()),
+            Err(AtomicReplaceError::Prepare) => Err(StoreError::Storage(
+                "could not create a reader position file",
+            )),
+            Err(AtomicReplaceError::Replace) => Err(StoreError::Storage(
                 "could not atomically replace reader_positions.json",
-            ));
-        }
-
-        sync_directory(parent).map_err(|_| {
-            StoreError::Durability(
+            )),
+            Err(AtomicReplaceError::Durability) => Err(StoreError::Durability(
                 "reader_positions.json was replaced but its directory could not be synced",
-            )
-        })
+            )),
+        }
     }
 }
 
