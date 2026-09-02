@@ -284,7 +284,6 @@ describe("GuideReaderPage position lifecycle", () => {
     scrollHeight: number,
     options: {
       loadGuideLibrary?: (appId: string) => Promise<GuideLibraryEntry[]>;
-      onBrowseSteamGuides?: (appId: string) => Promise<void>;
       onSwitchGuide?: (identity: GuideIdentity) => Promise<void>;
     } = {},
   ): Promise<HTMLElement> => {
@@ -298,9 +297,6 @@ describe("GuideReaderPage position lifecycle", () => {
           fetchImage={fetchImage}
           imageCacheControl={new ReaderImageCacheControl()}
           loadGuideLibrary={options.loadGuideLibrary ?? (async () => [])}
-          onBrowseSteamGuides={
-            options.onBrowseSteamGuides ?? (async () => undefined)
-          }
           onClose={() => undefined}
           onRepairPositions={async () => ""}
           onSwitchGuide={options.onSwitchGuide ?? (async () => undefined)}
@@ -510,10 +506,8 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(persistedPosition.scrollTop).toBe(4_600);
   });
 
-  it("keeps Steam discovery in the reader until the current position saves", async () => {
+  it("keeps the current guide non-interactive in the switcher", async () => {
     const guide = guideFixture();
-    const actions: string[] = [];
-    let failSave = true;
     const backend: ReaderSessionBackend = {
       getCachedGuide: async () => guide,
       getGuide: async () => guide,
@@ -524,29 +518,17 @@ describe("GuideReaderPage position lifecycle", () => {
         sectionId,
         anchorText,
         anchorOffset,
-      ) => {
-        if (failSave) {
-          actions.push("save failed");
-          throw new Error("disk full");
-        }
-        actions.push("save");
-        return {
-          scrollTop,
-          sectionId,
-          anchorText,
-          anchorOffset,
-          updatedAt: 2,
-        };
-      },
+      ) => ({
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+        updatedAt: 2,
+      }),
     };
     const cache = new ReaderSessionCache(backend);
     await cache.load(identity);
-    const browse = vi.fn(async (appId: string) => {
-      actions.push(`browse ${appId}`);
-    });
-    await mount(cache, async () => null, 12_000, {
-      onBrowseSteamGuides: browse,
-    });
+    await mount(cache, async () => null, 12_000);
 
     await act(async () => buttonNamed("切换指南").click());
     await flushFrame();
@@ -559,28 +541,6 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(
       container?.querySelector('button[aria-label^="正在阅读："]'),
     ).toBeNull();
-
-    await act(async () => buttonNamed("查找更多 Steam 指南").click());
-    await flushMicrotasks();
-    expect(browse).not.toHaveBeenCalled();
-    expect(container?.textContent).toContain(
-      "当前指南位置保存失败，未打开 Steam 指南。",
-    );
-    const saveAlert = [
-      ...(container?.querySelectorAll('[role="alert"]') ?? []),
-    ].find((alert) => alert.textContent?.includes("阅读位置保存失败"));
-    expect(saveAlert?.getAttribute("aria-hidden")).toBe("true");
-    expect(saveAlert?.hasAttribute("inert")).toBe(true);
-
-    failSave = false;
-    await act(async () => buttonNamed("查找更多 Steam 指南").click());
-    await flushMicrotasks();
-    expect(browse).toHaveBeenCalledWith(identity.appId);
-    expect(actions).toEqual([
-      "save failed",
-      "save",
-      `browse ${identity.appId}`,
-    ]);
   });
 
   it("keeps an active guide filter across switcher reopen", async () => {
@@ -657,51 +617,6 @@ describe("GuideReaderPage position lifecycle", () => {
     ).toBe("另一篇");
     expect(container?.textContent).toContain("另一篇指南");
     expect(loadGuideLibrary).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not browse after the switcher closes while save is pending", async () => {
-    const guide = guideFixture();
-    let resolveSave!: (position: ReaderPosition) => void;
-    const save = vi.fn(
-      () =>
-        new Promise<ReaderPosition>((resolve) => {
-          resolveSave = resolve;
-        }),
-    );
-    const backend: ReaderSessionBackend = {
-      getCachedGuide: async () => guide,
-      getGuide: async () => guide,
-      getReaderPosition: async () => null,
-      saveReaderPosition: save,
-    };
-    const cache = new ReaderSessionCache(backend);
-    await cache.load(identity);
-    const browse = vi.fn(async () => undefined);
-    await mount(cache, async () => null, 12_000, {
-      onBrowseSteamGuides: browse,
-    });
-
-    await act(async () => buttonNamed("切换指南").click());
-    await flushMicrotasks();
-    await act(async () => buttonNamed("查找更多 Steam 指南").click());
-    await flushMicrotasks();
-    expect(save).toHaveBeenCalledOnce();
-    expect(browse).not.toHaveBeenCalled();
-
-    await act(async () => buttonNamed("关闭").click());
-    await act(async () => {
-      resolveSave({
-        scrollTop: 0,
-        sectionId: "1",
-        anchorText: "重复锚点",
-        anchorOffset: 0,
-        updatedAt: 2,
-      });
-      await Promise.resolve();
-    });
-    await flushMicrotasks();
-
-    expect(browse).not.toHaveBeenCalled();
   });
 
   it("opens the guide switcher with Options and restores reader focus", async () => {

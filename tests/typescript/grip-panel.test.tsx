@@ -134,7 +134,6 @@ describe("GripPanel", () => {
           loadGuideLibrary={async () => options.guides ?? []}
           openGuide={async () => undefined}
           openReader={async () => undefined}
-          openSteamGuides={async () => undefined}
           performance={new ReaderPerformanceTracker()}
           removeGuideCache={async () => ({
             bytesRemoved: 0,
@@ -250,7 +249,6 @@ describe("GripPanel", () => {
     });
 
     expect(panelText()).toContain("继续当前或最近指南");
-    expect(panelText()).toContain("查找更多 Steam 指南");
     expect(panelText()).toContain("完整攻略");
     expect(panelText()).not.toContain("筛选指南");
     expect(panelText()).not.toContain("仅看收藏");

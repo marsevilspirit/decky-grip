@@ -31,7 +31,6 @@ export interface GripPanelProps {
   status: RuntimeStatusStore;
   openReader: () => Promise<void>;
   openGuide: (identity: GuideIdentity) => Promise<void>;
-  openSteamGuides: () => Promise<void>;
   loadGuideLibrary: (appId: string | null) => Promise<GuideLibraryEntry[]>;
   retryPositions: () => Promise<boolean>;
   performance: ReaderPerformanceTracker;
@@ -98,7 +97,6 @@ export function GripPanel({
   status: statusStore,
   openReader,
   openGuide,
-  openSteamGuides,
   loadGuideLibrary,
   retryPositions,
   performance,
@@ -337,22 +335,6 @@ export function GripPanel({
             优先继续当前游戏正在查看的指南
           </ButtonItem>
         </PanelSectionRow>
-        {status.guideLibraryAppId !== null && (
-          <PanelSectionRow>
-            <ButtonItem
-              disabled={readerBusy !== null || cacheBusy}
-              label={
-                readerBusy === "discovery"
-                  ? "正在打开 Steam 指南…"
-                  : "查找更多 Steam 指南"
-              }
-              layout="below"
-              onClick={() => runOpen("discovery", openSteamGuides)}
-            >
-              浏览当前游戏的社区指南；选择后可回到 GRIP 阅读
-            </ButtonItem>
-          </PanelSectionRow>
-        )}
         {status.positionWarning && (
           <PanelSectionRow>
             <div style={{ color: "#f0b35a" }}>

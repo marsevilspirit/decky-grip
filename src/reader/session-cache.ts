@@ -236,7 +236,7 @@ export class ReaderSessionCache {
 
   rememberAccess(
     identity: GuideIdentity,
-    position: ReaderPosition | null,
+    position: CapturedReaderPosition | null,
   ): Promise<ReaderPosition> {
     const guideKey = makeGuideKey(identity);
     const latestPosition = this.snapshots.get(guideKey)?.position ?? position;

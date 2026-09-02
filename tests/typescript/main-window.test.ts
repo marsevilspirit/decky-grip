@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from "vitest";
 import {
   mainWindowPath,
   navigateMainWindow,
-  openSteamGuideLibrary,
   returnToRunningAppMainWindow,
   type GripMainWindow,
 } from "../../src/steam/main-window";
@@ -34,31 +33,6 @@ describe("Steam main-window navigation", () => {
       NavigateToRunningApp: navigateToRunningApp,
     });
     expect(navigateToRunningApp).toHaveBeenCalledWith(true);
-  });
-
-  it("opens the current game's guide list after clearing the selected guide", () => {
-    const setSelectedGuide = vi.fn();
-    const navigate = vi.fn();
-    const closeSideMenus = vi.fn();
-    openSteamGuideLibrary(
-      {
-        MenuStore: {
-          CloseSideMenus: closeSideMenus,
-          MainMenuStore: { SetSelectedGuide: setSelectedGuide },
-        },
-        Navigate: navigate,
-      },
-      "1113000",
-    );
-
-    expect(setSelectedGuide).toHaveBeenCalledWith(1113000, null);
-    expect(navigate).toHaveBeenCalledWith("/app/1113000/overlay/guides", false);
-    expect(setSelectedGuide.mock.invocationCallOrder[0]).toBeLessThan(
-      navigate.mock.invocationCallOrder[0],
-    );
-    expect(navigate.mock.invocationCallOrder[0]).toBeLessThan(
-      closeSideMenus.mock.invocationCallOrder[0],
-    );
   });
 
   it("falls back to replacing the running-app route", () => {

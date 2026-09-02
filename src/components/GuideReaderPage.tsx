@@ -150,7 +150,6 @@ export interface GuideReaderPageProps {
   fetchImage: GuideImageFetcher;
   imageCacheControl: ReaderImageCacheControl;
   loadGuideLibrary: (appId: string) => Promise<GuideLibraryEntry[]>;
-  onBrowseSteamGuides: (appId: string) => Promise<void>;
   onClose: () => void;
   onRepairPositions: () => Promise<string>;
   onSwitchGuide: (identity: GuideIdentity) => Promise<void>;
@@ -167,7 +166,6 @@ export function GuideReaderPage({
   fetchImage,
   imageCacheControl,
   loadGuideLibrary,
-  onBrowseSteamGuides,
   onClose,
   onRepairPositions,
   onSwitchGuide,
@@ -1177,41 +1175,6 @@ export function GuideReaderPage({
     }
   };
 
-  const browseSteamGuides = async () => {
-    if (!identity || switchPending !== null) {
-      return;
-    }
-    stopGuideSearchAlignment();
-    const request = {};
-    switchRequestRef.current = request;
-    setSwitchPending("browse");
-    setGuideSwitcherError(null);
-    try {
-      if (saveTimerRef.current !== null) {
-        clearTimeout(saveTimerRef.current);
-        saveTimerRef.current = null;
-      }
-      if (!(await persistPosition())) {
-        if (switchRequestRef.current === request) {
-          setGuideSwitcherError("当前指南位置保存失败，未打开 Steam 指南。");
-        }
-        return;
-      }
-      if (switchRequestRef.current === request) {
-        await onBrowseSteamGuides(identity.appId);
-      }
-    } catch (reason: unknown) {
-      if (switchRequestRef.current === request) {
-        setGuideSwitcherError(`Steam 指南打开失败：${errorMessage(reason)}`);
-      }
-    } finally {
-      if (switchRequestRef.current === request) {
-        switchRequestRef.current = null;
-        setSwitchPending(null);
-      }
-    }
-  };
-
   const retryReaderPosition = async (repair: boolean) => {
     if (!identity || positionRepairBusy) {
       return;
@@ -1654,17 +1617,9 @@ export function GuideReaderPage({
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 24, fontWeight: 700 }}>本游戏指南</div>
               <div style={{ opacity: 0.7 }}>
-                仅显示 AppID {identity.appId}；更多指南先在 Steam 中打开一次
+                仅显示 AppID {identity.appId} 的已记录指南
               </div>
             </div>
-            <Button
-              disabled={switchPending !== null}
-              onClick={() => void browseSteamGuides()}
-            >
-              {switchPending === "browse"
-                ? "正在打开 Steam 指南…"
-                : "查找更多 Steam 指南"}
-            </Button>
             <Button
               onClick={closeGuideSwitcher}
               preferredFocus

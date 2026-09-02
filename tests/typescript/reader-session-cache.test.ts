@@ -108,9 +108,10 @@ describe("ReaderSessionCache", () => {
     const cache = new ReaderSessionCache(injected);
     const loaded = await cache.load(identity);
     const firstOpen = { appId: identity.appId, guideId: "3414883878" };
+    const handoff = capturedPosition(333);
 
     await cache.rememberAccess(identity, loaded.position);
-    await cache.rememberAccess(firstOpen, null);
+    await cache.rememberAccess(firstOpen, handoff);
 
     expect(injected.saveReaderPosition).toHaveBeenNthCalledWith(
       1,
@@ -123,10 +124,10 @@ describe("ReaderSessionCache", () => {
     expect(injected.saveReaderPosition).toHaveBeenNthCalledWith(
       2,
       `${firstOpen.appId}:${firstOpen.guideId}`,
-      0,
-      null,
-      null,
-      0,
+      handoff.scrollTop,
+      handoff.sectionId,
+      handoff.anchorText,
+      handoff.anchorOffset,
     );
   });
 

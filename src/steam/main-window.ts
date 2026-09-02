@@ -2,12 +2,7 @@ import type { FocusWindow } from "../hotkey/focus-guard";
 
 export interface GripMainWindow extends FocusWindow {
   History?: { location?: { pathname?: unknown } };
-  MenuStore?: {
-    CloseSideMenus?: () => void;
-    MainMenuStore?: {
-      SetSelectedGuide?: (appId: number, guideId: string | null) => void;
-    };
-  };
+  MenuStore?: { CloseSideMenus?: () => void };
   Navigate?: (
     path: string,
     replace?: boolean,
@@ -48,14 +43,6 @@ export function returnToRunningAppMainWindow(
     return;
   }
   navigateMainWindow(mainWindow, "/apprunning", true);
-}
-
-export function openSteamGuideLibrary(
-  mainWindow: GripMainWindow | null,
-  appId: string,
-): void {
-  mainWindow?.MenuStore?.MainMenuStore?.SetSelectedGuide?.(Number(appId), null);
-  navigateMainWindow(mainWindow, `/app/${appId}/overlay/guides`);
 }
 
 function closeSideMenus(mainWindow: GripMainWindow): void {

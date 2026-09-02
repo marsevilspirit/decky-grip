@@ -75,21 +75,18 @@ Python tests use only the standard library.
 
 ## Using GRIP Reader
 
-1. Open a Steam Community guide and leave it on the paragraph you want. For the
-   first handoff, keep the guide visible and open Decky with the Quick Access
-   button.
+1. Open a Steam Community guide, scroll to the paragraph you want, then choose
+   **下载正文到 GRIP**. Images continue to cache on demand while reading.
 2. Select **GRIP**, then choose **继续当前或最近指南**, or open a specific
    entry from **指南库**. Important guides can be kept at the top with the
    local **收藏** switch. Open **高级选项** to download or update missing or
    stale guide bodies without opening the reader, and to manage local caches;
-   filtering never contacts Steam. Choose **查找更多 Steam 指南** to open the
-   running game's native guide list.
+   filtering never contacts Steam.
 3. Scroll normally in the full-screen reader. Press **Options** or choose
    **切换指南** to open the current game's guide list; **上一篇** and
    **下一篇** move through that list directly. Choose **搜索** to find local
    guide titles, chapters, or body text, preview matching context, and step
-   through highlighted matches. Choose **查找更多 Steam 指南** to return
-   to the native guide list. GRIP saves each guide's visible text and exact
+   through highlighted matches. GRIP saves each guide's visible text and exact
    viewport offset independently.
 4. For instant in-game access after that first handoff, map the upper-left
    rear button **L4** to **Scroll Lock** in the game's Steam Input layout. Press
@@ -97,9 +94,13 @@ Python tests use only the standard library.
    physical L4 button directly; the Scroll Lock mapping simply prevents the
    button from also performing a common game action.
 
-The first foreground open downloads the public guide. After that, GRIP preloads
-the most recent guide only when its validated local cache already exists, and
-keeps that document and reader position in memory for the lifetime of the plugin.
+GRIP leaves discovery to Steam's native guide list. The download action appears
+only while a specific native guide is open.
+
+The download action fetches the public guide; if you skip it, the first
+foreground reader open does the same. After that, GRIP preloads the most recent
+guide only when its validated local cache already exists, and keeps that document
+and reader position in memory for the lifetime of the plugin.
 Background preloading never starts a network request. A cache older than six
 hours still opens immediately; use **更新** when you want to fetch the newest
 version. Large guides mount one bounded section first and append bounded batches

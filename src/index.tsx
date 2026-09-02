@@ -22,6 +22,7 @@ import {
   savePosition,
   saveReaderPosition,
 } from "./backend";
+import { GuideDownloadButton } from "./components/GuideDownloadButton";
 import { GuideReaderPage } from "./components/GuideReaderPage";
 import { GripPanel } from "./components/GripPanel";
 import { GripController } from "./grip-controller";
@@ -48,13 +49,13 @@ import { makeGuideKey, type GuideIdentity } from "./steam/guide-key";
 import {
   mainWindowPath,
   navigateMainWindow,
-  openSteamGuideLibrary,
   returnToRunningAppMainWindow,
 } from "./steam/main-window";
 import { getMainWindow } from "./steam/main-window-store";
 import { createSteamGuideRuntime } from "./steam/runtime";
 
 const READER_ROUTE = "/decky-grip/reader/:appId/:guideId";
+const GUIDE_DOWNLOAD_COMPONENT = "decky-grip-guide-download";
 
 function currentMainPath(): string | null {
   return mainWindowPath(getMainWindow());
@@ -351,20 +352,21 @@ export default definePlugin(() => {
 
   const clearGuides = () => mutateGuideCache(clearGuideCache);
 
-  const openSteamGuides = async (requestedAppId?: string): Promise<void> => {
-    const appId = requestedAppId ?? currentRunningAppId();
-    if (!appId) {
-      throw new Error("请先运行一个游戏，再浏览它的 Steam 指南");
+  const cacheGuide = async (identity: GuideIdentity, forceRefresh = true) => {
+    const handoff = controller.captureReaderHandoff(identity);
+    const snapshot = await readerCache.load(identity, { forceRefresh });
+    if (mounted) {
+      try {
+        await readerCache.rememberAccess(
+          identity,
+          snapshot.position ?? handoff,
+        );
+      } catch (error: unknown) {
+        status.refreshGuideLibrary();
+        throw error;
+      }
     }
-    openSteamGuideLibrary(getMainWindow(), appId);
-  };
-
-  const cacheGuide = async (identity: GuideIdentity) => {
-    try {
-      return (await readerCache.load(identity, { forceRefresh: true })).guide;
-    } finally {
-      status.refreshGuideLibrary();
-    }
+    return snapshot.guide;
   };
 
   const removeGuide = (guideId: string) =>
@@ -409,7 +411,6 @@ export default definePlugin(() => {
         imageCacheControl={imageCacheControl}
         key={`${params.appId ?? ""}:${params.guideId ?? ""}`}
         loadGuideLibrary={getGuideLibrary}
-        onBrowseSteamGuides={openSteamGuides}
         onClose={closeReader}
         onRepairPositions={repairPositions}
         onSwitchGuide={(identity) => openReader(undefined, identity)}
@@ -418,6 +419,12 @@ export default definePlugin(() => {
     );
   };
   routerHook.addRoute(READER_ROUTE, ReaderRoute);
+  routerHook.addGlobalComponent(GUIDE_DOWNLOAD_COMPONENT, () => (
+    <GuideDownloadButton
+      downloadGuide={(identity) => cacheGuide(identity, false)}
+      status={status}
+    />
+  ));
 
   let lifetimeRegistration: { unregister(): void } | undefined;
   try {
@@ -501,7 +508,6 @@ export default definePlugin(() => {
         loadGuideLibrary={getGuideLibrary}
         openGuide={(identity) => openReader(undefined, identity)}
         openReader={openReader}
-        openSteamGuides={openSteamGuides}
         performance={readerPerformance}
         repairPositions={repairPositions}
         removeGuideCache={removeGuide}
@@ -512,6 +518,7 @@ export default definePlugin(() => {
     icon: <BookmarkIcon />,
     onDismount() {
       mounted = false;
+      routerHook.removeGlobalComponent(GUIDE_DOWNLOAD_COMPONENT);
       stopPreloading();
       readerPerformance.clear();
       readerCache.clear();
