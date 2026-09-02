@@ -84,8 +84,11 @@ Python tests use only the standard library.
    stale guide bodies without opening the reader, and to manage local caches;
    filtering never contacts Steam. Choose **查找更多 Steam 指南** to open the
    running game's native guide list.
-3. Scroll normally in the full-screen reader. Use **切换指南** to move between
-   guides for the same game, or choose **查找更多 Steam 指南** there to return
+3. Scroll normally in the full-screen reader. Press **Options** or choose
+   **切换指南** to open the current game's guide list; **上一篇** and
+   **下一篇** move through that list directly. Choose **搜索** to find local
+   guide titles, chapters, or body text, preview matching context, and step
+   through highlighted matches. Choose **查找更多 Steam 指南** to return
    to the native guide list. GRIP saves each guide's visible text and exact
    viewport offset independently.
 4. For instant in-game access after that first handoff, map the upper-left

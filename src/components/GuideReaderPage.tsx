@@ -12,6 +12,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -42,6 +43,13 @@ import {
   filterGuideLibraryEntries,
   guideChoicesForReader,
 } from "../reader/recent-guide";
+import {
+  buildGuideSearchIndex,
+  locateGuideSearchRange,
+  searchGuideIndex,
+  type GuideSearchIndex,
+  type GuideSearchResult,
+} from "../reader/search";
 import { shortSectionTitle } from "../reader/toc-title";
 import { makeGuideKey, type GuideIdentity } from "../steam/guide-key";
 
@@ -51,8 +59,12 @@ const RESTORE_TIMEOUT_MS = 10_000;
 const LOADING_INDICATOR_DELAY_MS = 180;
 const MAX_OBSERVED_GUIDE_IMAGES = 512;
 const SECTION_RENDER_BATCH = 8;
+const SEARCH_HIGHLIGHT_MS = 1_800;
+const SEARCH_ALIGNMENT_TIMEOUT_MS = RESTORE_TIMEOUT_MS;
+const SEARCH_SCROLL_MARGIN = 48;
 const READER_CSS = `
 .grip-reader-content { color: #dcdedf; font-size: 18px; line-height: 1.55; padding: 10px 34px 80px; }
+.grip-reader-content ::selection, .grip-reader-guide-title::selection { background: #f3c64b; color: #101820; }
 .grip-reader-content img { display: block; max-width: 100%; height: auto; margin: 14px auto; border-radius: 4px; }
 .grip-reader-content img[data-grip-image-url]:not([src]) { background: #17212b; min-height: 48px; opacity: 0.55; }
 .grip-reader-content img[data-grip-image-state="unavailable"] { border: 1px dashed #6b747d; }
@@ -85,6 +97,19 @@ function focusWithoutScrolling(element: HTMLElement | null | undefined): void {
   }
 }
 
+function selectionMatchesRange(selection: Selection, range: Range): boolean {
+  if (selection.rangeCount !== 1) {
+    return false;
+  }
+  const selected = selection.getRangeAt(0);
+  return (
+    selected.startContainer === range.startContainer &&
+    selected.startOffset === range.startOffset &&
+    selected.endContainer === range.endContainer &&
+    selected.endOffset === range.endOffset
+  );
+}
+
 function guideChoiceDetails(entry: GuideLibraryEntry): string {
   return [
     entry.favorite ? "已收藏" : null,
@@ -98,6 +123,10 @@ function guideChoiceDetails(entry: GuideLibraryEntry): string {
   ]
     .filter((detail): detail is string => detail !== null)
     .join(" · ");
+}
+
+function compareGuideIds(left: string, right: string): number {
+  return left.length - right.length || left.localeCompare(right);
 }
 
 function readIdentity(
@@ -170,6 +199,10 @@ export function GuideReaderPage({
   const [switchPending, setSwitchPending] = useState<string | null>(null);
   const [guideFilter, setGuideFilter] = useState("");
   const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [guideSearchOpen, setGuideSearchOpen] = useState(false);
+  const [guideSearchQuery, setGuideSearchQuery] = useState("");
+  const [activeGuideSearchResultIndex, setActiveGuideSearchResultIndex] =
+    useState<number | null>(null);
   const [sectionRenderState, setSectionRenderState] =
     useState<SectionRenderState>(() => ({
       guide: initialSnapshot?.guide ?? null,
@@ -178,10 +211,23 @@ export function GuideReaderPage({
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const guideSwitcherCloseRef = useRef<HTMLDivElement | null>(null);
   const guideSwitcherButtonRef = useRef<HTMLDivElement | null>(null);
+  const guideSwitcherReturnFocusRef = useRef<HTMLElement | null>(null);
+  const guideSearchButtonRef = useRef<HTMLDivElement | null>(null);
+  const guideTitleRef = useRef<HTMLDivElement | null>(null);
+  const guideSearchIndexRef = useRef<{
+    guide: ReaderSessionSnapshot["guide"];
+    index: GuideSearchIndex;
+  } | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const anchorIndexRef = useRef<ReaderAnchorIndex | null>(null);
   const anchorGuideRef = useRef<ReaderSessionSnapshot["guide"] | null>(null);
   const pendingSectionJumpRef = useRef<string | null>(null);
+  const pendingGuideSearchJumpRef = useRef<GuideSearchResult | null>(null);
+  const guideSearchHighlightRangeRef = useRef<Range | null>(null);
+  const guideSearchHighlightTimerRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
+  const guideSearchAlignmentStopRef = useRef<(() => void) | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [imageHydrator] = useState(() => new ReaderImageHydrator(fetchImage));
   const [checkpoint] = useState(() => new ReaderCheckpoint());
@@ -196,13 +242,88 @@ export function GuideReaderPage({
   loadedRef.current = loaded;
   const switchRequestRef = useRef<object | null>(null);
 
+  const stopGuideSearchAlignment = () => {
+    guideSearchAlignmentStopRef.current?.();
+    guideSearchAlignmentStopRef.current = null;
+  };
+
+  const clearGuideSearchHighlight = () => {
+    if (guideSearchHighlightTimerRef.current !== null) {
+      clearTimeout(guideSearchHighlightTimerRef.current);
+      guideSearchHighlightTimerRef.current = null;
+    }
+    const range = guideSearchHighlightRangeRef.current;
+    guideSearchHighlightRangeRef.current = null;
+    const selection = window.getSelection();
+    if (range && selection && selectionMatchesRange(selection, range)) {
+      selection.removeAllRanges();
+    }
+  };
+
+  const highlightGuideSearchRange = (range: Range) => {
+    clearGuideSearchHighlight();
+    const selection = window.getSelection();
+    if (!selection) {
+      return;
+    }
+    selection.removeAllRanges();
+    selection.addRange(range);
+    guideSearchHighlightRangeRef.current = range;
+    guideSearchHighlightTimerRef.current = setTimeout(
+      clearGuideSearchHighlight,
+      SEARCH_HIGHLIGHT_MS,
+    );
+  };
+
+  const openGuideSwitcher = () => {
+    if (guideSwitcherOpen) {
+      return;
+    }
+    guideSwitcherReturnFocusRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    setGuideSearchOpen(false);
+    setGuideSwitcherOpen(true);
+  };
+
   const closeGuideSwitcher = () => {
     switchRequestRef.current = null;
     setSwitchPending(null);
     setGuideSwitcherOpen(false);
+    const returnFocus = guideSwitcherReturnFocusRef.current;
+    guideSwitcherReturnFocusRef.current = null;
     requestAnimationFrame(() => {
-      const target = guideSwitcherButtonRef.current ?? scrollerRef.current;
+      const target =
+        returnFocus?.isConnected === true
+          ? returnFocus
+          : (guideSwitcherButtonRef.current ?? scrollerRef.current);
       focusWithoutScrolling(target);
+    });
+  };
+
+  const openGuideSearch = () => {
+    const guide = loaded?.guide;
+    if (!guide || loading || refreshPending) {
+      return;
+    }
+    if (guideSearchIndexRef.current?.guide !== guide) {
+      // ponytail: build the bounded index on demand; split it across frames only
+      // if Steam Deck profiling shows a visible first-search stall.
+      guideSearchIndexRef.current = {
+        guide,
+        index: buildGuideSearchIndex(guide),
+      };
+    }
+    setGuideSearchOpen(true);
+  };
+
+  const closeGuideSearch = () => {
+    setGuideSearchOpen(false);
+    requestAnimationFrame(() => {
+      focusWithoutScrolling(
+        guideSearchButtonRef.current ?? scrollerRef.current,
+      );
     });
   };
 
@@ -211,6 +332,8 @@ export function GuideReaderPage({
     event.stopPropagation();
     if (guideSwitcherOpen) {
       closeGuideSwitcher();
+    } else if (guideSearchOpen) {
+      closeGuideSearch();
     } else {
       onClose();
     }
@@ -291,7 +414,7 @@ export function GuideReaderPage({
   }, [guideSwitcherOpen]);
 
   useEffect(() => {
-    if (!guideSwitcherOpen || !identity) {
+    if (!identity) {
       return;
     }
     let canceled = false;
@@ -311,16 +434,25 @@ export function GuideReaderPage({
     return () => {
       canceled = true;
     };
-  }, [
-    guideSwitcherOpen,
-    guideSwitcherRevision,
-    identity?.appId,
-    loadGuideLibrary,
-  ]);
+  }, [guideSwitcherRevision, identity?.appId, loadGuideLibrary]);
+
+  useEffect(() => {
+    if (guideSearchIndexRef.current?.guide !== loaded?.guide) {
+      guideSearchIndexRef.current = null;
+      pendingGuideSearchJumpRef.current = null;
+      stopGuideSearchAlignment();
+      clearGuideSearchHighlight();
+      setGuideSearchOpen(false);
+      setGuideSearchQuery("");
+      setActiveGuideSearchResultIndex(null);
+    }
+  }, [loaded?.guide]);
 
   useEffect(
     () => () => {
       switchRequestRef.current = null;
+      stopGuideSearchAlignment();
+      clearGuideSearchHighlight();
     },
     [identity?.appId, identity?.guideId],
   );
@@ -913,6 +1045,7 @@ export function GuideReaderPage({
     }
     event.preventDefault();
     event.stopPropagation();
+    stopGuideSearchAlignment();
     failAndCancelRestore("用户在阅读位置稳定前翻页");
     checkpoint.intendScroll();
     scroller.scrollTop = nextScrollTop;
@@ -947,6 +1080,7 @@ export function GuideReaderPage({
     if (refreshPending || loading) {
       return;
     }
+    stopGuideSearchAlignment();
     imageCacheControl.resume();
     setRefreshPending(true);
     if (!restoringRef.current) {
@@ -964,9 +1098,11 @@ export function GuideReaderPage({
   };
 
   const switchGuide = async (entry: GuideLibraryEntry) => {
-    if (!identity || switchPending !== null) {
+    if (!identity || entry.appId !== identity.appId || switchPending !== null) {
       return;
     }
+
+    stopGuideSearchAlignment();
 
     const target = { appId: identity.appId, guideId: entry.guideId };
     const targetKey = makeGuideKey(target);
@@ -1012,6 +1148,7 @@ export function GuideReaderPage({
     if (!identity || switchPending !== null) {
       return;
     }
+    stopGuideSearchAlignment();
     const request = {};
     switchRequestRef.current = request;
     setSwitchPending("browse");
@@ -1046,6 +1183,7 @@ export function GuideReaderPage({
     if (!identity || positionRepairBusy) {
       return;
     }
+    stopGuideSearchAlignment();
     setPositionRepairBusy(true);
     try {
       const repairMessage = repair ? await onRepairPositions() : null;
@@ -1083,19 +1221,14 @@ export function GuideReaderPage({
     return false;
   };
 
-  const jumpToSection = (sectionId: string) => {
-    failAndCancelRestore("用户在阅读位置稳定前跳转章节");
-    if (scrollToRenderedSection(sectionId)) {
-      return;
-    }
+  const renderThroughSection = (sectionId: string): boolean => {
     const guide = loaded?.guide;
     const sectionIndex = guide?.sections.findIndex(
       (section) => section.id === sectionId,
     );
     if (!guide || sectionIndex === undefined || sectionIndex < 0) {
-      return;
+      return false;
     }
-    pendingSectionJumpRef.current = sectionId;
     setSectionRenderState((current) => ({
       guide,
       count:
@@ -1103,6 +1236,18 @@ export function GuideReaderPage({
           ? Math.max(current.count, sectionIndex + 1)
           : sectionIndex + 1,
     }));
+    return true;
+  };
+
+  const jumpToSection = (sectionId: string) => {
+    stopGuideSearchAlignment();
+    failAndCancelRestore("用户在阅读位置稳定前跳转章节");
+    if (scrollToRenderedSection(sectionId)) {
+      return;
+    }
+    if (renderThroughSection(sectionId)) {
+      pendingSectionJumpRef.current = sectionId;
+    }
   };
 
   useLayoutEffect(() => {
@@ -1111,6 +1256,172 @@ export function GuideReaderPage({
       pendingSectionJumpRef.current = null;
     }
   }, [renderedSectionCount]);
+
+  const scrollToGuideSearchResult = (result: GuideSearchResult): boolean => {
+    const scroller = scrollerRef.current;
+    if (!scroller) {
+      return false;
+    }
+    anchorIndexRef.current?.refresh();
+    const section = result.sectionId
+      ? (anchorIndexRef.current?.sectionElement(result.sectionId) ?? null)
+      : null;
+    const target =
+      result.kind === "guide-title"
+        ? guideTitleRef.current
+        : result.kind === "section-title"
+          ? section?.querySelector<HTMLElement>(".grip-reader-section-title")
+          : section?.querySelector<HTMLElement>("[data-guide-search-body]");
+    if (!target) {
+      return false;
+    }
+    const range = locateGuideSearchRange(
+      target,
+      guideSearchQuery,
+      result.occurrence,
+    );
+    if (!range) {
+      return false;
+    }
+
+    stopGuideSearchAlignment();
+    highlightGuideSearchRange(range);
+    const align = (force: boolean) => {
+      if (!range.startContainer.isConnected) {
+        return;
+      }
+      const nextScrollTop =
+        result.kind === "guide-title"
+          ? 0
+          : Math.max(
+              0,
+              Math.min(
+                scroller.scrollTop +
+                  range.getBoundingClientRect().top -
+                  scroller.getBoundingClientRect().top -
+                  SEARCH_SCROLL_MARGIN,
+                Math.max(0, scroller.scrollHeight - scroller.clientHeight),
+              ),
+            );
+      if (!force && Math.abs(nextScrollTop - scroller.scrollTop) <= 1) {
+        return;
+      }
+      checkpoint.intendScroll();
+      scroller.scrollTop = nextScrollTop;
+      onScroll();
+    };
+    align(true);
+
+    const content = contentRef.current;
+    if (result.kind !== "guide-title" && content) {
+      const onLayoutChange = () => align(false);
+      const observer = new ResizeObserver(onLayoutChange);
+      let stopped = false;
+      let deadline: ReturnType<typeof setTimeout> | null = null;
+      const interactionEvents = [
+        "wheel",
+        "touchmove",
+        "pointerdown",
+        "keydown",
+      ];
+      const stop = () => {
+        if (stopped) {
+          return;
+        }
+        stopped = true;
+        if (deadline !== null) {
+          clearTimeout(deadline);
+        }
+        observer.disconnect();
+        content.removeEventListener("load", onLayoutChange, true);
+        content.removeEventListener("error", onLayoutChange, true);
+        for (const event of interactionEvents) {
+          scroller.removeEventListener(event, onInteraction, true);
+        }
+        if (imageViewportChangeRef.current === onLayoutChange) {
+          imageViewportChangeRef.current = () => undefined;
+        }
+        if (guideSearchAlignmentStopRef.current === stop) {
+          guideSearchAlignmentStopRef.current = null;
+        }
+      };
+      const onInteraction = (event: Event) => {
+        if (isReaderScrollInteraction(event, scroller)) {
+          stop();
+        }
+      };
+      observer.observe(content);
+      content.addEventListener("load", onLayoutChange, true);
+      content.addEventListener("error", onLayoutChange, true);
+      for (const event of interactionEvents) {
+        scroller.addEventListener(event, onInteraction, true);
+      }
+      imageViewportChangeRef.current = onLayoutChange;
+      guideSearchAlignmentStopRef.current = stop;
+      deadline = setTimeout(() => {
+        align(false);
+        stop();
+      }, SEARCH_ALIGNMENT_TIMEOUT_MS);
+    }
+    return true;
+  };
+
+  const jumpToGuideSearchResult = (
+    result: GuideSearchResult,
+    index: number,
+  ) => {
+    if (loading || refreshPending) {
+      return;
+    }
+    failAndCancelRestore("用户在阅读位置稳定前跳转搜索命中");
+    stopGuideSearchAlignment();
+    pendingGuideSearchJumpRef.current = result;
+    if (activeGuideSearchResultIndex !== index) {
+      setActiveGuideSearchResultIndex(index);
+      if (result.sectionId) {
+        renderThroughSection(result.sectionId);
+      }
+      return;
+    }
+    if (scrollToGuideSearchResult(result)) {
+      pendingGuideSearchJumpRef.current = null;
+    } else if (!result.sectionId || !renderThroughSection(result.sectionId)) {
+      pendingGuideSearchJumpRef.current = null;
+    }
+  };
+
+  useLayoutEffect(() => {
+    const pendingResult = pendingGuideSearchJumpRef.current;
+    if (pendingResult && scrollToGuideSearchResult(pendingResult)) {
+      pendingGuideSearchJumpRef.current = null;
+    }
+  }, [activeGuideSearchResultIndex, renderedSectionCount]);
+
+  const cachedGuideSearchIndex = guideSearchIndexRef.current;
+  const activeGuideSearchIndex =
+    cachedGuideSearchIndex && cachedGuideSearchIndex.guide === loaded?.guide
+      ? cachedGuideSearchIndex.index
+      : null;
+  const guideSearchResponse = useMemo(
+    () =>
+      activeGuideSearchIndex
+        ? searchGuideIndex(activeGuideSearchIndex, guideSearchQuery)
+        : { matches: [], truncated: false },
+    [activeGuideSearchIndex, guideSearchQuery],
+  );
+  const guideSearchResults = guideSearchResponse.matches;
+  const moveGuideSearchResult = (direction: -1 | 1) => {
+    const nextIndex =
+      activeGuideSearchResultIndex === null
+        ? direction === 1
+          ? 0
+          : -1
+        : activeGuideSearchResultIndex + direction;
+    const result = guideSearchResults[nextIndex];
+    if (result) {
+      jumpToGuideSearchResult(result, nextIndex);
+    }
+  };
 
   if (!identity) {
     return (
@@ -1153,12 +1464,42 @@ export function GuideReaderPage({
   const visibleGuideChoices = guideChoices
     ? filterGuideLibraryEntries(guideChoices, guideFilter, favoritesOnly)
     : null;
+  const stableGuideChoices = guideChoices
+    ? [...guideChoices].sort((left, right) =>
+        compareGuideIds(left.guideId, right.guideId),
+      )
+    : [];
+  const currentGuideIndex = stableGuideChoices.findIndex(
+    (entry) => entry.guideId === identity.guideId,
+  );
+  const previousGuide =
+    currentGuideIndex > 0 ? stableGuideChoices[currentGuideIndex - 1] : null;
+  const nextGuide =
+    currentGuideIndex >= 0 && currentGuideIndex + 1 < stableGuideChoices.length
+      ? stableGuideChoices[currentGuideIndex + 1]
+      : null;
   const readerWarning =
     restoreWarning ?? loadWarning ?? loaded?.positionWarning ?? null;
 
   return (
     <Focusable
       onCancel={cancelReader}
+      onOptionsActionDescription={
+        !guideSwitcherOpen && !guideSearchOpen && switchPending === null
+          ? "切换指南"
+          : undefined
+      }
+      onOptionsButton={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (
+          !event.detail.is_repeat &&
+          !guideSearchOpen &&
+          switchPending === null
+        ) {
+          openGuideSwitcher();
+        }
+      }}
       style={{
         background: "linear-gradient(180deg, #16202b 0%, #0d141c 100%)",
         color: "#dcdedf",
@@ -1183,15 +1524,57 @@ export function GuideReaderPage({
         <Button disabled={guideSwitcherOpen} onClick={onClose}>
           返回
         </Button>
+        {stableGuideChoices.length > 1 && (
+          <>
+            <Button
+              aria-label={
+                previousGuide
+                  ? `上一篇指南：${previousGuide.cache?.title ?? previousGuide.guideId}`
+                  : "没有上一篇指南"
+              }
+              disabled={
+                guideSwitcherOpen || switchPending !== null || !previousGuide
+              }
+              onClick={() => {
+                if (previousGuide) {
+                  openGuideSwitcher();
+                  void switchGuide(previousGuide);
+                }
+              }}
+            >
+              上一篇
+            </Button>
+            <Button
+              aria-label={
+                nextGuide
+                  ? `下一篇指南：${nextGuide.cache?.title ?? nextGuide.guideId}`
+                  : "没有下一篇指南"
+              }
+              disabled={
+                guideSwitcherOpen || switchPending !== null || !nextGuide
+              }
+              onClick={() => {
+                if (nextGuide) {
+                  openGuideSwitcher();
+                  void switchGuide(nextGuide);
+                }
+              }}
+            >
+              下一篇
+            </Button>
+          </>
+        )}
         <Button
           disabled={guideSwitcherOpen}
-          onClick={() => setGuideSwitcherOpen(true)}
+          onClick={openGuideSwitcher}
           ref={guideSwitcherButtonRef}
         >
           切换指南
         </Button>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div
+            className="grip-reader-guide-title"
+            ref={guideTitleRef}
             style={{
               fontSize: 22,
               fontWeight: 700,
@@ -1271,7 +1654,7 @@ export function GuideReaderPage({
             </div>
           )}
           {guideSwitcherError && (
-            <div style={{ color: "#ff8a8a", marginBottom: 16 }}>
+            <div role="alert" style={{ color: "#ff8a8a", marginBottom: 16 }}>
               <div>{guideSwitcherError}</div>
               <Button
                 disabled={switchPending !== null}
@@ -1456,50 +1839,166 @@ export function GuideReaderPage({
                     <div className="grip-reader-section-title">
                       {section.title}
                     </div>
-                    <div dangerouslySetInnerHTML={{ __html: section.html }} />
+                    <div
+                      data-guide-search-body
+                      dangerouslySetInnerHTML={{ __html: section.html }}
+                    />
                   </section>
                 ))}
             </div>
           </Focusable>
           <div
-            aria-label="指南目录"
+            aria-label={guideSearchOpen ? "指南搜索" : "指南目录"}
             className="grip-reader-toc"
-            role="navigation"
+            role={guideSearchOpen ? "search" : "navigation"}
             style={{
               background: "rgba(7, 12, 18, 0.48)",
               borderLeft: "1px solid #314252",
               boxSizing: "border-box",
-              flex: "0 0 88px",
+              flex: guideSearchOpen ? "0 0 320px" : "0 0 88px",
               overflowY: "auto",
               padding: "18px 6px",
             }}
           >
-            <Button
-              aria-label="更新指南"
-              disabled={loading || refreshPending}
-              onClick={() => void refreshGuide()}
-              style={{
-                boxSizing: "border-box",
-                fontSize: 16,
-                lineHeight: "22px",
-                marginBottom: 16,
-                minWidth: 0,
-                overflow: "hidden",
-                padding: "8px 2px",
-                whiteSpace: "nowrap",
-                width: "100%",
-              }}
-            >
-              {refreshPending ? "更新中…" : "更新"}
-            </Button>
-            {loaded.guide.sections
-              .slice(0, renderedSectionCount)
-              .map((section) => (
+            {guideSearchOpen ? (
+              <>
                 <Button
-                  aria-label={`跳转到章节：${section.title}`}
+                  onClick={closeGuideSearch}
+                  ref={guideSearchButtonRef}
+                  style={{
+                    boxSizing: "border-box",
+                    fontSize: 16,
+                    lineHeight: "22px",
+                    marginBottom: 12,
+                    minWidth: 0,
+                    overflow: "hidden",
+                    padding: "8px",
+                    width: "100%",
+                  }}
+                >
+                  关闭搜索
+                </Button>
+                <TextField
+                  bShowClearAction
+                  focusOnMount
+                  label="搜索指南正文"
+                  onChange={(event) => {
+                    pendingGuideSearchJumpRef.current = null;
+                    stopGuideSearchAlignment();
+                    clearGuideSearchHighlight();
+                    setActiveGuideSearchResultIndex(null);
+                    setGuideSearchQuery(event.currentTarget.value);
+                  }}
+                  value={guideSearchQuery}
+                />
+                {guideSearchQuery.trim().length === 0 ? (
+                  <div style={{ margin: "14px 8px", opacity: 0.72 }}>
+                    输入标题、章节或正文关键词。
+                  </div>
+                ) : guideSearchResults.length === 0 ? (
+                  <div style={{ margin: "14px 8px", opacity: 0.72 }}>
+                    没有匹配的正文。
+                  </div>
+                ) : (
+                  <>
+                    <div
+                      style={{
+                        alignItems: "center",
+                        display: "flex",
+                        gap: 6,
+                        margin: "12px 0",
+                      }}
+                    >
+                      <Button
+                        aria-label="上一个搜索命中"
+                        disabled={
+                          loading ||
+                          refreshPending ||
+                          activeGuideSearchResultIndex === null ||
+                          activeGuideSearchResultIndex === 0
+                        }
+                        onClick={() => moveGuideSearchResult(-1)}
+                      >
+                        上一个
+                      </Button>
+                      <div
+                        aria-live="polite"
+                        style={{ flex: 1, textAlign: "center" }}
+                      >
+                        {activeGuideSearchResultIndex === null
+                          ? `共 ${guideSearchResults.length} 个`
+                          : `${activeGuideSearchResultIndex + 1} / ${guideSearchResults.length}`}
+                      </div>
+                      <Button
+                        aria-label="下一个搜索命中"
+                        disabled={
+                          loading ||
+                          refreshPending ||
+                          activeGuideSearchResultIndex ===
+                            guideSearchResults.length - 1
+                        }
+                        onClick={() => moveGuideSearchResult(1)}
+                      >
+                        下一个
+                      </Button>
+                    </div>
+                    {guideSearchResponse.truncated && (
+                      <div
+                        role="status"
+                        style={{ margin: "8px", opacity: 0.72 }}
+                      >
+                        匹配过多，仅显示前 {guideSearchResults.length}{" "}
+                        个，请继续输入关键词。
+                      </div>
+                    )}
+                    {guideSearchResults.map((result, index) => (
+                      <Button
+                        aria-current={
+                          activeGuideSearchResultIndex === index
+                            ? "location"
+                            : undefined
+                        }
+                        aria-label={`跳转到搜索结果 ${index + 1}：${result.title}`}
+                        disabled={loading || refreshPending}
+                        key={`${result.kind}:${result.sectionId}:${result.occurrence}`}
+                        onClick={() => jumpToGuideSearchResult(result, index)}
+                        style={{
+                          boxSizing: "border-box",
+                          marginBottom: 8,
+                          minWidth: 0,
+                          padding: "10px",
+                          textAlign: "left",
+                          width: "100%",
+                        }}
+                      >
+                        <div style={{ fontWeight: 700 }}>{result.title}</div>
+                        <div style={{ fontSize: 13, opacity: 0.7 }}>
+                          {result.kind === "guide-title"
+                            ? "指南标题"
+                            : result.kind === "section-title"
+                              ? "章节标题"
+                              : "正文匹配"}
+                        </div>
+                        <div
+                          style={{
+                            fontSize: 13,
+                            marginTop: 4,
+                            opacity: 0.82,
+                          }}
+                        >
+                          {result.snippet}
+                        </div>
+                      </Button>
+                    ))}
+                  </>
+                )}
+              </>
+            ) : (
+              <>
+                <Button
                   disabled={loading || refreshPending}
-                  key={section.id}
-                  onClick={() => jumpToSection(section.id)}
+                  onClick={openGuideSearch}
+                  ref={guideSearchButtonRef}
                   style={{
                     boxSizing: "border-box",
                     fontSize: 16,
@@ -1512,9 +2011,51 @@ export function GuideReaderPage({
                     width: "100%",
                   }}
                 >
-                  {shortSectionTitle(section.title)}
+                  搜索
                 </Button>
-              ))}
+                <Button
+                  aria-label="更新指南"
+                  disabled={loading || refreshPending}
+                  onClick={() => void refreshGuide()}
+                  style={{
+                    boxSizing: "border-box",
+                    fontSize: 16,
+                    lineHeight: "22px",
+                    marginBottom: 16,
+                    minWidth: 0,
+                    overflow: "hidden",
+                    padding: "8px 2px",
+                    whiteSpace: "nowrap",
+                    width: "100%",
+                  }}
+                >
+                  {refreshPending ? "更新中…" : "更新"}
+                </Button>
+                {loaded.guide.sections
+                  .slice(0, renderedSectionCount)
+                  .map((section) => (
+                    <Button
+                      aria-label={`跳转到章节：${section.title}`}
+                      disabled={loading || refreshPending}
+                      key={section.id}
+                      onClick={() => jumpToSection(section.id)}
+                      style={{
+                        boxSizing: "border-box",
+                        fontSize: 16,
+                        lineHeight: "22px",
+                        marginBottom: 8,
+                        minWidth: 0,
+                        overflow: "hidden",
+                        padding: "8px 2px",
+                        whiteSpace: "nowrap",
+                        width: "100%",
+                      }}
+                    >
+                      {shortSectionTitle(section.title)}
+                    </Button>
+                  ))}
+              </>
+            )}
           </div>
         </div>
       ) : null}

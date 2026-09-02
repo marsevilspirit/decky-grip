@@ -19,6 +19,7 @@ import {
   type ReaderSessionBackend,
 } from "../../src/reader/session-cache";
 import type { DownloadedGuide, ReaderPosition } from "../../src/reader/types";
+import type { GuideIdentity } from "../../src/steam/guide-key";
 
 vi.mock("@decky/ui", () => {
   interface MockProps {
@@ -30,12 +31,39 @@ vi.mock("@decky/ui", () => {
     forwardRef<HTMLElement, MockProps>((props, ref) => {
       const domProps = { ...props };
       const children = domProps.children as ReactNode;
+      const onCancel = domProps.onCancel as
+        ((event: CustomEvent) => void) | undefined;
+      const onOptionsButton = domProps.onOptionsButton as
+        | ((event: {
+            detail: { button: number; is_repeat: boolean; source: number };
+            preventDefault(): void;
+            stopPropagation(): void;
+          }) => void)
+        | undefined;
+      if (domProps.onOptionsActionDescription) {
+        domProps["data-options-action"] = domProps.onOptionsActionDescription;
+      }
+      if (onCancel || onOptionsButton) {
+        domProps.onKeyDown = (event: KeyboardEvent) => {
+          if (event.key === "Options" && onOptionsButton) {
+            onOptionsButton({
+              detail: { button: 4, is_repeat: event.repeat, source: 0 },
+              preventDefault: () => event.preventDefault(),
+              stopPropagation: () => event.stopPropagation(),
+            });
+          } else if (event.key === "Escape" && onCancel) {
+            onCancel(event as unknown as CustomEvent);
+          }
+        };
+      }
       for (const name of [
         "children",
         "flow-children",
         "onButtonDown",
         "onCancel",
         "onGamepadDirection",
+        "onOptionsActionDescription",
+        "onOptionsButton",
         "preferredFocus",
       ]) {
         delete domProps[name];
@@ -97,7 +125,7 @@ function guideFixture(): DownloadedGuide {
         number === 1 || number === 40
           ? "<p>重复锚点</p>"
           : number === 20
-            ? '<p>图片章节</p><img data-grip-image-url="https://images.steamusercontent.com/ugc/test/image.png">'
+            ? '<p>图片章节前文 <strong>精准</strong>命中 中段 精准命中 后文</p><img data-grip-image-url="https://images.steamusercontent.com/ugc/test/image.png">'
             : `<p>正文 ${number}</p>`;
       return { id: String(number), title: `章节 ${number}`, html };
     }),
@@ -109,6 +137,7 @@ describe("GuideReaderPage position lifecycle", () => {
   let nextAnimationFrame: number;
   let resizeCallbacks: Set<ResizeObserverCallback>;
   let textSections: WeakMap<Node, number>;
+  let searchLayoutShift: number;
   let activeScroller: HTMLElement | null;
   let root: Root | null;
   let container: HTMLDivElement | null;
@@ -119,6 +148,7 @@ describe("GuideReaderPage position lifecycle", () => {
     nextAnimationFrame = 1;
     resizeCallbacks = new Set();
     textSections = new WeakMap();
+    searchLayoutShift = 0;
     activeScroller = null;
     root = null;
     container = null;
@@ -150,13 +180,46 @@ describe("GuideReaderPage position lifecycle", () => {
     );
     vi.spyOn(document, "createRange").mockImplementation(() => {
       let selected: Node | null = null;
+      let rangeStart: Node | null = null;
+      let rangeStartOffset = 0;
+      let rangeEnd: Node | null = null;
+      let rangeEndOffset = 0;
       return {
+        get endContainer() {
+          return rangeEnd ?? selected ?? document;
+        },
+        get endOffset() {
+          return rangeEndOffset;
+        },
+        get startContainer() {
+          return rangeStart ?? selected ?? document;
+        },
+        get startOffset() {
+          return rangeStartOffset;
+        },
         selectNodeContents(node: Node) {
           selected = node;
         },
+        setEnd(node: Node, offset: number) {
+          rangeEnd = node;
+          rangeEndOffset = offset;
+        },
+        setStart(node: Node, offset: number) {
+          rangeStart = node;
+          rangeStartOffset = offset;
+        },
         getBoundingClientRect() {
-          const sectionId = selected ? (textSections.get(selected) ?? 0) : 0;
-          const absoluteTop = sectionId === 40 ? 9_000 : sectionId * 200;
+          const point = rangeStart ?? selected;
+          const parent =
+            point instanceof Element ? point : (point?.parentElement ?? null);
+          const sectionId = Number(
+            parent?.closest<HTMLElement>("[data-guide-section-id]")?.dataset
+              .guideSectionId ?? (point ? textSections.get(point) : 0),
+          );
+          const absoluteTop =
+            sectionId === 40
+              ? 9_000
+              : sectionId * 200 + rangeStartOffset * 10 + searchLayoutShift;
           const top = absoluteTop - (activeScroller?.scrollTop ?? 0);
           return {
             bottom: top + 20,
@@ -222,6 +285,7 @@ describe("GuideReaderPage position lifecycle", () => {
     options: {
       loadGuideLibrary?: (appId: string) => Promise<GuideLibraryEntry[]>;
       onBrowseSteamGuides?: (appId: string) => Promise<void>;
+      onSwitchGuide?: (identity: GuideIdentity) => Promise<void>;
     } = {},
   ): Promise<HTMLElement> => {
     container = document.createElement("div");
@@ -239,7 +303,7 @@ describe("GuideReaderPage position lifecycle", () => {
           }
           onClose={() => undefined}
           onRepairPositions={async () => ""}
-          onSwitchGuide={async () => undefined}
+          onSwitchGuide={options.onSwitchGuide ?? (async () => undefined)}
           performance={new ReaderPerformanceTracker()}
         />,
       );
@@ -293,6 +357,16 @@ describe("GuideReaderPage position lifecycle", () => {
         await Promise.resolve();
       }
     });
+  };
+
+  const pressKey = (element: Element, key: string): KeyboardEvent => {
+    const event = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key,
+    });
+    element.dispatchEvent(event);
+    return event;
   };
 
   it("never persists top while a warm restore waits for progressive layout and survives reopen", async () => {
@@ -419,7 +493,9 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(container?.textContent).toContain(
       "当前指南位置保存失败，未打开 Steam 指南。",
     );
-    const saveAlert = container?.querySelector('[role="alert"]');
+    const saveAlert = [
+      ...(container?.querySelectorAll('[role="alert"]') ?? []),
+    ].find((alert) => alert.textContent?.includes("阅读位置保存失败"));
     expect(saveAlert?.getAttribute("aria-hidden")).toBe("true");
     expect(saveAlert?.hasAttribute("inert")).toBe(true);
 
@@ -434,7 +510,7 @@ describe("GuideReaderPage position lifecycle", () => {
     ]);
   });
 
-  it("keeps an active guide filter available when the library shrinks", async () => {
+  it("keeps an active guide filter across switcher reopen", async () => {
     const guide = guideFixture();
     const backend: ReaderSessionBackend = {
       getCachedGuide: async () => guide,
@@ -476,9 +552,10 @@ describe("GuideReaderPage position lifecycle", () => {
         stale: false,
       },
     };
-    let library = [currentGuide, otherGuide];
+    const library = [currentGuide, otherGuide];
+    const loadGuideLibrary = vi.fn(async () => library);
     await mount(cache, async () => null, 12_000, {
-      loadGuideLibrary: async () => library,
+      loadGuideLibrary,
     });
 
     await act(async () => buttonNamed("切换指南").click());
@@ -498,7 +575,6 @@ describe("GuideReaderPage position lifecycle", () => {
     });
 
     await act(async () => buttonNamed("关闭").click());
-    library = [currentGuide];
     await act(async () => buttonNamed("切换指南").click());
     await flushMicrotasks();
 
@@ -506,7 +582,8 @@ describe("GuideReaderPage position lifecycle", () => {
       container?.querySelector<HTMLInputElement>('input[aria-label="筛选指南"]')
         ?.value,
     ).toBe("另一篇");
-    expect(container?.textContent).toContain("没有匹配的指南。");
+    expect(container?.textContent).toContain("另一篇指南");
+    expect(loadGuideLibrary).toHaveBeenCalledTimes(1);
   });
 
   it("does not browse after the switcher closes while save is pending", async () => {
@@ -552,5 +629,363 @@ describe("GuideReaderPage position lifecycle", () => {
     await flushMicrotasks();
 
     expect(browse).not.toHaveBeenCalled();
+  });
+
+  it("opens the guide switcher with Options and restores reader focus", async () => {
+    const guide = guideFixture();
+    const backend: ReaderSessionBackend = {
+      getCachedGuide: async () => guide,
+      getGuide: async () => guide,
+      getReaderPosition: async () => null,
+      saveReaderPosition: async (
+        _guideKey,
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+      ) => ({
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+        updatedAt: 2,
+      }),
+    };
+    const cache = new ReaderSessionCache(backend);
+    await cache.load(identity);
+    const scroller = await mount(cache, async () => null, 12_000);
+    const page = container?.firstElementChild;
+    expect(page?.getAttribute("data-options-action")).toBe("切换指南");
+    scroller.focus();
+
+    let optionsEvent!: KeyboardEvent;
+    await act(async () => {
+      optionsEvent = pressKey(scroller, "Options");
+    });
+    await flushFrame();
+    await flushMicrotasks();
+
+    expect(optionsEvent.defaultPrevented).toBe(true);
+    const dialog = container?.querySelector('[aria-label="切换指南"]');
+    expect(dialog).not.toBeNull();
+    expect(document.activeElement).toBe(buttonNamed("关闭"));
+    expect(page?.hasAttribute("data-options-action")).toBe(false);
+
+    await act(async () => {
+      pressKey(dialog!, "Escape");
+    });
+    await flushFrame();
+
+    expect(container?.querySelector('[aria-label="切换指南"]')).toBeNull();
+    expect(document.activeElement).toBe(scroller);
+    expect(page?.getAttribute("data-options-action")).toBe("切换指南");
+  });
+
+  it("switches to stable numeric neighbors without crossing AppID", async () => {
+    const guide = guideFixture();
+    const actions: string[] = [];
+    const backend: ReaderSessionBackend = {
+      getCachedGuide: async (guideId) => ({
+        ...guide,
+        guideId,
+        title: `指南 ${guideId}`,
+      }),
+      getGuide: async (guideId) => ({
+        ...guide,
+        guideId,
+        title: `指南 ${guideId}`,
+      }),
+      getReaderPosition: async () => null,
+      saveReaderPosition: async (
+        guideKey,
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+      ) => {
+        actions.push(`save ${guideKey}`);
+        return {
+          scrollTop,
+          sectionId,
+          anchorText,
+          anchorOffset,
+          updatedAt: 2,
+        };
+      },
+    };
+    const cache = new ReaderSessionCache(backend);
+    await cache.load(identity);
+    const entry = (appId: string, guideId: string): GuideLibraryEntry => ({
+      appId,
+      guideId,
+      updatedAt: Number(guideId),
+      favorite: false,
+      cache: null,
+    });
+    const previous = entry(identity.appId, "20");
+    const next = entry(identity.appId, "10000000000");
+    await mount(cache, async () => null, 12_000, {
+      loadGuideLibrary: async () => [
+        next,
+        entry("222", "30"),
+        entry(identity.appId, identity.guideId),
+        previous,
+      ],
+      onSwitchGuide: async (target) => {
+        actions.push(`switch ${target.guideId}`);
+      },
+    });
+    await flushMicrotasks();
+
+    expect(buttonNamed("上一篇").getAttribute("aria-label")).toContain("20");
+    expect(buttonNamed("下一篇").getAttribute("aria-label")).toContain(
+      "10000000000",
+    );
+    expect(container?.textContent).not.toContain("Steam 指南 30");
+
+    await act(async () => buttonNamed("上一篇").click());
+    await flushMicrotasks();
+    expect(actions).toEqual([
+      `save ${identity.appId}:${identity.guideId}`,
+      "switch 20",
+    ]);
+
+    await act(async () => buttonNamed("下一篇").click());
+    await flushMicrotasks();
+    expect(actions[actions.length - 1]).toBe("switch 10000000000");
+  });
+
+  it("keeps a direct neighbor load failure visible without switching", async () => {
+    const guide = guideFixture();
+    const backend: ReaderSessionBackend = {
+      getCachedGuide: async (guideId) =>
+        guideId === identity.guideId ? guide : null,
+      getGuide: async (guideId) => {
+        if (guideId === identity.guideId) {
+          return guide;
+        }
+        throw new Error("offline");
+      },
+      getReaderPosition: async () => null,
+      saveReaderPosition: async (
+        _guideKey,
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+      ) => ({
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+        updatedAt: 2,
+      }),
+    };
+    const cache = new ReaderSessionCache(backend);
+    await cache.load(identity);
+    const onSwitchGuide = vi.fn(async () => undefined);
+    await mount(cache, async () => null, 12_000, {
+      loadGuideLibrary: async () => [
+        {
+          appId: identity.appId,
+          guideId: identity.guideId,
+          updatedAt: 2,
+          favorite: false,
+          cache: null,
+        },
+        {
+          appId: identity.appId,
+          guideId: "20",
+          updatedAt: 1,
+          favorite: false,
+          cache: null,
+        },
+      ],
+      onSwitchGuide,
+    });
+    await flushMicrotasks();
+
+    await act(async () => buttonNamed("上一篇").click());
+    await flushMicrotasks();
+
+    expect(container?.querySelector('[role="alert"]')?.textContent).toContain(
+      "指南打开失败：offline",
+    );
+    expect(onSwitchGuide).not.toHaveBeenCalled();
+  });
+
+  it("interrupts a warm restore to keep exact search matches aligned", async () => {
+    const guide = guideFixture();
+    const savedScrollTops: number[] = [];
+    let blockRefresh = false;
+    let resolveRefresh!: (guide: DownloadedGuide) => void;
+    const backend: ReaderSessionBackend = {
+      getCachedGuide: async () => guide,
+      getGuide: async () =>
+        blockRefresh
+          ? new Promise<DownloadedGuide>((resolve) => {
+              resolveRefresh = resolve;
+            })
+          : guide,
+      getReaderPosition: async () => savedPosition,
+      saveReaderPosition: async (
+        _guideKey,
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+      ) => {
+        savedScrollTops.push(scrollTop);
+        return {
+          scrollTop,
+          sectionId,
+          anchorText,
+          anchorOffset,
+          updatedAt: 2,
+        };
+      },
+    };
+    const cache = new ReaderSessionCache(backend);
+    await cache.load(identity);
+    const scroller = await mount(cache, async () => null, 12_000);
+    expect(container?.querySelector('[data-guide-section-id="20"]')).toBeNull();
+
+    await act(async () => buttonNamed("搜索").click());
+    const search = container?.querySelector<HTMLInputElement>(
+      'input[aria-label="搜索指南正文"]',
+    );
+    const page = container?.firstElementChild;
+    expect(page?.hasAttribute("data-options-action")).toBe(false);
+    await act(async () => {
+      pressKey(search!, "Options");
+    });
+    expect(container?.querySelector('[aria-label="切换指南"]')).toBeNull();
+    expect(container?.querySelector('[aria-label="指南搜索"]')).not.toBeNull();
+    await act(async () => {
+      const setValue = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      setValue?.call(search, "精准命中");
+      search?.dispatchEvent(new Event("input", { bubbles: true }));
+      await Promise.resolve();
+    });
+    const results = [
+      ...(container?.querySelectorAll<HTMLButtonElement>(
+        'button[aria-label^="跳转到搜索结果"]',
+      ) ?? []),
+    ];
+    expect(results).toHaveLength(2);
+    expect(results[0]?.textContent).toContain(
+      "图片章节前文 精准命中 中段 精准命中 后文",
+    );
+
+    const selectedRange: { current: Range | null } = { current: null };
+    const selection = {
+      addRange: vi.fn((range: Range) => {
+        selectedRange.current = range;
+      }),
+      get rangeCount() {
+        return selectedRange.current ? 1 : 0;
+      },
+      getRangeAt: vi.fn(() => selectedRange.current!),
+      removeAllRanges: vi.fn(() => {
+        selectedRange.current = null;
+      }),
+    } as unknown as Selection;
+    vi.spyOn(window, "getSelection").mockReturnValue(selection);
+
+    results[0]?.focus();
+    await act(async () => results[0]?.click());
+
+    expect(container?.querySelector('[aria-label="指南搜索"]')).not.toBeNull();
+    expect(
+      container?.querySelector('[data-guide-section-id="20"]'),
+    ).not.toBeNull();
+    expect(scroller.scrollTop).toBe(3_952);
+    expect(document.activeElement).toBe(results[0]);
+    expect(results[0]?.getAttribute("aria-current")).toBe("location");
+    expect(selectedRange.current?.startContainer.textContent).toBe("精准");
+    expect(selectedRange.current?.endContainer.textContent).toContain(
+      "命中 中段",
+    );
+
+    searchLayoutShift = 300;
+    const savesBeforeLayoutShift = savedScrollTops.length;
+    notifyResize();
+    expect(scroller.scrollTop).toBe(4_252);
+    await act(async () => {
+      vi.advanceTimersByTime(399);
+    });
+    expect(savedScrollTops).toHaveLength(savesBeforeLayoutShift);
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(savedScrollTops[savedScrollTops.length - 1]).toBe(4_252);
+
+    const next = buttonNamed("下一个");
+    next.focus();
+    await act(async () => next.click());
+    expect(scroller.scrollTop).toBeGreaterThan(4_252);
+    expect(results[1]?.getAttribute("aria-current")).toBe("location");
+    expect(document.activeElement).toBe(next);
+
+    const previous = buttonNamed("上一个");
+    await act(async () => previous.click());
+    expect(scroller.scrollTop).toBe(4_252);
+    expect(results[0]?.getAttribute("aria-current")).toBe("location");
+
+    await act(async () => {
+      vi.advanceTimersByTime(1_800);
+    });
+    expect(selectedRange.current).toBeNull();
+    expect(resizeCallbacks).toHaveLength(1);
+
+    searchLayoutShift = 500;
+    notifyResize();
+    expect(scroller.scrollTop).toBe(4_452);
+
+    const image = container?.querySelector<HTMLImageElement>(
+      '[data-guide-section-id="20"] img',
+    );
+    searchLayoutShift = 650;
+    image?.dispatchEvent(new Event("load"));
+    expect(scroller.scrollTop).toBe(4_602);
+    searchLayoutShift = 700;
+    image?.dispatchEvent(new Event("error"));
+    expect(scroller.scrollTop).toBe(4_652);
+
+    await act(async () => {
+      vi.advanceTimersByTime(8_200);
+    });
+    expect(resizeCallbacks).toHaveLength(0);
+    searchLayoutShift = 900;
+    notifyResize();
+    expect(scroller.scrollTop).toBe(4_652);
+
+    vi.mocked(window.getSelection).mockReturnValue(null);
+    await act(async () => results[1]?.click());
+    expect(resizeCallbacks).toHaveLength(1);
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(resizeCallbacks).toHaveLength(0);
+
+    await act(async () => results[0]?.click());
+    expect(resizeCallbacks).toHaveLength(1);
+    scroller.dispatchEvent(new Event("wheel"));
+    expect(resizeCallbacks).toHaveLength(0);
+
+    await act(async () => buttonNamed("关闭搜索").click());
+    blockRefresh = true;
+    await act(async () => buttonNamed("更新").click());
+    await flushMicrotasks();
+    const reopenSearch = buttonNamed("搜索");
+    expect(reopenSearch.disabled).toBe(true);
+    await act(async () => reopenSearch.click());
+    expect(container?.querySelector('[aria-label="指南搜索"]')).toBeNull();
+
+    await act(async () => resolveRefresh(guide));
+    await flushMicrotasks();
   });
 });
