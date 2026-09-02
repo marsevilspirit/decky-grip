@@ -133,7 +133,9 @@ only then atomically resets a store that still fails validation.
 GRIP Reader uses separate `reader_positions.json` and `guides/<guide-id>.json`
 files. Reader bookmarks include `section_id`, `anchor_text`, and
 `anchor_offset`; downloaded HTML is revalidated on the first process read and
-again whenever the cache file's identity or metadata changes.
+again whenever the cache file's identity or metadata changes. Guide bodies are
+limited to 20 MiB each, 256 MiB across the disk LRU, and 32 MiB in the Rust
+memory LRU. Opening a body promotes it; listing guide summaries does not.
 
 Local favorites are stored separately in `favorites.json`, capped at 20, and
 never synchronized to the Steam account. The Rust sidecar validates and writes

@@ -59,6 +59,10 @@ export interface ReaderCacheStats {
   guides: {
     files: number;
     bytes: number;
+    diskLimitBytes: number;
+    memoryEntries: number;
+    memoryBytes: number;
+    memoryLimitBytes: number;
   };
   images: {
     files: number;

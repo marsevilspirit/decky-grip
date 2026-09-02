@@ -177,7 +177,17 @@ fn json_lines_process_handles_ping_repair_and_position_lifecycle() {
         responses[&10]["result"],
         json!({"bytesRemoved": 0, "filesRemoved": 0})
     );
-    assert_eq!(responses[&11]["result"], json!({"bytes": 0, "files": 0}));
+    assert_eq!(
+        responses[&11]["result"],
+        json!({
+            "bytes": 0,
+            "diskLimitBytes": 256 * 1024 * 1024,
+            "files": 0,
+            "memoryBytes": 0,
+            "memoryEntries": 0,
+            "memoryLimitBytes": 32 * 1024 * 1024,
+        })
+    );
     assert_eq!(responses[&12]["error"]["kind"], "validation");
     assert_eq!(responses[&13]["result"], Value::Null);
     assert_eq!(
@@ -187,7 +197,14 @@ fn json_lines_process_handles_ping_repair_and_position_lifecycle() {
     assert_eq!(
         responses[&15]["result"],
         json!({
-            "guides": {"bytes": 0, "files": 0},
+            "guides": {
+                "bytes": 0,
+                "diskLimitBytes": 256 * 1024 * 1024,
+                "files": 0,
+                "memoryBytes": 0,
+                "memoryEntries": 0,
+                "memoryLimitBytes": 32 * 1024 * 1024,
+            },
             "images": {
                 "diskBytes": 0,
                 "diskLimitBytes": 128 * 1024 * 1024,

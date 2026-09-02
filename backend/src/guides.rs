@@ -5,12 +5,12 @@ use crate::guide_html::{
 };
 use crate::{FileSignature, create_temp, make_private, signature, sync_directory};
 use serde_json::{Map, Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, FileTimes, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -18,6 +18,8 @@ use url::Url;
 
 pub const MAX_DOWNLOAD_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_CACHE_BYTES: u64 = 20 * 1024 * 1024;
+pub const MAX_DISK_CACHE_BYTES: usize = 256 * 1024 * 1024;
+pub const MAX_MEMORY_CACHE_BYTES: usize = 32 * 1024 * 1024;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 pub const CACHE_MAX_AGE_MS: u64 = 6 * 60 * 60 * 1_000;
 
@@ -87,6 +89,85 @@ impl Error for GuideError {}
 struct MemoEntry {
     signature: FileSignature,
     document: Value,
+    bytes: usize,
+}
+
+#[derive(Default)]
+struct MemoState {
+    entries: HashMap<String, MemoEntry>,
+    order: VecDeque<String>,
+    bytes: usize,
+}
+
+impl MemoState {
+    fn get(&mut self, guide_id: &str, promote: bool) -> Option<MemoEntry> {
+        let entry = self.entries.get(guide_id)?.clone();
+        if promote {
+            self.touch(guide_id);
+        }
+        Some(entry)
+    }
+
+    fn store(&mut self, guide_id: &str, entry: MemoEntry, limit: usize) {
+        self.remove(guide_id);
+        if limit == 0 || entry.bytes > limit {
+            return;
+        }
+        self.bytes = self.bytes.saturating_add(entry.bytes);
+        self.entries.insert(guide_id.to_owned(), entry);
+        self.order.push_back(guide_id.to_owned());
+        while self.bytes > limit {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(removed) = self.entries.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(removed.bytes);
+            }
+        }
+    }
+
+    fn remove(&mut self, guide_id: &str) {
+        if let Some(removed) = self.entries.remove(guide_id) {
+            self.bytes = self.bytes.saturating_sub(removed.bytes);
+        }
+        if let Some(index) = self.order.iter().position(|entry| entry == guide_id) {
+            self.order.remove(index);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+        self.bytes = 0;
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn touch(&mut self, guide_id: &str) {
+        // ponytail: O(n) over a byte-bounded cache; use an intrusive list only if profiling says so.
+        if let Some(index) = self.order.iter().position(|entry| entry == guide_id) {
+            self.order.remove(index);
+        }
+        self.order.push_back(guide_id.to_owned());
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GuideLimits {
+    pub max_disk_bytes: usize,
+    pub max_memory_bytes: usize,
+}
+
+impl Default for GuideLimits {
+    fn default() -> Self {
+        Self {
+            max_disk_bytes: MAX_DISK_CACHE_BYTES,
+            max_memory_bytes: MAX_MEMORY_CACHE_BYTES,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -127,8 +208,9 @@ pub struct GuideReader {
     cache_directory: PathBuf,
     fetcher: Arc<Fetcher>,
     now_ms: Arc<Clock>,
+    limits: GuideLimits,
     guide_locks: GuideLockPool,
-    memo: Mutex<HashMap<String, MemoEntry>>,
+    memo: Mutex<MemoState>,
     disk_lock: Mutex<()>,
     generation: Mutex<u64>,
 }
@@ -143,15 +225,34 @@ impl GuideReader {
         F: Fn(&str, Duration, usize) -> Result<Vec<u8>, GuideError> + Send + Sync + 'static,
         N: Fn() -> u64 + Send + Sync + 'static,
     {
-        Self {
+        Self::with_fetcher_and_limits(cache_directory, fetcher, now_ms, GuideLimits::default())
+    }
+
+    pub fn with_fetcher_and_limits<F, N>(
+        cache_directory: impl Into<PathBuf>,
+        fetcher: F,
+        now_ms: N,
+        limits: GuideLimits,
+    ) -> Self
+    where
+        F: Fn(&str, Duration, usize) -> Result<Vec<u8>, GuideError> + Send + Sync + 'static,
+        N: Fn() -> u64 + Send + Sync + 'static,
+    {
+        let reader = Self {
             cache_directory: cache_directory.into(),
             fetcher: Arc::new(fetcher),
             now_ms: Arc::new(now_ms),
+            limits,
             guide_locks: GuideLockPool::default(),
-            memo: Mutex::new(HashMap::new()),
+            memo: Mutex::new(MemoState::default()),
             disk_lock: Mutex::new(()),
             generation: Mutex::new(0),
+        };
+        {
+            let _disk = lock(&reader.disk_lock);
+            reader.prune_to_quota_locked(None);
         }
+        reader
     }
 
     pub fn get(&self, guide_id: &str, force_refresh: bool) -> Result<Value, GuideError> {
@@ -284,31 +385,19 @@ impl GuideReader {
     }
 
     pub fn cache_stats(&self) -> Result<Value, GuideError> {
-        let _disk = lock(&self.disk_lock);
-        let mut files = 0_u64;
-        let mut bytes = 0_u64;
-        if let Some(entries) = read_cache_directory(&self.cache_directory)? {
-            for entry in entries {
-                let Ok(entry) = entry else {
-                    continue;
-                };
-                let name = entry.file_name();
-                let Some(name) = name.to_str() else {
-                    continue;
-                };
-                if !managed_cache_name(name) {
-                    continue;
-                }
-                let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
-                    continue;
-                };
-                if metadata.is_file() {
-                    files += 1;
-                    bytes = bytes.saturating_add(metadata.len());
-                }
-            }
-        }
-        Ok(json!({"bytes": bytes, "files": files}))
+        let entries = {
+            let _disk = lock(&self.disk_lock);
+            self.managed_entries_locked()?
+        };
+        let memo = lock(&self.memo);
+        Ok(json!({
+            "bytes": entries.iter().map(|entry| entry.size).sum::<u64>(),
+            "diskLimitBytes": self.limits.max_disk_bytes as u64,
+            "files": entries.len() as u64,
+            "memoryBytes": memo.bytes as u64,
+            "memoryEntries": memo.entries.len() as u64,
+            "memoryLimitBytes": self.limits.max_memory_bytes as u64,
+        }))
     }
 
     fn get_locked(&self, guide_id: &str, force_refresh: bool) -> Result<Value, GuideError> {
@@ -383,7 +472,7 @@ impl GuideReader {
     ) -> Result<Option<Value>, GuideError> {
         let path = self.cache_path(guide_id);
         for attempt in 0..2 {
-            let memoized = lock(&self.memo).get(guide_id).cloned();
+            let memoized = lock(&self.memo).get(guide_id, memoize);
             let known = memoized.as_ref().map(|entry| entry.signature);
             let (payload, signature) =
                 match read_bounded_regular_file(&path, MAX_CACHE_BYTES, known) {
@@ -409,11 +498,20 @@ impl GuideReader {
                     }
                 };
             if payload.is_none() {
-                return Ok(Some(
-                    memoized
-                        .expect("matching signature requires a memo entry")
-                        .document,
-                ));
+                let entry = memoized.expect("matching signature requires a memo entry");
+                if memoize {
+                    let touched = self.touch_cache_file(&path, signature).unwrap_or(signature);
+                    lock(&self.memo).store(
+                        guide_id,
+                        MemoEntry {
+                            signature: touched,
+                            document: entry.document.clone(),
+                            bytes: entry.bytes,
+                        },
+                        self.limits.max_memory_bytes,
+                    );
+                }
+                return Ok(Some(entry.document));
             }
             let parsed: Value =
                 serde_json::from_slice(payload.as_ref().unwrap()).map_err(|_| {
@@ -428,12 +526,15 @@ impl GuideReader {
                 }
             };
             if memoize {
-                lock(&self.memo).insert(
-                    guide_id.to_owned(),
+                let touched = self.touch_cache_file(&path, signature).unwrap_or(signature);
+                lock(&self.memo).store(
+                    guide_id,
                     MemoEntry {
-                        signature,
+                        signature: touched,
                         document: document.clone(),
+                        bytes: payload.as_ref().unwrap().len(),
                     },
+                    self.limits.max_memory_bytes,
                 );
             }
             return Ok(Some(document));
@@ -567,6 +668,25 @@ impl GuideReader {
         self.cache_directory.join(format!("{guide_id}.json"))
     }
 
+    fn touch_cache_file(&self, path: &Path, expected: FileSignature) -> Option<FileSignature> {
+        let _disk = lock(&self.disk_lock);
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(path)
+            .ok()?;
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file() || signature(&metadata) != expected {
+            return None;
+        }
+        let now = SystemTime::now();
+        file.set_times(FileTimes::new().set_accessed(now).set_modified(now))
+            .ok()?;
+        let touched = file.metadata().ok()?;
+        (touched.is_file() && touched.dev() == metadata.dev() && touched.ino() == metadata.ino())
+            .then(|| signature(&touched))
+    }
+
     fn write_cache(&self, document: &Value, expected_generation: u64) -> Result<(), GuideError> {
         let _disk = lock(&self.disk_lock);
         if *lock(&self.generation) != expected_generation {
@@ -611,20 +731,87 @@ impl GuideReader {
         })?;
         match fs::symlink_metadata(&cache_path) {
             Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_CACHE_BYTES => {
-                lock(&self.memo).insert(
-                    document["guideId"].as_str().unwrap().to_owned(),
+                lock(&self.memo).store(
+                    document["guideId"].as_str().unwrap(),
                     MemoEntry {
                         signature: signature(&metadata),
                         document: document.clone(),
+                        bytes: payload.len(),
                     },
+                    self.limits.max_memory_bytes,
                 );
             }
             _ => {
                 lock(&self.memo).remove(document["guideId"].as_str().unwrap());
             }
         }
+        self.prune_to_quota_locked(document["guideId"].as_str());
         Ok(())
     }
+
+    fn managed_entries_locked(&self) -> Result<Vec<GuideDiskEntry>, GuideError> {
+        let mut managed = Vec::new();
+        let Some(entries) = read_cache_directory(&self.cache_directory)? else {
+            return Ok(managed);
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let Some(guide_id) = name.strip_suffix(".json").filter(|id| valid_guide_id(id)) else {
+                continue;
+            };
+            let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+                continue;
+            };
+            if metadata.is_file() {
+                managed.push(GuideDiskEntry {
+                    guide_id: guide_id.to_owned(),
+                    path: entry.path(),
+                    size: metadata.len(),
+                    modified_seconds: metadata.mtime(),
+                    modified_nanoseconds: metadata.mtime_nsec(),
+                });
+            }
+        }
+        Ok(managed)
+    }
+
+    fn prune_to_quota_locked(&self, protected: Option<&str>) {
+        let Ok(mut entries) = self.managed_entries_locked() else {
+            return;
+        };
+        entries.sort_by(|left, right| {
+            (left.modified_seconds, left.modified_nanoseconds, &left.path).cmp(&(
+                right.modified_seconds,
+                right.modified_nanoseconds,
+                &right.path,
+            ))
+        });
+        let mut total = entries.iter().map(|entry| entry.size).sum::<u64>();
+        while total > self.limits.max_disk_bytes as u64 && !entries.is_empty() {
+            let index = entries
+                .iter()
+                .position(|entry| Some(entry.guide_id.as_str()) != protected)
+                .unwrap_or(0);
+            let entry = entries.remove(index);
+            if fs::remove_file(&entry.path).is_ok() {
+                total = total.saturating_sub(entry.size);
+                lock(&self.memo).remove(&entry.guide_id);
+            }
+        }
+        let _ = sync_directory(&self.cache_directory);
+    }
+}
+
+#[derive(Debug)]
+struct GuideDiskEntry {
+    guide_id: String,
+    path: PathBuf,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -918,6 +1105,34 @@ mod tests {
         assert!(!is_stale(CACHE_MAX_AGE_MS, 0));
         assert!(is_stale(CACHE_MAX_AGE_MS + 1, 0));
         assert!(!is_stale(1, 2));
+    }
+
+    #[test]
+    fn memo_is_a_byte_bounded_lru() {
+        let entry = |bytes| MemoEntry {
+            signature: FileSignature {
+                device: 0,
+                inode: 0,
+                size: bytes as u64,
+                modified_seconds: 0,
+                modified_nanoseconds: 0,
+                changed_seconds: 0,
+                changed_nanoseconds: 0,
+            },
+            document: json!({"bytes": bytes}),
+            bytes,
+        };
+        let mut memo = MemoState::default();
+        memo.store("1", entry(4), 8);
+        memo.store("2", entry(4), 8);
+        assert!(memo.get("1", true).is_some());
+
+        memo.store("3", entry(4), 8);
+
+        assert!(memo.entries.contains_key("1"));
+        assert!(!memo.entries.contains_key("2"));
+        assert!(memo.entries.contains_key("3"));
+        assert_eq!(memo.bytes, 8);
     }
 
     #[test]

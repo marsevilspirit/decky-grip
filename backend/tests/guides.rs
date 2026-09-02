@@ -1,7 +1,7 @@
 mod common;
 
 use common::TestDirectory;
-use grip_sidecar::guides::{GuideError, GuideReader};
+use grip_sidecar::guides::{GuideError, GuideLimits, GuideReader};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::ffi::CString;
@@ -16,6 +16,7 @@ use std::time::Duration;
 
 const GUIDE_ID: &str = "3414883877";
 const OTHER_GUIDE_ID: &str = "3414883878";
+const THIRD_GUIDE_ID: &str = "3414883879";
 const NOW_MS: u64 = 1_800_000_000_000;
 const CACHE_MAX_AGE_MS: u64 = 6 * 60 * 60 * 1_000;
 const MAX_DOWNLOAD_BYTES: usize = 16 * 1024 * 1024;
@@ -36,6 +37,10 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        Self::with_limits(GuideLimits::default())
+    }
+
+    fn with_limits(limits: GuideLimits) -> Self {
         let directory = TestDirectory::new();
         let cache_directory = directory.0.join("guides");
         let now_ms = Arc::new(AtomicU64::new(NOW_MS));
@@ -44,7 +49,7 @@ impl Harness {
         let fetch_plan = Arc::clone(&plan);
         let fetch_calls = Arc::clone(&calls);
         let clock = Arc::clone(&now_ms);
-        let reader = GuideReader::with_fetcher(
+        let reader = GuideReader::with_fetcher_and_limits(
             cache_directory.clone(),
             move |url, timeout, max_bytes| {
                 fetch_calls
@@ -57,6 +62,7 @@ impl Harness {
                 }
             },
             move || clock.load(Ordering::SeqCst),
+            limits,
         );
         Self {
             _directory: directory,
@@ -76,6 +82,11 @@ impl Harness {
         *self.plan.lock().unwrap() = FetchPlan::Body(guide_fixture(title));
     }
 
+    fn set_large_body(&self, title: &str) {
+        *self.plan.lock().unwrap() =
+            FetchPlan::Body(guide_fixture_with_text(title, &"x".repeat(2_000)));
+    }
+
     fn set_error(&self, message: &str) {
         *self.plan.lock().unwrap() = FetchPlan::Error(message.to_owned());
     }
@@ -86,12 +97,16 @@ impl Harness {
 }
 
 fn guide_fixture(title: &str) -> Vec<u8> {
+    guide_fixture_with_text(title, "正文")
+}
+
+fn guide_fixture_with_text(title: &str, text: &str) -> Vec<u8> {
     format!(
         "<div class=\"workshopItemTitle\">{title}</div>\
          <div class=\"guideAuthors\">By 测试作者</div>\
          <div class=\"subSection\" id=\"7667220\">\
          <div class=\"subSectionTitle\">四月</div>\
-         <div class=\"subSectionDesc\"><p>正文</p>\
+         <div class=\"subSectionDesc\"><p>{text}</p>\
          <img class=\"bb_img\" src=\"https://images.steamusercontent.com/ugc/example/image.png\"></div></div>"
     )
     .into_bytes()
@@ -538,4 +553,57 @@ fn stats_and_clear_ignore_unmanaged_names() {
     assert_eq!(cleared["filesRemoved"], 1);
     assert!(unmanaged.exists());
     assert!(harness.reader.get_cached(GUIDE_ID).unwrap().is_none());
+}
+
+#[test]
+fn body_reads_promote_the_disk_lru_and_keep_both_tiers_bounded() {
+    const LIMIT: usize = 6 * 1024;
+    let harness = Harness::with_limits(GuideLimits {
+        max_disk_bytes: LIMIT,
+        max_memory_bytes: LIMIT,
+    });
+
+    harness.set_large_body("A");
+    harness.reader.get(GUIDE_ID, false).unwrap();
+    thread::sleep(Duration::from_millis(10));
+    harness.set_large_body("B");
+    harness.reader.get(OTHER_GUIDE_ID, false).unwrap();
+    thread::sleep(Duration::from_millis(10));
+    harness.reader.get_cached(GUIDE_ID).unwrap().unwrap();
+    thread::sleep(Duration::from_millis(10));
+    harness.set_large_body("C");
+    harness.reader.get(THIRD_GUIDE_ID, false).unwrap();
+
+    assert!(harness.cache_path(GUIDE_ID).exists());
+    assert!(!harness.cache_path(OTHER_GUIDE_ID).exists());
+    assert!(harness.cache_path(THIRD_GUIDE_ID).exists());
+    let stats = harness.reader.cache_stats().unwrap();
+    assert!(stats["bytes"].as_u64().unwrap() <= LIMIT as u64);
+    assert!(stats["memoryBytes"].as_u64().unwrap() <= LIMIT as u64);
+    assert_eq!(stats["diskLimitBytes"], LIMIT);
+    assert_eq!(stats["memoryLimitBytes"], LIMIT);
+}
+
+#[test]
+fn cached_summaries_do_not_promote_the_body_lru() {
+    const LIMIT: usize = 6 * 1024;
+    let harness = Harness::with_limits(GuideLimits {
+        max_disk_bytes: LIMIT,
+        max_memory_bytes: LIMIT,
+    });
+
+    harness.set_large_body("A");
+    harness.reader.get(GUIDE_ID, false).unwrap();
+    thread::sleep(Duration::from_millis(10));
+    harness.set_large_body("B");
+    harness.reader.get(OTHER_GUIDE_ID, false).unwrap();
+    thread::sleep(Duration::from_millis(10));
+    harness.reader.cached_summary(GUIDE_ID, None).unwrap();
+    thread::sleep(Duration::from_millis(10));
+    harness.set_large_body("C");
+    harness.reader.get(THIRD_GUIDE_ID, false).unwrap();
+
+    assert!(!harness.cache_path(GUIDE_ID).exists());
+    assert!(harness.cache_path(OTHER_GUIDE_ID).exists());
+    assert!(harness.cache_path(THIRD_GUIDE_ID).exists());
 }
