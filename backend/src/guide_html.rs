@@ -2,7 +2,7 @@ use crate::guide_images::canonical_image_url;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
-use std::fmt;
+use std::fmt::{self, Write as _};
 
 pub(crate) const MAX_SECTIONS: usize = 512;
 pub(crate) const MAX_PAGE_NODES: usize = 200_000;
@@ -595,17 +595,7 @@ impl FragmentSanitizer {
             serialized.insert("src", source);
         }
 
-        Some(
-            serialized
-                .into_iter()
-                .map(|(name, value)| {
-                    format!(
-                        " {name}=\"{}\"",
-                        html_escape::encode_quoted_attribute(&value)
-                    )
-                })
-                .collect(),
-        )
+        Some(serialize_attribute_values(serialized))
     }
 
     fn finish(mut self) -> Result<(String, FragmentStats), GuideHtmlError> {
@@ -815,16 +805,22 @@ fn localized_image_tag(source: &str) -> String {
 
     values.remove("src");
     values.insert("data-grip-image-url".to_owned(), source);
-    let attributes: String = values
-        .into_iter()
-        .map(|(name, value)| {
-            format!(
-                " {name}=\"{}\"",
-                html_escape::encode_quoted_attribute(&value)
-            )
-        })
-        .collect();
+    let attributes = serialize_attribute_values(values);
     format!("<img{attributes}>")
+}
+
+fn serialize_attribute_values<K: AsRef<str>>(values: BTreeMap<K, String>) -> String {
+    let mut output = String::new();
+    for (name, value) in values {
+        write!(
+            output,
+            " {}=\"{}\"",
+            name.as_ref(),
+            html_escape::encode_quoted_attribute(&value)
+        )
+        .expect("writing to a String cannot fail");
+    }
+    output
 }
 
 fn find_image_start(fragment: &str, offset: usize) -> Option<usize> {

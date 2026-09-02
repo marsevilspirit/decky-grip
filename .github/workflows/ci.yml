@@ -53,7 +53,7 @@ jobs:
 
       - name: Restore workspace ownership
         if: always()
-        run: sudo chown -R "$(id -u):$(id -g)" . "$RUNNER_TEMP/grip-package"
+        run: sudo chown -R "$(id -u):$(id -g)" .
 
       - uses: actions/upload-artifact@v4
         with:

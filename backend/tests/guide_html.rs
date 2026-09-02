@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use grip_sidecar::guide_html::{localize_guide_images, parse_guide_html, sanitize_fragment};
 
 const PUBLIC_GUIDE_FIXTURE: &str = r#"<!doctype html>
@@ -205,15 +207,16 @@ fn enforces_real_section_mount_budgets() {
 
 #[test]
 fn rejects_the_513th_section() {
-    let sections = (1..=513)
-        .map(|id| {
-            format!(
-                "<div class=\"subSection\" id=\"{id}\">\
-                 <div class=\"subSectionTitle\">标题</div>\
-                 <div class=\"subSectionDesc\">正文</div></div>"
-            )
-        })
-        .collect::<String>();
+    let mut sections = String::new();
+    for id in 1..=513 {
+        write!(
+            sections,
+            "<div class=\"subSection\" id=\"{id}\">\
+             <div class=\"subSectionTitle\">标题</div>\
+             <div class=\"subSectionDesc\">正文</div></div>"
+        )
+        .expect("writing to a String cannot fail");
+    }
     let source = format!(
         "<div class=\"workshopItemTitle\">指南</div>\
          <div class=\"guideAuthors\">By 作者</div><div>{sections}</div>"
