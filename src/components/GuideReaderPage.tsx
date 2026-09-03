@@ -38,10 +38,7 @@ import {
   retainGuideForStaleRefresh,
   type ReaderSessionSnapshot,
 } from "../reader/session-cache";
-import {
-  filterGuideLibraryEntries,
-  guideChoicesForReader,
-} from "../reader/recent-guide";
+import { guideChoicesForReader } from "../reader/recent-guide";
 import {
   buildGuideSearchIndex,
   locateGuideSearchRange,
@@ -51,8 +48,10 @@ import {
 } from "../reader/search";
 import { shortSectionTitle } from "../reader/toc-title";
 import { makeGuideKey, type GuideIdentity } from "../steam/guide-key";
+import { BusyLabel } from "./BusyLabel";
 
 const SAVE_DELAY_MS = 400;
+const STEAM_TOP_BAR_HEIGHT = 40;
 const RESTORE_STABLE_MS = 100;
 const RESTORE_TIMEOUT_MS = 10_000;
 const LOADING_INDICATOR_DELAY_MS = 180;
@@ -62,8 +61,14 @@ const SEARCH_HIGHLIGHT_MS = 1_800;
 const SEARCH_ALIGNMENT_TIMEOUT_MS = RESTORE_TIMEOUT_MS;
 const SEARCH_SCROLL_MARGIN = 48;
 const READER_CSS = `
+@keyframes grip-guide-switcher-enter { from { opacity: 0; transform: translateY(-10px); } }
+@keyframes grip-guide-content-enter { from { opacity: 0.35; transform: translateX(12px); } }
+@media (prefers-reduced-motion: no-preference) {
+  .grip-reader-guide-switcher { animation: grip-guide-switcher-enter 140ms ease-out; }
+  .grip-reader-guide-enter { animation: grip-guide-content-enter 180ms ease-out; }
+}
 .grip-reader-content { color: #dcdedf; font-size: 18px; line-height: 1.55; padding: 10px 34px 80px; }
-.grip-reader-content ::selection, .grip-reader-guide-title::selection { background: #f3c64b; color: #101820; }
+.grip-reader-content ::selection { background: #f3c64b; color: #101820; }
 .grip-reader-content img { display: block; max-width: 100%; height: auto; margin: 14px auto; border-radius: 4px; }
 .grip-reader-content img[data-grip-image-url]:not([src]) { background: #17212b; min-height: 48px; opacity: 0.55; }
 .grip-reader-content img[data-grip-image-state="unavailable"] { border: 1px dashed #6b747d; }
@@ -83,6 +88,12 @@ const READER_CSS = `
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function GuideSectionBody({ html }: { html: string }) {
+  // React 19 replaces innerHTML when this object changes, detaching hydrated images.
+  const markup = useMemo(() => ({ __html: html }), [html]);
+  return <div data-guide-search-body dangerouslySetInnerHTML={markup} />;
 }
 
 function focusWithoutScrolling(element: HTMLElement | null | undefined): void {
@@ -121,10 +132,6 @@ function guideChoiceDetails(entry: GuideLibraryEntry): string {
   ]
     .filter((detail): detail is string => detail !== null)
     .join(" · ");
-}
-
-function compareGuideIds(left: string, right: string): number {
-  return left.length - right.length || left.localeCompare(right);
 }
 
 function readIdentity(
@@ -180,10 +187,13 @@ export function GuideReaderPage({
   const [error, setError] = useState<string | null>(null);
   const [loadWarning, setLoadWarning] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveRetryPending, setSaveRetryPending] = useState(false);
   const [restoreWarning, setRestoreWarning] = useState<string | null>(null);
   const [refreshGeneration, setRefreshGeneration] = useState(0);
   const [refreshPending, setRefreshPending] = useState(false);
-  const [positionRepairBusy, setPositionRepairBusy] = useState(false);
+  const [positionRepairMode, setPositionRepairMode] = useState<
+    "retry" | "repair" | null
+  >(null);
   const [guideSwitcherOpen, setGuideSwitcherOpen] = useState(false);
   const [guideLibrary, setGuideLibrary] = useState<GuideLibraryEntry[] | null>(
     null,
@@ -193,7 +203,6 @@ export function GuideReaderPage({
   );
   const [guideSwitcherRevision, setGuideSwitcherRevision] = useState(0);
   const [switchPending, setSwitchPending] = useState<string | null>(null);
-  const [guideFilter, setGuideFilter] = useState("");
   const [guideSearchOpen, setGuideSearchOpen] = useState(false);
   const [guideSearchQuery, setGuideSearchQuery] = useState("");
   const [activeGuideSearchResultIndex, setActiveGuideSearchResultIndex] =
@@ -203,12 +212,10 @@ export function GuideReaderPage({
       guide: initialSnapshot?.guide ?? null,
       count: Math.min(initialSnapshot?.guide.sections.length ?? 0, 1),
     }));
+  const positionRepairBusy = positionRepairMode !== null;
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const guideSwitcherCloseRef = useRef<HTMLDivElement | null>(null);
-  const guideSwitcherButtonRef = useRef<HTMLDivElement | null>(null);
-  const guideSwitcherReturnFocusRef = useRef<HTMLElement | null>(null);
   const guideSearchButtonRef = useRef<HTMLDivElement | null>(null);
-  const guideTitleRef = useRef<HTMLDivElement | null>(null);
   const guideSearchIndexRef = useRef<{
     guide: ReaderSessionSnapshot["guide"];
     index: GuideSearchIndex;
@@ -274,10 +281,6 @@ export function GuideReaderPage({
     if (guideSwitcherOpen) {
       return;
     }
-    guideSwitcherReturnFocusRef.current =
-      document.activeElement instanceof HTMLElement
-        ? document.activeElement
-        : null;
     setGuideSearchOpen(false);
     setGuideSwitcherOpen(true);
   };
@@ -286,14 +289,8 @@ export function GuideReaderPage({
     switchRequestRef.current = null;
     setSwitchPending(null);
     setGuideSwitcherOpen(false);
-    const returnFocus = guideSwitcherReturnFocusRef.current;
-    guideSwitcherReturnFocusRef.current = null;
     requestAnimationFrame(() => {
-      const target =
-        returnFocus?.isConnected === true
-          ? returnFocus
-          : (guideSwitcherButtonRef.current ?? scrollerRef.current);
-      focusWithoutScrolling(target);
+      focusWithoutScrolling(scrollerRef.current);
     });
   };
 
@@ -777,6 +774,18 @@ export function GuideReaderPage({
     [cache, checkpoint, identity?.appId, identity?.guideId],
   );
 
+  const retrySavePosition = async (): Promise<void> => {
+    if (saveRetryPending) {
+      return;
+    }
+    setSaveRetryPending(true);
+    try {
+      await persistPosition();
+    } finally {
+      setSaveRetryPending(false);
+    }
+  };
+
   const cancelRestore = useCallback(() => {
     stopRestoreRef.current?.();
     stopRestoreRef.current = null;
@@ -1177,7 +1186,7 @@ export function GuideReaderPage({
       return;
     }
     stopGuideSearchAlignment();
-    setPositionRepairBusy(true);
+    setPositionRepairMode(repair ? "repair" : "retry");
     try {
       const repairMessage = repair ? await onRepairPositions() : null;
       const snapshot = await cache.retryPosition(identity);
@@ -1189,7 +1198,7 @@ export function GuideReaderPage({
     } catch (reason: unknown) {
       setLoadWarning(`阅读位置恢复失败，正文仍可使用：${errorMessage(reason)}`);
     } finally {
-      setPositionRepairBusy(false);
+      setPositionRepairMode(null);
     }
   };
 
@@ -1255,16 +1264,22 @@ export function GuideReaderPage({
     if (!scroller) {
       return false;
     }
+    if (result.kind === "guide-title") {
+      stopGuideSearchAlignment();
+      clearGuideSearchHighlight();
+      checkpoint.intendScroll();
+      scroller.scrollTop = 0;
+      onScroll();
+      return true;
+    }
     anchorIndexRef.current?.refresh();
     const section = result.sectionId
       ? (anchorIndexRef.current?.sectionElement(result.sectionId) ?? null)
       : null;
     const target =
-      result.kind === "guide-title"
-        ? guideTitleRef.current
-        : result.kind === "section-title"
-          ? section?.querySelector<HTMLElement>(".grip-reader-section-title")
-          : section?.querySelector<HTMLElement>("[data-guide-search-body]");
+      result.kind === "section-title"
+        ? section?.querySelector<HTMLElement>(".grip-reader-section-title")
+        : section?.querySelector<HTMLElement>("[data-guide-search-body]");
     if (!target) {
       return false;
     }
@@ -1283,19 +1298,16 @@ export function GuideReaderPage({
       if (!range.startContainer.isConnected) {
         return;
       }
-      const nextScrollTop =
-        result.kind === "guide-title"
-          ? 0
-          : Math.max(
-              0,
-              Math.min(
-                scroller.scrollTop +
-                  range.getBoundingClientRect().top -
-                  scroller.getBoundingClientRect().top -
-                  SEARCH_SCROLL_MARGIN,
-                Math.max(0, scroller.scrollHeight - scroller.clientHeight),
-              ),
-            );
+      const nextScrollTop = Math.max(
+        0,
+        Math.min(
+          scroller.scrollTop +
+            range.getBoundingClientRect().top -
+            scroller.getBoundingClientRect().top -
+            SEARCH_SCROLL_MARGIN,
+          Math.max(0, scroller.scrollHeight - scroller.clientHeight),
+        ),
+      );
       if (!force && Math.abs(nextScrollTop - scroller.scrollTop) <= 1) {
         return;
       }
@@ -1306,7 +1318,7 @@ export function GuideReaderPage({
     align(true);
 
     const content = contentRef.current;
-    if (result.kind !== "guide-title" && content) {
+    if (content) {
       const onLayoutChange = () => align(false);
       const observer = new ResizeObserver(onLayoutChange);
       let stopped = false;
@@ -1453,23 +1465,6 @@ export function GuideReaderPage({
   const guideChoices = guideLibrary
     ? guideChoicesForReader(guideLibrary, currentGuideEntry)
     : null;
-  const visibleGuideChoices = guideChoices
-    ? filterGuideLibraryEntries(guideChoices, guideFilter)
-    : null;
-  const stableGuideChoices = guideChoices
-    ? [...guideChoices].sort((left, right) =>
-        compareGuideIds(left.guideId, right.guideId),
-      )
-    : [];
-  const currentGuideIndex = stableGuideChoices.findIndex(
-    (entry) => entry.guideId === identity.guideId,
-  );
-  const previousGuide =
-    currentGuideIndex > 0 ? stableGuideChoices[currentGuideIndex - 1] : null;
-  const nextGuide =
-    currentGuideIndex >= 0 && currentGuideIndex + 1 < stableGuideChoices.length
-      ? stableGuideChoices[currentGuideIndex + 1]
-      : null;
   const readerWarning =
     restoreWarning ?? loadWarning ?? loaded?.positionWarning ?? null;
 
@@ -1494,100 +1489,22 @@ export function GuideReaderPage({
       }}
       style={{
         background: "linear-gradient(180deg, #16202b 0%, #0d141c 100%)",
+        boxSizing: "border-box",
         color: "#dcdedf",
         display: "flex",
         flexDirection: "column",
         height: "100vh",
         overflow: "hidden",
+        paddingTop: STEAM_TOP_BAR_HEIGHT,
         position: "relative",
       }}
     >
       <style>{READER_CSS}</style>
-      <div
-        style={{
-          alignItems: "center",
-          borderBottom: "1px solid #314252",
-          display: "flex",
-          gap: 12,
-          minHeight: 70,
-          padding: "0 28px",
-        }}
-      >
-        <Button disabled={guideSwitcherOpen} onClick={onClose}>
-          返回
-        </Button>
-        {stableGuideChoices.length > 1 && (
-          <>
-            <Button
-              aria-label={
-                previousGuide
-                  ? `上一篇指南：${previousGuide.cache?.title ?? previousGuide.guideId}`
-                  : "没有上一篇指南"
-              }
-              disabled={
-                guideSwitcherOpen || switchPending !== null || !previousGuide
-              }
-              onClick={() => {
-                if (previousGuide) {
-                  openGuideSwitcher();
-                  void switchGuide(previousGuide);
-                }
-              }}
-            >
-              上一篇
-            </Button>
-            <Button
-              aria-label={
-                nextGuide
-                  ? `下一篇指南：${nextGuide.cache?.title ?? nextGuide.guideId}`
-                  : "没有下一篇指南"
-              }
-              disabled={
-                guideSwitcherOpen || switchPending !== null || !nextGuide
-              }
-              onClick={() => {
-                if (nextGuide) {
-                  openGuideSwitcher();
-                  void switchGuide(nextGuide);
-                }
-              }}
-            >
-              下一篇
-            </Button>
-          </>
-        )}
-        <Button
-          disabled={guideSwitcherOpen}
-          onClick={openGuideSwitcher}
-          ref={guideSwitcherButtonRef}
-        >
-          切换指南
-        </Button>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div
-            className="grip-reader-guide-title"
-            ref={guideTitleRef}
-            style={{
-              fontSize: 22,
-              fontWeight: 700,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {loaded?.guide.title ?? `Steam guide ${identity.guideId}`}
-          </div>
-          <div style={{ fontSize: 13, opacity: 0.65 }}>
-            GRIP 独立阅读器 · 按正文锚点精确续读
-            {loaded?.guide.stale ? " · 本地缓存版本，可按更新获取新版" : ""}
-          </div>
-        </div>
-      </div>
-
       {guideSwitcherOpen && (
         <Focusable
           aria-label="切换指南"
           aria-modal="true"
+          className="grip-reader-guide-switcher"
           role="dialog"
           style={{
             background: "linear-gradient(180deg, #16202b 0%, #0d141c 100%)",
@@ -1598,7 +1515,7 @@ export function GuideReaderPage({
             padding: "24px 28px",
             position: "absolute",
             right: 0,
-            top: 70,
+            top: STEAM_TOP_BAR_HEIGHT,
             zIndex: 10,
           }}
         >
@@ -1650,21 +1567,9 @@ export function GuideReaderPage({
               </Button>
             </div>
           )}
-          {guideChoices &&
-            (guideChoices.length > 1 || guideFilter.length > 0) && (
-              <TextField
-                bShowClearAction
-                label="筛选指南"
-                onChange={(event) => setGuideFilter(event.currentTarget.value)}
-                value={guideFilter}
-              />
-            )}
-          {guideChoices && visibleGuideChoices?.length === 0 && (
-            <div style={{ marginTop: 16, opacity: 0.75 }}>没有匹配的指南。</div>
-          )}
-          {visibleGuideChoices && visibleGuideChoices.length > 0 && (
+          {guideChoices && (
             <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-              {visibleGuideChoices.map((entry) => {
+              {guideChoices.map((entry) => {
                 const guideKey = makeGuideKey(entry);
                 const current = entry.guideId === identity.guideId;
                 const pending = switchPending === guideKey;
@@ -1679,9 +1584,11 @@ export function GuideReaderPage({
                 const content = (
                   <div>
                     <div style={{ fontSize: 18, fontWeight: 700 }}>
-                      {pending
-                        ? "正在准备并打开…"
-                        : `${current ? "正在阅读 · " : ""}${entry.cache?.title ?? `Steam 指南 ${entry.guideId}`}`}
+                      {pending ? (
+                        <BusyLabel>正在准备并打开…</BusyLabel>
+                      ) : (
+                        `${current ? "正在阅读 · " : ""}${entry.cache?.title ?? `Steam 指南 ${entry.guideId}`}`
+                      )}
                     </div>
                     <div style={{ fontSize: 13, marginTop: 5, opacity: 0.72 }}>
                       {guideChoiceDetails(entry)}
@@ -1731,13 +1638,21 @@ export function GuideReaderPage({
                 disabled={positionRepairBusy}
                 onClick={() => void retryReaderPosition(false)}
               >
-                {positionRepairBusy ? "正在处理…" : "重试位置"}
+                {positionRepairMode === "retry" ? (
+                  <BusyLabel>正在处理…</BusyLabel>
+                ) : (
+                  "重试位置"
+                )}
               </Button>
               <Button
                 disabled={positionRepairBusy}
                 onClick={() => void retryReaderPosition(true)}
               >
-                {positionRepairBusy ? "正在处理…" : "备份并重置"}
+                {positionRepairMode === "repair" ? (
+                  <BusyLabel>正在处理…</BusyLabel>
+                ) : (
+                  "备份并重置"
+                )}
               </Button>
             </>
           )}
@@ -1770,7 +1685,9 @@ export function GuideReaderPage({
         >
           <h2>无法打开该指南</h2>
           <p>{error}</p>
-          <Button onClick={() => void refreshGuide()}>重试</Button>
+          <Button disabled={refreshPending} onClick={() => void refreshGuide()}>
+            {refreshPending ? <BusyLabel>重试中…</BusyLabel> : "重试"}
+          </Button>
         </div>
       ) : loaded ? (
         <div
@@ -1796,7 +1713,11 @@ export function GuideReaderPage({
             role="region"
             tabIndex={0}
           >
-            <div className="grip-reader-content" ref={contentRef}>
+            <div
+              className="grip-reader-content grip-reader-guide-enter"
+              key={loaded.guide.guideId}
+              ref={contentRef}
+            >
               {loaded.guide.sections
                 .slice(0, renderedSectionCount)
                 .map((section) => (
@@ -1808,10 +1729,7 @@ export function GuideReaderPage({
                     <div className="grip-reader-section-title">
                       {section.title}
                     </div>
-                    <div
-                      data-guide-search-body
-                      dangerouslySetInnerHTML={{ __html: section.html }}
-                    />
+                    <GuideSectionBody html={section.html} />
                   </section>
                 ))}
             </div>
@@ -1998,7 +1916,7 @@ export function GuideReaderPage({
                     width: "100%",
                   }}
                 >
-                  {refreshPending ? "更新中…" : "更新"}
+                  {refreshPending ? <BusyLabel>更新中…</BusyLabel> : "更新"}
                 </Button>
                 {loaded.guide.sections
                   .slice(0, renderedSectionCount)
@@ -2043,7 +1961,12 @@ export function GuideReaderPage({
           }}
         >
           阅读位置保存失败：{saveError}
-          <Button onClick={() => void persistPosition()}>重试保存</Button>
+          <Button
+            disabled={saveRetryPending}
+            onClick={() => void retrySavePosition()}
+          >
+            {saveRetryPending ? <BusyLabel>正在保存…</BusyLabel> : "重试保存"}
+          </Button>
         </div>
       )}
     </Focusable>

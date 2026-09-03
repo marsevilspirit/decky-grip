@@ -108,6 +108,10 @@ export const getGuideImage = callable<
   GuideImagePayload | null
 >("get_guide_image");
 
+export const downloadGuideImage = callable<[url: string], boolean>(
+  "download_guide_image",
+);
+
 export const clearGuideCache = callable<[], CacheClearResult>(
   "clear_guide_cache",
 );

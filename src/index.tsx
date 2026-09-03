@@ -10,6 +10,7 @@ import { Router, staticClasses, useParams } from "@decky/ui";
 import {
   clearGuideCache,
   clearImageCache,
+  downloadGuideImage,
   getCachedGuide,
   getGuide,
   getGuideLibrary,
@@ -38,6 +39,10 @@ import {
   resolveGuideForReaderOpen,
 } from "./reader/recent-guide";
 import { ReaderImageCacheControl } from "./reader/image-cache-control";
+import {
+  downloadGuideImages,
+  type GuideImageDownloadProgress,
+} from "./reader/download";
 import {
   parseInstrumentedHotkeyPress,
   ReaderPerformanceTracker,
@@ -90,6 +95,8 @@ export default definePlugin(() => {
   const readerPerformance = new ReaderPerformanceTracker();
   const imageCacheControl = new ReaderImageCacheControl();
   let guideCacheMutationActive = false;
+  let imageCacheMutationActive = false;
+  let activeGuideDownloads = 0;
   const readerCache = new ReaderSessionCache(
     {
       getCachedGuide,
@@ -110,6 +117,9 @@ export default definePlugin(() => {
   const mutateGuideCache = async <Result,>(
     action: () => Promise<Result>,
   ): Promise<Result> => {
+    if (activeGuideDownloads > 0) {
+      throw new Error("指南正在下载，完成后才能清理缓存");
+    }
     if (guideCacheMutationActive) {
       throw new Error("指南正文缓存正在清理，请稍后再试");
     }
@@ -350,28 +360,59 @@ export default definePlugin(() => {
 
   const clearGuides = () => mutateGuideCache(clearGuideCache);
 
-  const cacheGuide = async (identity: GuideIdentity, forceRefresh = true) => {
-    const handoff = controller.captureReaderHandoff(identity);
-    const snapshot = await readerCache.load(identity, { forceRefresh });
-    if (mounted) {
-      try {
+  const cacheGuide = async (
+    identity: GuideIdentity,
+    onProgress?: (progress: GuideImageDownloadProgress) => void,
+    forceRefresh = false,
+  ) => {
+    if (guideCacheMutationActive || imageCacheMutationActive) {
+      throw new Error("缓存正在清理，请稍后再下载");
+    }
+    activeGuideDownloads += 1;
+    try {
+      const handoff = controller.captureReaderHandoff(identity);
+      const snapshot = await readerCache.load(identity, {
+        forceRefresh,
+        revalidate: true,
+      });
+      if (mounted) {
         await readerCache.rememberAccess(
           identity,
           snapshot.position ?? handoff,
         );
-      } catch (error: unknown) {
-        status.refreshGuideLibrary();
-        throw error;
       }
+      await downloadGuideImages(snapshot.guide, downloadGuideImage, onProgress);
+      // A warm session is not proof that its body still exists on disk.
+      const saved = await getCachedGuide(identity.guideId);
+      if (
+        !saved ||
+        saved.sections.some(
+          (section, index) =>
+            section.html !== snapshot.guide.sections[index]?.html,
+        ) ||
+        saved.sections.length !== snapshot.guide.sections.length
+      ) {
+        throw new Error("本地正文已变化，请重试下载");
+      }
+      return snapshot.guide;
+    } catch (error: unknown) {
+      toaster.toast({ title: "GRIP：下载未完成", body: errorMessage(error) });
+      throw error;
+    } finally {
+      activeGuideDownloads -= 1;
+      status.refreshGuideLibrary();
     }
-    return snapshot.guide;
   };
 
   const removeGuide = (guideId: string) =>
     mutateGuideCache(() => removeGuideCache(guideId));
 
   const clearImages = async () => {
+    if (activeGuideDownloads > 0) {
+      throw new Error("指南正在下载，完成后才能清理图片");
+    }
     const token = imageCacheControl.beginClear();
+    imageCacheMutationActive = true;
     try {
       const result = await clearImageCache();
       imageCacheControl.finishClear(token, true);
@@ -379,6 +420,8 @@ export default definePlugin(() => {
     } catch (error: unknown) {
       imageCacheControl.finishClear(token, false);
       throw error;
+    } finally {
+      imageCacheMutationActive = false;
     }
   };
 
@@ -418,10 +461,7 @@ export default definePlugin(() => {
   };
   routerHook.addRoute(READER_ROUTE, ReaderRoute);
   routerHook.addGlobalComponent(GUIDE_DOWNLOAD_COMPONENT, () => (
-    <NativeGuideDownloadButton
-      downloadGuide={(identity) => cacheGuide(identity, false)}
-      status={status}
-    />
+    <NativeGuideDownloadButton downloadGuide={cacheGuide} status={status} />
   ));
 
   let lifetimeRegistration: { unregister(): void } | undefined;

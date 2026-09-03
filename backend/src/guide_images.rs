@@ -213,42 +213,68 @@ impl GuideImageCache {
     }
 
     pub fn get(&self, url: &str, allow_download: bool) -> Result<Option<Value>, ImageError> {
+        self.resolve(url, allow_download, false)
+    }
+
+    /// Explicit downloads must reach disk and must not be evicted by ordinary reading.
+    pub fn download(&self, url: &str) -> Result<bool, ImageError> {
+        Ok(self.resolve(url, true, true)?.is_some())
+    }
+
+    fn resolve(
+        &self,
+        url: &str,
+        allow_download: bool,
+        offline: bool,
+    ) -> Result<Option<Value>, ImageError> {
         let normalized_url = canonical_image_url(url)?;
         let key_lock = self.key_locks.retain(&normalized_url);
         let result = {
             let _key = lock(&key_lock);
-            self.get_locked(&normalized_url, allow_download)
+            self.get_locked(&normalized_url, allow_download, offline)
         };
         self.key_locks.release(&normalized_url, &key_lock);
         result
     }
 
-    fn get_locked(&self, url: &str, allow_download: bool) -> Result<Option<Value>, ImageError> {
-        if let Some(value) = lock(&self.state).get(url) {
-            return Ok(Some(response(&value, true)));
-        }
-
+    fn get_locked(
+        &self,
+        url: &str,
+        allow_download: bool,
+        offline: bool,
+    ) -> Result<Option<Value>, ImageError> {
         let generation = lock(&self.state).generation;
-        if let Some(value) = self.read_disk(url) {
-            self.store_memory_if_current(url, value.clone(), generation);
-            return Ok(Some(response(&value, true)));
+        if offline && self.read_disk(url, true).is_some() {
+            return Ok(Some(json!(true)));
         }
-        if !allow_download {
-            return Ok(None);
-        }
-
-        let downloaded = match (self.fetcher)(url, REQUEST_TIMEOUT, self.limits.max_image_bytes) {
-            Ok((mime_type, body)) => {
-                match validate_image(&mime_type, body, self.limits.max_image_bytes) {
-                    Ok(value) => value,
-                    Err(_) => return Ok(None),
-                }
-            }
-            Err(_) => return Ok(None),
+        let cached = lock(&self.state).get(url);
+        let cached = cached.or_else(|| self.read_disk(url, false));
+        let from_cache = cached.is_some();
+        let value = match cached {
+            Some(value) => value,
+            None if !allow_download => return Ok(None),
+            None => match (self.fetcher)(url, REQUEST_TIMEOUT, self.limits.max_image_bytes)
+                .and_then(|(mime, body)| validate_image(&mime, body, self.limits.max_image_bytes))
+            {
+                Ok(value) => value,
+                Err(error) if offline => return Err(error),
+                Err(_) => return Ok(None),
+            },
         };
-        self.write_disk(url, &downloaded, generation);
-        self.store_memory_if_current(url, downloaded.clone(), generation);
-        Ok(Some(response(&downloaded, false)))
+        if offline || !from_cache {
+            let saved = self.write_disk(url, &value, generation, offline);
+            if offline && !saved {
+                return Err(ImageError::download(
+                    "图片未能保存到本机：缓存容量不足、磁盘不可写，或缓存正在清理",
+                ));
+            }
+        }
+        self.store_memory_if_current(url, value.clone(), generation);
+        Ok(Some(if offline {
+            json!(true)
+        } else {
+            response(&value, from_cache)
+        }))
     }
 
     pub fn clear(&self) -> Value {
@@ -312,21 +338,27 @@ impl GuideImageCache {
         let digest = cache_digest(url);
         IMAGE_TYPES
             .iter()
-            .map(|(mime_type, extension)| {
-                (
-                    *mime_type,
-                    self.cache_directory.join(format!("{digest}.{extension}")),
-                )
+            .flat_map(|(mime_type, extension)| {
+                ["offline-", ""].map(|prefix| {
+                    (
+                        *mime_type,
+                        self.cache_directory
+                            .join(format!("{prefix}{digest}.{extension}")),
+                    )
+                })
             })
             .collect()
     }
 
-    fn read_disk(&self, url: &str) -> Option<ImageData> {
+    fn read_disk(&self, url: &str, offline_only: bool) -> Option<ImageData> {
         let _disk = lock(&self.disk_lock);
         if !safe_directory(&self.cache_directory) {
             return None;
         }
         for (mime_type, path) in self.candidate_paths(url) {
+            if offline_only && !offline_path(&path) {
+                continue;
+            }
             if let Some(value) = self.read_candidate_locked(&path, mime_type) {
                 return Some(value);
             }
@@ -370,13 +402,16 @@ impl GuideImageCache {
         }
     }
 
-    fn write_disk(&self, url: &str, value: &ImageData, generation: u64) -> bool {
+    fn write_disk(&self, url: &str, value: &ImageData, generation: u64, offline: bool) -> bool {
         if self.limits.max_disk_bytes == 0 || value.body.len() > self.limits.max_disk_bytes {
             return false;
         }
         let digest = cache_digest(url);
         let extension = extension_for_mime(&value.mime_type).unwrap();
-        let target = self.cache_directory.join(format!("{digest}.{extension}"));
+        let prefix = if offline { "offline-" } else { "" };
+        let target = self
+            .cache_directory
+            .join(format!("{prefix}{digest}.{extension}"));
         let replacing = self
             .candidate_paths(url)
             .into_iter()
@@ -409,6 +444,14 @@ impl GuideImageCache {
         });
         let mut total = entries.iter().map(|entry| entry.size).sum::<u64>();
         let wanted = value.body.len() as u64;
+        entries.retain(|entry| !offline_path(&entry.path));
+        if total
+            .saturating_sub(entries.iter().map(|entry| entry.size).sum::<u64>())
+            .saturating_add(wanted)
+            > self.limits.max_disk_bytes as u64
+        {
+            return false;
+        }
         while total.saturating_add(wanted) > self.limits.max_disk_bytes as u64 {
             if entries.is_empty() {
                 return false;
@@ -439,7 +482,7 @@ impl GuideImageCache {
                     let _ = fs::remove_file(candidate);
                 }
             }
-            let _ = sync_directory(&self.cache_directory);
+            sync_directory(&self.cache_directory)?;
             Ok(())
         })();
         drop(temporary);
@@ -497,7 +540,9 @@ impl GuideImageCache {
                 total = total.saturating_sub(entry.size);
                 continue;
             }
-            retained.push(entry);
+            if !offline_path(&entry.path) {
+                retained.push(entry);
+            }
         }
         while total > self.limits.max_disk_bytes as u64 && !retained.is_empty() {
             let entry = retained.remove(0);
@@ -615,12 +660,20 @@ fn validate_image(
     body: Vec<u8>,
     max_bytes: usize,
 ) -> Result<ImageData, ImageError> {
-    let mime_type = mime_type
+    let mut mime_type = mime_type
         .split(';')
         .next()
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase();
+    // Steam's legacy CDN also serves valid raster images as generic binary data.
+    if mime_type == "application/octet-stream" {
+        mime_type = IMAGE_TYPES
+            .iter()
+            .find(|(candidate, _)| image_type_matches(candidate, &body))
+            .map(|(candidate, _)| (*candidate).to_owned())
+            .ok_or_else(|| ImageError::download("Steam returned an unsupported image type"))?;
+    }
     if extension_for_mime(&mime_type).is_none() {
         return Err(ImageError::download(
             "Steam returned an unsupported image type",
@@ -917,16 +970,14 @@ fn download(
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_owned();
-        if extension_for_mime(
-            mime_type
-                .split(';')
-                .next()
-                .unwrap_or_default()
-                .trim()
-                .to_ascii_lowercase()
-                .as_str(),
-        )
-        .is_none()
+        let normalized_mime = mime_type
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        if normalized_mime != "application/octet-stream"
+            && extension_for_mime(&normalized_mime).is_none()
         {
             return Err(ImageError::download(
                 "Steam returned an unsupported image type",
@@ -1002,6 +1053,7 @@ fn cache_digest(url: &str) -> String {
 }
 
 fn managed_cache_name(name: &str) -> bool {
+    let name = name.strip_prefix("offline-").unwrap_or(name);
     let Some((digest, extension)) = name.split_once('.') else {
         return false;
     };
@@ -1010,6 +1062,12 @@ fn managed_cache_name(name: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         && mime_for_extension(extension).is_some()
+}
+
+fn offline_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("offline-"))
 }
 
 fn managed_temporary_name(name: &str) -> bool {

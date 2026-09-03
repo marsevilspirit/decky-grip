@@ -418,6 +418,7 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_image_and_cache_admin_rpcs_forward_protocol_methods(self):
         plugin = self.plugin()
         self.sidecar.responses["images.get"] = {"fromCache": True}
+        self.sidecar.responses["images.download"] = True
         self.sidecar.responses["guides.clear"] = {"filesRemoved": 1}
         self.sidecar.responses["guides.remove"] = {"filesRemoved": 1}
         self.sidecar.responses["images.clear"] = {"filesRemoved": 2}
@@ -434,6 +435,12 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
             )["fromCache"]
         )
         self.assertEqual((await plugin.clear_guide_cache())["filesRemoved"], 1)
+        self.assertTrue(await plugin.download_guide_image("https://images.steamusercontent.com/a.png"))
+        self.sidecar.request.assert_any_call(
+            "images.download",
+            {"url": "https://images.steamusercontent.com/a.png"},
+            timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
+        )
         self.assertEqual((await plugin.remove_guide_cache("1"))["filesRemoved"], 1)
         self.assertEqual((await plugin.clear_image_cache())["filesRemoved"], 2)
         self.assertEqual((await plugin.get_reader_cache_stats())["guides"]["files"], 0)

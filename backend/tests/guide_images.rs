@@ -110,6 +110,14 @@ fn download_result_requires_matching_static_bounded_raster() {
         ("image/gif", gif(1), true),
         ("image/webp", webp(false), true),
         ("image/jpeg", jpeg(2, 3), true),
+        ("application/octet-stream", jpeg(2, 3), true),
+        ("application/octet-stream", png(b'p', 1, 1), true),
+        (
+            "application/octet-stream",
+            b"<html>not an image</html>".to_vec(),
+            false,
+        ),
+        ("application/octet-stream", gif(2), false),
         ("image/gif", gif(2), false),
         ("image/webp", webp(true), false),
         ("image/png", png(b'p', 8_193, 1), false),
@@ -168,6 +176,7 @@ fn network_failure_is_soft_and_cache_only_never_fetches() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert!(cache.get(IMAGE_URL, true).unwrap().is_none());
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(cache.download(IMAGE_URL).unwrap_err().message(), "offline");
 }
 
 #[test]
@@ -221,6 +230,87 @@ fn python_compatible_disk_cache_survives_an_offline_process() {
             .unwrap()
             .is_none()
     );
+}
+
+#[test]
+fn explicit_downloads_reuse_cache_and_survive_eviction_and_restart() {
+    let directory = TestDirectory::new();
+    let cache_directory = directory.0.join("images");
+    let body = png(b'a', 1, 1);
+    let image_limits = limits(1024, body.len() * 2, 0);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let fetch_calls = Arc::clone(&calls);
+    let cache = GuideImageCache::with_fetcher(
+        cache_directory.clone(),
+        move |_, _, _| {
+            fetch_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(("image/png".to_owned(), body.clone()))
+        },
+        image_limits,
+    )
+    .unwrap();
+    cache.get(IMAGE_URL, true).unwrap();
+    assert!(cache.download(IMAGE_URL).unwrap());
+    assert!(cache.download(IMAGE_URL).unwrap());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(
+        cache_directory
+            .join(format!("offline-{IMAGE_DIGEST}.png"))
+            .is_file()
+    );
+    assert!(!cache_directory.join(format!("{IMAGE_DIGEST}.png")).exists());
+    cache.get(&format!("{IMAGE_URL}?second"), true).unwrap();
+    cache.get(&format!("{IMAGE_URL}?third"), true).unwrap();
+    drop(cache);
+
+    let offline = GuideImageCache::with_fetcher(
+        cache_directory,
+        |_, _, _| panic!("network used"),
+        image_limits,
+    )
+    .unwrap();
+    assert!(offline.download(IMAGE_URL).unwrap());
+    assert!(offline.get(IMAGE_URL, false).unwrap().is_some());
+    assert!(
+        offline
+            .get(&format!("{IMAGE_URL}?second"), false)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(offline.stats()["files"], 2);
+    assert_eq!(offline.clear()["filesRemoved"], 2);
+    assert!(offline.get(IMAGE_URL, false).unwrap().is_none());
+}
+
+#[test]
+fn explicit_download_never_reports_success_from_memory_or_evicts_offline_images() {
+    let directory = TestDirectory::new();
+    let body_len = png(b'a', 1, 1).len();
+    let cache = GuideImageCache::with_fetcher(
+        directory.0.join("images"),
+        |_, _, _| Ok(("image/png".to_owned(), png(b'a', 1, 1))),
+        limits(1024, body_len, 1024),
+    )
+    .unwrap();
+    assert!(cache.download(IMAGE_URL).unwrap());
+    let second = format!("{IMAGE_URL}?second");
+    assert!(cache.get(&second, true).unwrap().is_some());
+    assert!(cache.download(&second).is_err());
+    assert!(cache.get(IMAGE_URL, false).unwrap().is_some());
+    assert_eq!(cache.stats()["files"], 1);
+    assert_eq!(cache.stats()["diskBytes"], body_len);
+
+    let blocked = directory.0.join("not-a-directory");
+    fs::write(&blocked, b"keep").unwrap();
+    let cache = GuideImageCache::with_fetcher(
+        blocked.clone(),
+        |_, _, _| Ok(("image/png".to_owned(), png(b'a', 1, 1))),
+        limits(1024, 1024, 1024),
+    )
+    .unwrap();
+    assert!(cache.get(IMAGE_URL, true).unwrap().is_some());
+    assert!(cache.download(IMAGE_URL).is_err());
+    assert_eq!(fs::read(blocked).unwrap(), b"keep");
 }
 
 #[test]

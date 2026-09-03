@@ -135,10 +135,8 @@ export function guideChoicesForReader(
 
 export type GuideCacheAction = "download" | "refresh";
 
-export function guideCacheAction(
-  entry: GuideLibraryEntry,
-): GuideCacheAction | null {
-  return entry.cache ? (entry.cache.stale ? "refresh" : null) : "download";
+export function guideCacheAction(entry: GuideLibraryEntry): GuideCacheAction {
+  return entry.cache?.stale ? "refresh" : "download";
 }
 
 export function guideCacheRefreshFellBack(

@@ -30,6 +30,7 @@ enum Work {
 struct GeneralState {
     requests: VecDeque<Work>,
     active_guides: HashSet<String>,
+    active_images: usize,
     closed: bool,
 }
 
@@ -60,7 +61,7 @@ impl GeneralQueue {
         Ok(())
     }
 
-    fn recv(&self) -> Option<(Work, Option<String>)> {
+    fn recv(&self) -> Option<(Work, Option<String>, bool)> {
         let mut state = self
             .state
             .lock()
@@ -68,17 +69,20 @@ impl GeneralQueue {
         loop {
             // ponytail: scan at most 64 jobs; index queues only if this fixed bound grows.
             let runnable = state.requests.iter().position(|work| {
-                guide_request_id(work)
-                    .is_none_or(|guide_id| !state.active_guides.contains(guide_id))
+                (!is_image_request(work) || state.active_images < GENERAL_WORKERS - 1)
+                    && guide_request_id(work)
+                        .is_none_or(|guide_id| !state.active_guides.contains(guide_id))
             });
             if let Some(index) = runnable {
                 let work = state.requests.remove(index).expect("request index exists");
                 let guide_id = guide_request_id(&work).map(str::to_owned);
+                let image_request = is_image_request(&work);
+                state.active_images += usize::from(image_request);
                 if let Some(guide_id) = &guide_id {
                     state.active_guides.insert(guide_id.clone());
                 }
                 self.space.notify_one();
-                return Some((work, guide_id));
+                return Some((work, guide_id, image_request));
             }
             if state.closed && state.requests.is_empty() {
                 return None;
@@ -90,15 +94,15 @@ impl GeneralQueue {
         }
     }
 
-    fn complete(&self, guide_id: Option<&str>) {
-        let Some(guide_id) = guide_id else {
-            return;
-        };
-        self.state
+    fn complete(&self, guide_id: Option<&str>, image_request: bool) {
+        let mut state = self
+            .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .active_guides
-            .remove(guide_id);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(guide_id) = guide_id {
+            state.active_guides.remove(guide_id);
+        }
+        state.active_images -= usize::from(image_request);
         self.ready.notify_all();
     }
 
@@ -112,9 +116,10 @@ impl GeneralQueue {
     }
 }
 
-struct GuideLease<'a> {
+struct GeneralLease<'a> {
     queue: &'a GeneralQueue,
     guide_id: Option<String>,
+    image_request: bool,
 }
 
 struct GeneralServices {
@@ -124,10 +129,16 @@ struct GeneralServices {
     reader_store: ReaderPositionStore,
 }
 
-impl Drop for GuideLease<'_> {
+impl Drop for GeneralLease<'_> {
     fn drop(&mut self) {
-        self.queue.complete(self.guide_id.as_deref());
+        self.queue
+            .complete(self.guide_id.as_deref(), self.image_request);
     }
+}
+
+fn is_image_request(work: &Work) -> bool {
+    matches!(work, Work::Request(request) if request_fields(request)
+        .is_ok_and(|(method, _)| matches!(method, "images.get" | "images.download")))
 }
 
 fn guide_request_id(work: &Work) -> Option<&str> {
@@ -332,6 +343,14 @@ fn dispatch_general(
                 .map_err(RequestError::Image)?
                 .unwrap_or(Value::Null))
         }
+        "images.download" => {
+            let object = params_with_fields(params, &["url"])?;
+            let url = object
+                .get("url")
+                .and_then(Value::as_str)
+                .ok_or(StoreError::Validation("image URL is invalid"))?;
+            Ok(json!(images.download(url).map_err(RequestError::Image)?))
+        }
         "images.clear" => {
             empty_params(params)?;
             Ok(images.clear())
@@ -412,12 +431,13 @@ fn general_worker<W: Write>(
         if failed.load(Ordering::Acquire) {
             break;
         }
-        let Some((work, guide_id)) = requests.recv() else {
+        let Some((work, guide_id, image_request)) = requests.recv() else {
             break;
         };
-        let lease = GuideLease {
+        let lease = GeneralLease {
             queue: &requests,
             guide_id,
+            image_request,
         };
         if failed.load(Ordering::Acquire) {
             break;
@@ -1134,6 +1154,15 @@ mod tests {
                     .recv_timeout(Duration::from_secs(5))
                     .is_ok();
             }
+            for id in 5..=7 {
+                requests.send(Work::Request(json!({
+                    "id": id,
+                    "method": "images.download",
+                    "params": {
+                        "url": format!("https://images.steamusercontent.com/ugc/{id}/image.png"),
+                    },
+                }))).unwrap();
+            }
             requests
                 .send(Work::Request(json!({"id": 4, "method": "ping"})))
                 .unwrap();
@@ -1143,7 +1172,7 @@ mod tests {
                 thread::sleep(Duration::from_millis(5));
             }
             before_release = output_copy.messages();
-            for _ in 0..3 {
+            for _ in 0..6 {
                 let _ = release.send(());
             }
             requests.close();
@@ -1156,7 +1185,7 @@ mod tests {
         assert_eq!(before_release.len(), 1);
         assert_eq!(before_release[0]["id"], 4);
         assert_eq!(before_release[0]["result"], protocol_info());
-        assert_eq!(output_copy.messages().len(), 4);
+        assert_eq!(output_copy.messages().len(), 7);
         assert!(!failed.load(Ordering::Acquire));
     }
 

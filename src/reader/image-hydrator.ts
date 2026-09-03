@@ -15,6 +15,8 @@ interface HydratableImage {
   dataset: DOMStringMap;
   isConnected: boolean;
   src: string;
+  width: number;
+  height: number;
   removeAttribute(name: string): void;
 }
 
@@ -28,12 +30,15 @@ interface BlobEntry {
   bytes: number;
   images: Set<HydratableImage>;
   objectUrl: string;
+  width: number;
+  height: number;
 }
 
 type ObjectUrlFactory = (image: CachedGuideImage) => string;
 
 const DEFAULT_CONCURRENCY = 3;
-const DEFAULT_MAX_BLOB_BYTES = 32 * 1024 * 1024;
+// Must fit one image accepted by the backend's 16-megapixel limit.
+const DEFAULT_MAX_BLOB_BYTES = 64 * 1024 * 1024;
 const DEFAULT_MAX_BLOB_ENTRIES = 64;
 const DEFAULT_MAX_PENDING_URLS = 48;
 const ALLOWED_IMAGE_MIME_TYPES = new Set([
@@ -248,6 +253,10 @@ export class ReaderImageHydrator {
         this.markUnavailable(task);
         return;
       }
+      for (const image of connected) {
+        image.width = result.width;
+        image.height = result.height;
+      }
       if (!this.evictToFit(bytes)) {
         this.markCapacityDeferred(task);
         return;
@@ -261,6 +270,8 @@ export class ReaderImageHydrator {
         bytes,
         images: new Set(),
         objectUrl,
+        width: result.width,
+        height: result.height,
       };
       this.blobs.set(task.url, blob);
       this.blobBytes += bytes;
@@ -286,6 +297,8 @@ export class ReaderImageHydrator {
     this.imageUrls.set(image, url);
     this.capacityDeferredAt.delete(image);
     blob.images.add(image);
+    image.width = blob.width;
+    image.height = blob.height;
     if (image.src !== blob.objectUrl) {
       image.src = blob.objectUrl;
     }

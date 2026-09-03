@@ -117,6 +117,7 @@ fn json_lines_process_handles_ping_repair_and_position_lifecycle() {
         json!({"id": 13, "method": "images.get", "params": {"url": "https://images.steamusercontent.com/ugc/example/image.png", "allow_download": false}}),
         json!({"id": 14, "method": "images.clear"}),
         json!({"id": 15, "method": "reader_cache.stats"}),
+        json!({"id": 16, "method": "images.download", "params": {"url": "http://evil.example/image.png"}}),
     ];
     {
         let input = child.stdin.as_mut().unwrap();
@@ -139,7 +140,8 @@ fn json_lines_process_handles_ping_repair_and_position_lifecycle() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(responses.len(), 15);
+    assert_eq!(responses.len(), 16);
+    assert_eq!(responses[&16]["error"]["kind"], "validation");
     assert_eq!(
         responses[&1]["result"],
         json!({

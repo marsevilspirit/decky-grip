@@ -47,6 +47,7 @@ vi.mock("@decky/ui", () => {
       createElement("section", null, title, children),
     PanelSectionRow: ({ children }: MockProps) =>
       createElement("div", null, children),
+    Spinner: () => createElement("span"),
     TextField: ({ label, onChange, value }: MockProps) =>
       createElement("input", {
         "aria-label": label,
@@ -251,7 +252,7 @@ describe("GripPanel", () => {
     expect(panelText()).not.toContain("筛选指南");
     expect(panelText()).not.toContain("仅看收藏");
     expect(panelText()).not.toContain("清除指南正文缓存");
-    expect(panelText()).not.toContain("更新正文缓存");
+    expect(panelText()).not.toContain("更新离线指南");
     expect(panelText()).not.toContain("移除此指南的正文缓存");
     expect(panelText()).not.toContain("物理 L4 首屏门禁");
 
@@ -260,7 +261,7 @@ describe("GripPanel", () => {
     });
 
     expect(panelText()).toContain("清除指南正文缓存");
-    expect(panelText()).toContain("更新正文缓存");
+    expect(panelText()).toContain("更新离线指南");
     expect(panelText()).toContain("移除此指南的正文缓存");
     expect(panelText()).toContain("物理 L4 首屏门禁");
   });
@@ -293,6 +294,9 @@ describe("GripPanel", () => {
 
     await act(async () => button("高级选项").click());
     await act(async () => button("清除指南正文缓存").click());
+    expect(
+      button("正在清除").querySelector('[data-grip-busy="true"]'),
+    ).not.toBeNull();
     await act(async () => button("高级选项").click());
     await act(async () => {
       finishClear({ bytesRemoved: 1_024, filesRemoved: 2 });

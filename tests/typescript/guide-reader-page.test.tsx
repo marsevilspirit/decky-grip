@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GuideLibraryEntry } from "../../src/backend";
 import { GuideReaderPage } from "../../src/components/GuideReaderPage";
 import { ReaderImageCacheControl } from "../../src/reader/image-cache-control";
+import type { GuideImageFetcher } from "../../src/reader/image-hydrator";
 import { ReaderPerformanceTracker } from "../../src/reader/performance";
 import {
   ReaderSessionCache,
@@ -80,7 +81,7 @@ vi.mock("@decky/ui", () => {
       DIR_DOWN: 13,
       DIR_UP: 12,
     },
-    Spinner: () => createElement("span", null, "loading"),
+    Spinner: () => createElement("span"),
     TextField: ({ label, onChange, value }: MockProps) =>
       createElement("input", {
         "aria-label": label as string,
@@ -280,10 +281,11 @@ describe("GuideReaderPage position lifecycle", () => {
 
   const mount = async (
     cache: ReaderSessionCache,
-    fetchImage: () => Promise<null>,
+    fetchImage: GuideImageFetcher,
     scrollHeight: number,
     options: {
       loadGuideLibrary?: (appId: string) => Promise<GuideLibraryEntry[]>;
+      onClose?: () => void;
       onSwitchGuide?: (identity: GuideIdentity) => Promise<void>;
     } = {},
   ): Promise<HTMLElement> => {
@@ -297,7 +299,7 @@ describe("GuideReaderPage position lifecycle", () => {
           fetchImage={fetchImage}
           imageCacheControl={new ReaderImageCacheControl()}
           loadGuideLibrary={options.loadGuideLibrary ?? (async () => [])}
-          onClose={() => undefined}
+          onClose={options.onClose ?? (() => undefined)}
           onRepairPositions={async () => ""}
           onSwitchGuide={options.onSwitchGuide ?? (async () => undefined)}
           performance={new ReaderPerformanceTracker()}
@@ -481,6 +483,9 @@ describe("GuideReaderPage position lifecycle", () => {
     await flushMicrotasks();
 
     expect(scroller.style.overflowY).toBe("auto");
+    expect(
+      buttonNamed("更新中…").querySelector('[data-grip-busy="true"]'),
+    ).not.toBeNull();
     expect(buttonNamed("搜索").disabled).toBe(true);
     expect(buttonNamed("章节 1").disabled).toBe(true);
 
@@ -506,7 +511,7 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(persistedPosition.scrollTop).toBe(4_600);
   });
 
-  it("keeps the current guide non-interactive in the switcher", async () => {
+  it("keeps the reader headerless and the current guide non-interactive", async () => {
     const guide = guideFixture();
     const backend: ReaderSessionBackend = {
       getCachedGuide: async () => guide,
@@ -528,22 +533,40 @@ describe("GuideReaderPage position lifecycle", () => {
     };
     const cache = new ReaderSessionCache(backend);
     await cache.load(identity);
-    await mount(cache, async () => null, 12_000);
+    const scroller = await mount(cache, async () => null, 12_000);
 
-    await act(async () => buttonNamed("切换指南").click());
+    expect(container?.querySelector(".grip-reader-guide-title")).toBeNull();
+    expect(
+      [...(container?.querySelectorAll("button") ?? [])].some((button) =>
+        ["返回", "上一篇", "下一篇", "切换指南"].includes(
+          button.textContent ?? "",
+        ),
+      ),
+    ).toBe(false);
+
+    await act(async () => {
+      pressKey(scroller, "Options");
+    });
     await flushFrame();
     await flushMicrotasks();
-    expect(buttonNamed("切换指南").disabled).toBe(true);
     expect(document.activeElement).toBe(buttonNamed("关闭"));
-    const currentGuide = container?.querySelector('[aria-current="page"]');
+    const page = container?.firstElementChild as HTMLElement | null;
+    const dialog = container?.querySelector<HTMLElement>(
+      '[aria-label="切换指南"]',
+    );
+    expect(page?.style.paddingTop).toBe("40px");
+    expect(dialog?.style.top).toBe("40px");
+    expect(dialog?.classList.contains("grip-reader-guide-switcher")).toBe(true);
+    const currentGuide = dialog?.querySelector('[aria-current="page"]');
     expect(currentGuide?.tagName).toBe("DIV");
     expect(currentGuide?.textContent).toContain("正在阅读 · 组件回归指南");
+    expect(container?.querySelector(".grip-reader-guide-enter")).not.toBeNull();
     expect(
       container?.querySelector('button[aria-label^="正在阅读："]'),
     ).toBeNull();
   });
 
-  it("keeps an active guide filter across switcher reopen", async () => {
+  it("shows every guide without a filter across switcher reopen", async () => {
     const guide = guideFixture();
     const backend: ReaderSessionBackend = {
       getCachedGuide: async () => guide,
@@ -585,34 +608,34 @@ describe("GuideReaderPage position lifecycle", () => {
     };
     const library = [currentGuide, otherGuide];
     const loadGuideLibrary = vi.fn(async () => library);
-    await mount(cache, async () => null, 12_000, {
+    const scroller = await mount(cache, async () => null, 12_000, {
       loadGuideLibrary,
     });
 
-    await act(async () => buttonNamed("切换指南").click());
-    await flushMicrotasks();
-    const filter = container?.querySelector<HTMLInputElement>(
-      'input[aria-label="筛选指南"]',
-    );
-    expect(filter).not.toBeNull();
     await act(async () => {
-      const setValue = Object.getOwnPropertyDescriptor(
-        HTMLInputElement.prototype,
-        "value",
-      )?.set;
-      setValue?.call(filter, "另一篇");
-      filter?.dispatchEvent(new Event("input", { bubbles: true }));
-      await Promise.resolve();
+      pressKey(scroller, "Options");
     });
+    await flushMicrotasks();
+    expect(
+      container?.querySelector('[aria-label="切换指南"] input'),
+    ).toBeNull();
+    expect(
+      container?.querySelector('[aria-current="page"]')?.textContent,
+    ).toContain(guide.title);
+    expect(container?.textContent).toContain("另一篇指南");
 
     await act(async () => buttonNamed("关闭").click());
-    await act(async () => buttonNamed("切换指南").click());
+    await act(async () => {
+      pressKey(scroller, "Options");
+    });
     await flushMicrotasks();
 
     expect(
-      container?.querySelector<HTMLInputElement>('input[aria-label="筛选指南"]')
-        ?.value,
-    ).toBe("另一篇");
+      container?.querySelector('[aria-label="切换指南"] input'),
+    ).toBeNull();
+    expect(
+      container?.querySelector('[aria-current="page"]')?.textContent,
+    ).toContain(guide.title);
     expect(container?.textContent).toContain("另一篇指南");
     expect(loadGuideLibrary).toHaveBeenCalledTimes(1);
   });
@@ -639,7 +662,26 @@ describe("GuideReaderPage position lifecycle", () => {
     };
     const cache = new ReaderSessionCache(backend);
     await cache.load(identity);
-    const scroller = await mount(cache, async () => null, 12_000);
+    const onClose = vi.fn();
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:cached-guide-image");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    const fetchImage = vi.fn(async () => ({
+      mimeType: "image/png",
+      base64: "AQID",
+      fromCache: true,
+      width: 1,
+      height: 1,
+    }));
+    const scroller = await mount(cache, fetchImage, 12_000, { onClose });
+    for (let frame = 0; frame < 3; frame += 1) {
+      await flushFrame();
+    }
+    const image = container?.querySelector("img[data-grip-image-url]");
+    expect(image?.getAttribute("src")).toBe("blob:cached-guide-image");
+    for (let frame = 0; frame < 5; frame += 1) {
+      await flushFrame();
+    }
+    expect(container?.querySelector("img[data-grip-image-url]")).toBe(image);
     const page = container?.firstElementChild;
     expect(page?.getAttribute("data-options-action")).toBe("切换指南");
     scroller.focus();
@@ -665,9 +707,27 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(container?.querySelector('[aria-label="切换指南"]')).toBeNull();
     expect(document.activeElement).toBe(scroller);
     expect(page?.getAttribute("data-options-action")).toBe("切换指南");
+    expect(onClose).not.toHaveBeenCalled();
+    expect(container?.querySelector("img[data-grip-image-url]")).toBe(image);
+    expect(image?.getAttribute("src")).toBe("blob:cached-guide-image");
+    expect(fetchImage).toHaveBeenCalledTimes(1);
+
+    buttonNamed("搜索").focus();
+    await act(async () => {
+      pressKey(buttonNamed("搜索"), "Options");
+    });
+    await flushFrame();
+    await act(async () => buttonNamed("关闭").click());
+    await flushFrame();
+    expect(document.activeElement).toBe(scroller);
+
+    await act(async () => {
+      pressKey(scroller, "Escape");
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("switches to stable numeric neighbors without crossing AppID", async () => {
+  it("switches through the picker after saving without crossing AppID", async () => {
     const guide = guideFixture();
     const actions: string[] = [];
     const backend: ReaderSessionBackend = {
@@ -707,40 +767,50 @@ describe("GuideReaderPage position lifecycle", () => {
       updatedAt: Number(guideId),
       cache: null,
     });
-    const previous = entry(identity.appId, "20");
-    const next = entry(identity.appId, "10000000000");
-    await mount(cache, async () => null, 12_000, {
+    const scroller = await mount(cache, async () => null, 12_000, {
       loadGuideLibrary: async () => [
-        next,
+        entry(identity.appId, "10000000000"),
         entry("222", "30"),
         entry(identity.appId, identity.guideId),
-        previous,
+        entry(identity.appId, "20"),
       ],
       onSwitchGuide: async (target) => {
         actions.push(`switch ${target.guideId}`);
       },
     });
+    await act(async () => {
+      pressKey(scroller, "Options");
+    });
     await flushMicrotasks();
 
-    expect(buttonNamed("上一篇").getAttribute("aria-label")).toContain("20");
-    expect(buttonNamed("下一篇").getAttribute("aria-label")).toContain(
-      "10000000000",
-    );
     expect(container?.textContent).not.toContain("Steam 指南 30");
 
-    await act(async () => buttonNamed("上一篇").click());
+    await act(async () => {
+      container
+        ?.querySelector<HTMLButtonElement>('button[aria-label="打开指南：20"]')
+        ?.click();
+    });
     await flushMicrotasks();
     expect(actions).toEqual([
       `save ${identity.appId}:${identity.guideId}`,
       "switch 20",
     ]);
 
-    await act(async () => buttonNamed("下一篇").click());
+    await act(async () => {
+      pressKey(scroller, "Options");
+    });
+    await act(async () => {
+      container
+        ?.querySelector<HTMLButtonElement>(
+          'button[aria-label="打开指南：10000000000"]',
+        )
+        ?.click();
+    });
     await flushMicrotasks();
     expect(actions[actions.length - 1]).toBe("switch 10000000000");
   });
 
-  it("keeps a direct neighbor load failure visible without switching", async () => {
+  it("keeps a picker load failure visible without switching", async () => {
     const guide = guideFixture();
     const backend: ReaderSessionBackend = {
       getCachedGuide: async (guideId) =>
@@ -769,7 +839,7 @@ describe("GuideReaderPage position lifecycle", () => {
     const cache = new ReaderSessionCache(backend);
     await cache.load(identity);
     const onSwitchGuide = vi.fn(async () => undefined);
-    await mount(cache, async () => null, 12_000, {
+    const scroller = await mount(cache, async () => null, 12_000, {
       loadGuideLibrary: async () => [
         {
           appId: identity.appId,
@@ -786,9 +856,16 @@ describe("GuideReaderPage position lifecycle", () => {
       ],
       onSwitchGuide,
     });
+    await act(async () => {
+      pressKey(scroller, "Options");
+    });
     await flushMicrotasks();
 
-    await act(async () => buttonNamed("上一篇").click());
+    await act(async () => {
+      container
+        ?.querySelector<HTMLButtonElement>('button[aria-label="打开指南：20"]')
+        ?.click();
+    });
     await flushMicrotasks();
 
     expect(container?.querySelector('[role="alert"]')?.textContent).toContain(
@@ -958,6 +1035,22 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(resizeCallbacks).toHaveLength(1);
     scroller.dispatchEvent(new Event("wheel"));
     expect(resizeCallbacks).toHaveLength(0);
+
+    await act(async () => {
+      const setValue = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      setValue?.call(search, guide.title);
+      search?.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const titleResult = container?.querySelector<HTMLButtonElement>(
+      'button[aria-label^="跳转到搜索结果"]',
+    );
+    expect(titleResult?.textContent).toContain(guide.title);
+    expect(scroller.scrollTop).toBeGreaterThan(0);
+    await act(async () => titleResult?.click());
+    expect(scroller.scrollTop).toBe(0);
 
     await act(async () => buttonNamed("关闭搜索").click());
     blockRefresh = true;

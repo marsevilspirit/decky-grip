@@ -103,6 +103,19 @@ describe("ReaderSessionCache", () => {
     expect(injected.getReaderPosition).toHaveBeenCalledWith(guideKey);
   });
 
+  it("revalidates explicit downloads against disk without forcing a network refresh", async () => {
+    const injected = backend();
+    const cache = new ReaderSessionCache(injected);
+    await cache.load(identity);
+    const checked = await cache.load(identity, { revalidate: true });
+    expect(injected.getGuide).toHaveBeenCalledTimes(2);
+    expect(injected.getGuide).toHaveBeenLastCalledWith(identity.guideId, false);
+    expect(checked.position?.scrollTop).toBe(120);
+    expect(cache.peek(identity)).toBe(checked);
+    await expect(cache.load(identity)).resolves.toBe(checked);
+    expect(injected.getGuide).toHaveBeenCalledTimes(2);
+  });
+
   it("records reader access even when the position did not change", async () => {
     const injected = backend();
     const cache = new ReaderSessionCache(injected);

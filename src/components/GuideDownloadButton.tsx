@@ -3,18 +3,21 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 
 import type { DownloadedGuide } from "../reader/types";
+import type { GuideImageDownloadProgress } from "../reader/download";
 import type { RuntimeStatusStore } from "../runtime-status";
 import { makeGuideKey, type GuideIdentity } from "../steam/guide-key";
 import {
   findNativeGuideActionTarget,
   type NativeGuideActionTarget,
 } from "../steam/native-guide";
+import { BusyLabel } from "./BusyLabel";
 
 export interface GuideDownloadButtonProps {
   identity: GuideIdentity | null;
   target: NativeGuideActionTarget | null;
   downloadGuide: (
     identity: GuideIdentity,
+    onProgress?: (progress: GuideImageDownloadProgress) => void,
   ) => Promise<Pick<DownloadedGuide, "stale">>;
 }
 
@@ -28,6 +31,7 @@ type DownloadPhase = "downloading" | "cached" | "stale" | "failed";
 interface DownloadState {
   guideKey: string;
   phase: DownloadPhase;
+  progress?: GuideImageDownloadProgress;
 }
 
 const LABELS: Record<DownloadPhase, string> = {
@@ -99,7 +103,11 @@ function GuideDownloadButtonForGuide({
       setDownloadState({ guideKey, phase: nextPhase });
     };
     try {
-      const guide = await downloadGuide(identity);
+      const guide = await downloadGuide(identity, (progress) => {
+        if (latestRequest.current === request) {
+          setDownloadState({ guideKey, phase: "downloading", progress });
+        }
+      });
       finish(guide.stale ? "stale" : "cached");
     } catch {
       finish("failed");
@@ -119,7 +127,17 @@ function GuideDownloadButtonForGuide({
         disabled={phase === "downloading"}
         onClick={() => void download()}
       >
-        {phase ? LABELS[phase] : "下载到 GRIP"}
+        {phase === "downloading" ? (
+          <BusyLabel>
+            {downloadState?.progress
+              ? `图片 ${downloadState.progress.completed}/${downloadState.progress.total}…`
+              : LABELS[phase]}
+          </BusyLabel>
+        ) : phase ? (
+          LABELS[phase]
+        ) : (
+          "下载到 GRIP"
+        )}
       </DialogButton>
     </NavigationProvider>,
     target.element,

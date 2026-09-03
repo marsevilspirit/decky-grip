@@ -75,14 +75,15 @@ Python tests use only the standard library.
 ## Using GRIP Reader
 
 1. Open a Steam Community guide, scroll to the paragraph you want, then choose
-   **下载到 GRIP**. Images continue to cache on demand while reading.
+   **下载到 GRIP**. The button reports image progress and only shows **已下载**
+   after the body and every image are saved locally. Failed downloads can be
+   retried without downloading already-saved images again.
 2. Select **GRIP**, then choose **继续当前或最近指南**, or open a specific
-   entry from **指南库**. Open **高级选项** to download or update missing or
-   stale guide bodies without opening the reader, and to manage local caches;
+   entry from **指南库**. Open **高级选项** to complete or update offline guides
+   without opening the reader, and to manage local caches;
    filtering never contacts Steam.
-3. Scroll normally in the full-screen reader. Press **Options** or choose
-   **切换指南** to open the current game's guide list; **上一篇** and
-   **下一篇** move through that list directly. Choose **搜索** to find local
+3. Scroll normally in the full-screen reader. Press **Y** to open the current
+   game's guide list and **B** to close the list or leave the reader. Choose **搜索** to find local
    guide titles, chapters, or body text, preview matching context, and step
    through highlighted matches. GRIP saves each guide's visible text and exact
    viewport offset independently.
@@ -143,9 +144,14 @@ limited to 20 MiB each, 256 MiB across the disk LRU, and 32 MiB in the Rust
 memory LRU. Opening a body promotes it; listing guide summaries does not.
 
 Images live under the guide cache's `images/` directory. Each image is limited
-to 8 MiB and a validated 8192-pixel / 16-megapixel canvas, the disk LRU to
-128 MiB, and the Rust memory LRU to 24 MiB. The reader downloads only images
-near the viewport and keeps at most 32 MiB / 64 entries of estimated decoded
+to 8 MiB and a validated 8192-pixel / 16-megapixel canvas, disk storage to
+128 MiB, and the Rust memory LRU to 24 MiB. Explicit downloads use `offline-`
+prefixed cache files that survive ordinary LRU eviction and process restarts;
+if they fill the disk quota, further downloads report an error instead of
+discarding offline images. Clearing the image cache also removes these files.
+Downloads save up to three images concurrently in Rust without sending their
+bytes through the frontend. The reader still loads only images near the viewport
+and keeps at most 64 MiB / 64 entries of estimated decoded
 frontend image residency. Animated image payloads are rejected, and the reader
 observes at most 512 inert image nodes while staging no more than 48 distinct
 image URLs at once. Under **高级选项**, the panel shows cache usage and provides

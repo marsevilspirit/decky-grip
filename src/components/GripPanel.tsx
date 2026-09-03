@@ -16,6 +16,7 @@ import {
   type ReaderCacheStats,
 } from "../backend";
 import type { ReaderPerformanceTracker } from "../reader/performance";
+import type { GuideImageDownloadProgress } from "../reader/download";
 import {
   filterGuideLibraryEntries,
   guideCacheAction,
@@ -25,6 +26,7 @@ import {
 import type { DownloadedGuide } from "../reader/types";
 import type { GripRuntimeStatus, RuntimeStatusStore } from "../runtime-status";
 import type { GuideIdentity } from "../steam/guide-key";
+import { BusyLabel } from "./BusyLabel";
 
 export interface GripPanelProps {
   status: RuntimeStatusStore;
@@ -33,7 +35,11 @@ export interface GripPanelProps {
   loadGuideLibrary: (appId: string | null) => Promise<GuideLibraryEntry[]>;
   retryPositions: () => Promise<boolean>;
   performance: ReaderPerformanceTracker;
-  cacheGuide: (identity: GuideIdentity) => Promise<DownloadedGuide>;
+  cacheGuide: (
+    identity: GuideIdentity,
+    onProgress?: (progress: GuideImageDownloadProgress) => void,
+    forceRefresh?: boolean,
+  ) => Promise<DownloadedGuide>;
   clearGuides: () => Promise<CacheClearResult>;
   clearImages: () => Promise<CacheClearResult>;
   getCacheStats: () => Promise<ReaderCacheStats>;
@@ -78,8 +84,8 @@ function describeGuide(entry: GuideLibraryEntry): string {
     `游戏 ${entry.appId}`,
     entry.cache
       ? entry.cache.stale
-        ? "已缓存，可更新"
-        : "已缓存"
+        ? "正文已缓存，可更新"
+        : "正文已缓存"
       : "打开时联网下载",
     `最近记录 ${formatReadTime(entry.updatedAt)}`,
   ];
@@ -120,17 +126,22 @@ export function GripPanel({
   const [libraryRevision, setLibraryRevision] = useState(0);
   const [guideFilter, setGuideFilter] = useState("");
   const [hotkeyStatus, setHotkeyStatus] = useState<HotkeyStatus | null>(null);
-  const [positionRetryBusy, setPositionRetryBusy] = useState(false);
+  const [positionBusy, setPositionBusy] = useState<"retry" | "repair" | null>(
+    null,
+  );
   const [repairMessage, setRepairMessage] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [cacheBusy, setCacheBusy] = useState(false);
+  const [cacheBusyKey, setCacheBusyKey] = useState<string | null>(null);
   const [cacheMessage, setCacheMessage] = useState<string | null>(null);
+  const [downloadProgress, setDownloadProgress] =
+    useState<GuideImageDownloadProgress | null>(null);
   const [cacheStats, setCacheStats] = useState<ReaderCacheStats | null>(null);
   const [cacheStatsError, setCacheStatsError] = useState<string | null>(null);
   const performanceSnapshot = useSyncExternalStore(
     performance.subscribe,
     performance.getSnapshot,
   );
+  const cacheBusy = cacheBusyKey !== null;
 
   const refreshCacheStats = async (): Promise<void> => {
     setCacheStatsError(null);
@@ -224,6 +235,7 @@ export function GripPanel({
   ]);
 
   const runCacheAction = async <Result,>(
+    busyKey: string,
     action: () => Promise<Result>,
     successMessage: (result: Result) => string,
     failureLabel: string,
@@ -231,7 +243,7 @@ export function GripPanel({
     if (cacheBusy) {
       return;
     }
-    setCacheBusy(true);
+    setCacheBusyKey(busyKey);
     setCacheMessage(null);
     try {
       const result = await action();
@@ -242,7 +254,19 @@ export function GripPanel({
       );
     } finally {
       await refreshCacheStats();
-      setCacheBusy(false);
+      setCacheBusyKey(null);
+    }
+  };
+
+  const retryCacheStats = async (): Promise<void> => {
+    if (cacheBusy) {
+      return;
+    }
+    setCacheBusyKey("stats");
+    try {
+      await refreshCacheStats();
+    } finally {
+      setCacheBusyKey(null);
     }
   };
 
@@ -262,6 +286,7 @@ export function GripPanel({
   const removeCachedGuide = async (entry: GuideLibraryEntry): Promise<void> => {
     const title = entry.cache?.title ?? `指南 ${entry.guideId}`;
     await runCacheAction(
+      `remove:${entry.appId}:${entry.guideId}`,
       () => removeGuideCache(entry.guideId),
       (result) =>
         `“${title}”缓存已移除：释放 ${formatBytes(result.bytesRemoved)}`,
@@ -269,20 +294,22 @@ export function GripPanel({
     );
   };
 
-  const cacheGuideBody = async (
+  const downloadGuide = async (
     entry: GuideLibraryEntry,
     action: GuideCacheAction,
   ): Promise<void> => {
     const title = entry.cache?.title ?? `指南 ${entry.guideId}`;
+    setDownloadProgress(null);
     await runCacheAction(
-      () => cacheGuide(entry),
+      `cache:${entry.appId}:${entry.guideId}`,
+      () => cacheGuide(entry, setDownloadProgress, action === "refresh"),
       (guide) =>
         guideCacheRefreshFellBack(action, guide)
-          ? `“${title}”更新失败，继续保留本地旧缓存`
+          ? `“${title}”更新失败，旧版正文和图片已完整保存`
           : action === "refresh"
-            ? `“${title}”正文缓存已更新`
-            : `“${title}”正文已缓存到本机`,
-      `${action === "refresh" ? "更新" : "下载"}正文缓存`,
+            ? `“${title}”正文和图片已更新，可完整离线阅读`
+            : `“${title}”正文和图片已保存，可完整离线阅读`,
+      `${action === "refresh" ? "更新" : "下载"}指南`,
     );
   };
 
@@ -299,9 +326,11 @@ export function GripPanel({
           <ButtonItem
             disabled={readerBusy !== null || cacheBusy}
             label={
-              readerBusy === "recent"
-                ? "正在打开 GRIP 阅读器…"
-                : "继续当前或最近指南"
+              readerBusy === "recent" ? (
+                <BusyLabel>正在打开 GRIP 阅读器…</BusyLabel>
+              ) : (
+                "继续当前或最近指南"
+              )
             }
             layout="below"
             onClick={() => runOpen("recent", openReader)}
@@ -314,24 +343,34 @@ export function GripPanel({
             <div style={{ color: "#f0b35a" }}>
               <div>{status.positionWarning}</div>
               <ButtonItem
-                disabled={positionRetryBusy}
-                label={positionRetryBusy ? "正在重试…" : "重试读取位置"}
+                disabled={positionBusy !== null}
+                label={
+                  positionBusy === "retry" ? (
+                    <BusyLabel>正在重试…</BusyLabel>
+                  ) : (
+                    "重试读取位置"
+                  )
+                }
                 layout="below"
                 onClick={() => {
-                  setPositionRetryBusy(true);
-                  void retryPositions().finally(() =>
-                    setPositionRetryBusy(false),
-                  );
+                  setPositionBusy("retry");
+                  void retryPositions().finally(() => setPositionBusy(null));
                 }}
               >
                 不会影响已缓存的指南正文
               </ButtonItem>
               <ButtonItem
-                disabled={positionRetryBusy}
-                label="备份并重置损坏位置"
+                disabled={positionBusy !== null}
+                label={
+                  positionBusy === "repair" ? (
+                    <BusyLabel>正在备份并重置…</BusyLabel>
+                  ) : (
+                    "备份并重置损坏位置"
+                  )
+                }
                 layout="below"
                 onClick={() => {
-                  setPositionRetryBusy(true);
+                  setPositionBusy("repair");
                   setRepairMessage(null);
                   void repairPositions()
                     .then(setRepairMessage)
@@ -340,7 +379,7 @@ export function GripPanel({
                         `位置恢复失败：${error instanceof Error ? error.message : String(error)}`,
                       ),
                     )
-                    .finally(() => setPositionRetryBusy(false));
+                    .finally(() => setPositionBusy(null));
                 }}
               >
                 仅在校验失败时备份原文件并重置
@@ -406,11 +445,17 @@ export function GripPanel({
                 不会修改阅读位置或正文缓存
               </ButtonItem>
               <ButtonItem
-                disabled={positionRetryBusy}
-                label={positionRetryBusy ? "正在修复…" : "备份并修复本地数据"}
+                disabled={positionBusy !== null}
+                label={
+                  positionBusy === "repair" ? (
+                    <BusyLabel>正在修复…</BusyLabel>
+                  ) : (
+                    "备份并修复本地数据"
+                  )
+                }
                 layout="below"
                 onClick={() => {
-                  setPositionRetryBusy(true);
+                  setPositionBusy("repair");
                   setRepairMessage(null);
                   void repairPositions()
                     .then(setRepairMessage)
@@ -421,7 +466,7 @@ export function GripPanel({
                     )
                     .finally(() => {
                       setLibraryRevision((revision) => revision + 1);
-                      setPositionRetryBusy(false);
+                      setPositionBusy(null);
                     });
                 }}
               >
@@ -453,9 +498,11 @@ export function GripPanel({
                 <ButtonItem
                   disabled={readerBusy !== null || cacheBusy}
                   label={
-                    readerBusy === guideKey
-                      ? "正在打开…"
-                      : (entry.cache?.title ?? `Steam 指南 ${entry.guideId}`)
+                    readerBusy === guideKey ? (
+                      <BusyLabel>正在打开…</BusyLabel>
+                    ) : (
+                      (entry.cache?.title ?? `Steam 指南 ${entry.guideId}`)
+                    )
                   }
                   layout="below"
                   onClick={() =>
@@ -473,22 +520,38 @@ export function GripPanel({
                   <ButtonItem
                     disabled={cacheBusy || readerBusy !== null}
                     label={
-                      cacheAction === "refresh"
-                        ? "更新正文缓存"
-                        : "下载正文缓存"
+                      cacheBusyKey === `cache:${guideKey}` ? (
+                        <BusyLabel>
+                          {downloadProgress
+                            ? `图片 ${downloadProgress.completed}/${downloadProgress.total}…`
+                            : cacheAction === "refresh"
+                              ? "正在更新…"
+                              : "正在下载…"}
+                        </BusyLabel>
+                      ) : cacheAction === "refresh" ? (
+                        "更新离线指南"
+                      ) : (
+                        "补全离线下载"
+                      )
                     }
                     layout="below"
-                    onClick={() => void cacheGuideBody(entry, cacheAction)}
+                    onClick={() => void downloadGuide(entry, cacheAction)}
                   >
                     {cacheAction === "refresh"
-                      ? "联网获取新版；失败时保留当前本地正文"
-                      : "不打开阅读器，下载后可离线打开正文"}
+                      ? "下载新版正文和全部图片；失败时保留已保存内容"
+                      : "补齐正文和全部图片；已有图片无需重新下载"}
                   </ButtonItem>
                 )}
                 {showAdvanced && entry.cache && (
                   <ButtonItem
                     disabled={cacheBusy || readerBusy !== null}
-                    label="移除此指南的正文缓存"
+                    label={
+                      cacheBusyKey === `remove:${guideKey}` ? (
+                        <BusyLabel>正在移除…</BusyLabel>
+                      ) : (
+                        "移除此指南的正文缓存"
+                      )
+                    }
                     layout="below"
                     onClick={() => void removeCachedGuide(entry)}
                   >
@@ -564,9 +627,15 @@ export function GripPanel({
               <PanelSectionRow>
                 <ButtonItem
                   disabled={cacheBusy}
-                  label="重试读取缓存用量"
+                  label={
+                    cacheBusyKey === "stats" ? (
+                      <BusyLabel>正在读取…</BusyLabel>
+                    ) : (
+                      "重试读取缓存用量"
+                    )
+                  }
                   layout="below"
-                  onClick={() => void refreshCacheStats()}
+                  onClick={() => void retryCacheStats()}
                 >
                   仅重新读取统计，不会修改缓存或阅读位置
                 </ButtonItem>
@@ -575,10 +644,17 @@ export function GripPanel({
             <PanelSectionRow>
               <ButtonItem
                 disabled={cacheBusy}
-                label="清除指南正文缓存"
+                label={
+                  cacheBusyKey === "clear-guides" ? (
+                    <BusyLabel>正在清除…</BusyLabel>
+                  ) : (
+                    "清除指南正文缓存"
+                  )
+                }
                 layout="below"
                 onClick={() =>
                   void runCacheAction(
+                    "clear-guides",
                     clearGuides,
                     (result) =>
                       `指南缓存已清除：删除 ${result.filesRemoved} 个文件，释放 ${formatBytes(result.bytesRemoved)}`,
@@ -592,10 +668,17 @@ export function GripPanel({
             <PanelSectionRow>
               <ButtonItem
                 disabled={cacheBusy}
-                label="清除图片缓存"
+                label={
+                  cacheBusyKey === "clear-images" ? (
+                    <BusyLabel>正在清除…</BusyLabel>
+                  ) : (
+                    "清除图片缓存"
+                  )
+                }
                 layout="below"
                 onClick={() =>
                   void runCacheAction(
+                    "clear-images",
                     clearImages,
                     (result) =>
                       `图片缓存已清除：删除 ${result.filesRemoved} 个文件，释放 ${formatBytes(result.bytesRemoved)}`,

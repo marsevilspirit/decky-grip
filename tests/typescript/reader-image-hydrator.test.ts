@@ -10,6 +10,8 @@ function image(url: string) {
     dataset: { gripImageUrl: url } as DOMStringMap,
     isConnected: true,
     src: "",
+    width: 0,
+    height: 0,
     removeAttribute(name: string) {
       if (name === "src") {
         candidate.src = "";
@@ -151,7 +153,7 @@ describe("reader image hydration", () => {
     const target = image("https://a/large");
     const makeObjectUrl = vi.fn(() => "blob:large");
     const hydrator = new ReaderImageHydrator(
-      vi.fn(async () => ({ ...cached, height: 3_000, width: 4_000 })),
+      vi.fn(async () => ({ ...cached, height: 4_097, width: 4_096 })),
       1,
       makeObjectUrl,
       vi.fn(),
@@ -164,6 +166,27 @@ describe("reader image hydration", () => {
 
     expect(makeObjectUrl).not.toHaveBeenCalled();
     expect(target.dataset.gripImageState).toBe("unavailable");
+  });
+
+  it("displays the largest backend-accepted image and preserves dimensions after eviction", async () => {
+    const target = image("https://a/large");
+    const other = image("https://a/other");
+    const hydrator = new ReaderImageHydrator(
+      vi.fn(async () => ({ ...cached, height: 4_096, width: 4_096 })),
+      1,
+      () => "blob:large",
+      vi.fn(),
+    );
+    hydrator.hydrateImages([target]);
+    await vi.waitFor(() => expect(target.src).toBe("blob:large"));
+    hydrator.hydrateImages([other]);
+    await vi.waitFor(() => expect(other.src).toBe("blob:large"));
+    expect(target.src).toBe("");
+    expect(target.width).toBe(4_096);
+    expect(target.height).toBe(4_096);
+    hydrator.clear();
+    expect(other.width).toBe(4_096);
+    expect(other.height).toBe(4_096);
   });
 
   it("defers a pinned image until another pin leaves the viewport", async () => {

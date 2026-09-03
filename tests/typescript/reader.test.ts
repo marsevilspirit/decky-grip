@@ -433,7 +433,7 @@ describe("GRIP Reader helpers", () => {
     };
 
     expect(guideCacheAction(missing)).toBe("download");
-    expect(guideCacheAction(fresh)).toBeNull();
+    expect(guideCacheAction(fresh)).toBe("download");
     expect(guideCacheAction(stale)).toBe("refresh");
     expect(guideCacheRefreshFellBack("refresh", { stale: true })).toBe(true);
     expect(guideCacheRefreshFellBack("refresh", { stale: false })).toBe(false);

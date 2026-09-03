@@ -4,7 +4,10 @@ import { act, createContext, createElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { GuideDownloadButton } from "../../src/components/GuideDownloadButton";
+import {
+  GuideDownloadButton,
+  type GuideDownloadButtonProps,
+} from "../../src/components/GuideDownloadButton";
 import type { DownloadedGuide } from "../../src/reader/types";
 import type { GuideIdentity } from "../../src/steam/guide-key";
 
@@ -18,6 +21,7 @@ vi.mock("@decky/ui", () => ({
     disabled?: boolean;
     onClick?: () => void;
   }) => createElement("button", { disabled, onClick }, children),
+  Spinner: () => createElement("span"),
 }));
 
 const firstGuide: GuideIdentity = { appId: "1113000", guideId: "10" };
@@ -61,9 +65,7 @@ describe("GuideDownloadButton", () => {
     const stale = deferredGuide();
     const cached = deferredGuide();
     const downloadGuide = vi
-      .fn<
-        (identity: GuideIdentity) => Promise<Pick<DownloadedGuide, "stale">>
-      >()
+      .fn<GuideDownloadButtonProps["downloadGuide"]>()
       .mockReturnValueOnce(first.promise)
       .mockReturnValueOnce(second.promise)
       .mockReturnValueOnce(failed.promise)
@@ -104,8 +106,14 @@ describe("GuideDownloadButton", () => {
     });
     expect(button()?.disabled).toBe(true);
     expect(button()?.textContent).toBe("下载中…");
+    expect(button()?.querySelector('[data-grip-busy="true"]')).not.toBeNull();
     await act(async () => button()?.click());
     expect(downloadGuide).toHaveBeenCalledOnce();
+    await act(async () => {
+      downloadGuide.mock.calls[0][1]?.({ completed: 13, total: 61 });
+    });
+    expect(button()?.textContent).toBe("图片 13/61…");
+    expect(button()?.disabled).toBe(true);
 
     await render(secondGuide);
     expect(button()?.disabled).toBe(false);
