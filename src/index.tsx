@@ -19,7 +19,6 @@ import {
   getReaderCacheStats,
   getReaderPosition,
   repairPositionStores,
-  removeGuideCache,
   savePosition,
   saveReaderPosition,
 } from "./backend";
@@ -363,7 +362,6 @@ export default definePlugin(() => {
   const cacheGuide = async (
     identity: GuideIdentity,
     onProgress?: (progress: GuideImageDownloadProgress) => void,
-    forceRefresh = false,
   ) => {
     if (guideCacheMutationActive || imageCacheMutationActive) {
       throw new Error("缓存正在清理，请稍后再下载");
@@ -372,7 +370,6 @@ export default definePlugin(() => {
     try {
       const handoff = controller.captureReaderHandoff(identity);
       const snapshot = await readerCache.load(identity, {
-        forceRefresh,
         revalidate: true,
       });
       if (mounted) {
@@ -403,9 +400,6 @@ export default definePlugin(() => {
       status.refreshGuideLibrary();
     }
   };
-
-  const removeGuide = (guideId: string) =>
-    mutateGuideCache(() => removeGuideCache(guideId));
 
   const clearImages = async () => {
     if (activeGuideDownloads > 0) {
@@ -539,16 +533,12 @@ export default definePlugin(() => {
     titleView: <div className={staticClasses.Title}>GRIP</div>,
     content: (
       <GripPanel
-        cacheGuide={cacheGuide}
         clearGuides={clearGuides}
         clearImages={clearImages}
         getCacheStats={getReaderCacheStats}
-        loadGuideLibrary={getGuideLibrary}
-        openGuide={(identity) => openReader(undefined, identity)}
         openReader={openReader}
         performance={readerPerformance}
         repairPositions={repairPositions}
-        removeGuideCache={removeGuide}
         retryPositions={retryPositions}
         status={status}
       />

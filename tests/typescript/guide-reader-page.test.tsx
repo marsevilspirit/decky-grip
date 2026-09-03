@@ -511,6 +511,44 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(persistedPosition.scrollTop).toBe(4_600);
   });
 
+  it("fits both Steam and HTML tables with wrapping cells and bounded images", async () => {
+    const guide = guideFixture();
+    guide.sections = [
+      {
+        id: "1",
+        title: "图文表格",
+        html: [
+          '<div class="bb_table"><div class="bb_table_tr"><div class="bb_table_th">标题与描述</div><div class="bb_table_th">获取注解</div></div><div class="bb_table_tr"><div class="bb_table_td"><img width="2048" height="512" alt="图标"></div><div class="bb_table_td">新手教程，随主线必定能获取</div></div></div>',
+          '<table width="3000"><thead><tr><th>标题与描述</th><th>获取注解</th></tr></thead><tbody><tr><td><img width="2048" height="512" alt="图标"></td><td>https://example.com/averylongunbrokentablecellvalue</td></tr></tbody></table>',
+        ].join(""),
+      },
+    ];
+    const cache = new ReaderSessionCache({
+      getCachedGuide: async () => guide,
+      getGuide: async () => guide,
+      getReaderPosition: async () => null,
+      saveReaderPosition: vi.fn(),
+    });
+    await cache.load(identity);
+    const scroller = await mount(cache, async () => null, 1_000);
+    const tables = scroller.querySelectorAll(".bb_table, table");
+    expect(tables).toHaveLength(2);
+    for (const table of tables) {
+      const style = getComputedStyle(table);
+      expect(style.tableLayout).toBe("fixed");
+      expect(style.width).toBe("100%");
+      for (const cell of table.querySelectorAll(
+        ".bb_table_td, .bb_table_th, td, th",
+      )) {
+        expect(getComputedStyle(cell).overflowWrap).toBe("anywhere");
+        expect(getComputedStyle(cell).whiteSpace).toBe("normal");
+      }
+      expect(getComputedStyle(table.querySelector("img")!).maxWidth).toBe(
+        "100%",
+      );
+    }
+  });
+
   it("keeps the reader headerless and the current guide non-interactive", async () => {
     const guide = guideFixture();
     const backend: ReaderSessionBackend = {

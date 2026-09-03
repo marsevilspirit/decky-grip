@@ -78,10 +78,9 @@ Python tests use only the standard library.
    **下载到 GRIP**. The button reports image progress and only shows **已下载**
    after the body and every image are saved locally. Failed downloads can be
    retried without downloading already-saved images again.
-2. Select **GRIP**, then choose **继续当前或最近指南**, or open a specific
-   entry from **指南库**. Open **高级选项** to complete or update offline guides
-   without opening the reader, and to manage local caches;
-   filtering never contacts Steam.
+2. Select **GRIP**, then choose **继续当前或最近指南**. The plugin panel does
+   not list downloaded guides; switch guides inside the reader with **Y**.
+   Open **高级选项** for local cache maintenance and diagnostics.
 3. Scroll normally in the full-screen reader. Press **Y** to open the current
    game's guide list and **B** to close the list or leave the reader. Choose **搜索** to find local
    guide titles, chapters, or body text, preview matching context, and step

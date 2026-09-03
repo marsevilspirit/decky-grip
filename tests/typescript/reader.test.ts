@@ -9,10 +9,7 @@ import {
 } from "../../src/reader/anchor";
 import {
   chooseObservedGuide,
-  filterGuideLibraryEntries,
-  guideCacheAction,
   guideChoicesForReader,
-  guideCacheRefreshFellBack,
   RecentGuideIndex,
   resolveGuideForReaderOpen,
 } from "../../src/reader/recent-guide";
@@ -345,33 +342,6 @@ describe("GRIP Reader helpers", () => {
     unsubscribe();
   });
 
-  it("filters the bounded guide library without changing backend order", () => {
-    const entries = [
-      {
-        appId: "1113000",
-        guideId: "10",
-        updatedAt: 200,
-        cache: {
-          author: "Alice",
-          fetchedAt: 1,
-          sectionTitle: "四月",
-          stale: false,
-          title: "完整攻略",
-        },
-      },
-      {
-        appId: "222",
-        guideId: "20",
-        updatedAt: 100,
-        cache: null,
-      },
-    ];
-
-    expect(filterGuideLibraryEntries(entries, "ALICE")).toEqual([entries[0]]);
-    expect(filterGuideLibraryEntries(entries, "20")).toEqual([entries[1]]);
-    expect(filterGuideLibraryEntries(entries, "")).toEqual(entries);
-  });
-
   it("keeps reader guide choices inside one app and puts the current guide first", () => {
     const current = {
       appId: "1113000",
@@ -408,36 +378,6 @@ describe("GRIP Reader helpers", () => {
         current,
       ),
     ).toEqual([current, sameGame]);
-  });
-
-  it("chooses explicit cache actions and identifies an offline refresh fallback", () => {
-    const missing = {
-      appId: "1",
-      guideId: "10",
-      updatedAt: 1,
-      cache: null,
-    };
-    const fresh = {
-      ...missing,
-      cache: {
-        author: "author",
-        fetchedAt: 1,
-        sectionTitle: null,
-        stale: false,
-        title: "title",
-      },
-    };
-    const stale = {
-      ...fresh,
-      cache: { ...fresh.cache, stale: true },
-    };
-
-    expect(guideCacheAction(missing)).toBe("download");
-    expect(guideCacheAction(fresh)).toBe("download");
-    expect(guideCacheAction(stale)).toBe("refresh");
-    expect(guideCacheRefreshFellBack("refresh", { stale: true })).toBe(true);
-    expect(guideCacheRefreshFellBack("refresh", { stale: false })).toBe(false);
-    expect(guideCacheRefreshFellBack("download", { stale: true })).toBe(false);
   });
 
   it("keeps short month headings and limits long headings to four characters", () => {

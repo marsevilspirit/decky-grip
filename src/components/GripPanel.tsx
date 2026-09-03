@@ -3,7 +3,6 @@ import {
   ButtonItem,
   PanelSection,
   PanelSectionRow,
-  TextField,
   ToggleField,
 } from "@decky/ui";
 import { useEffect, useState, useSyncExternalStore } from "react";
@@ -11,40 +10,22 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import {
   getHotkeyStatus,
   type CacheClearResult,
-  type GuideLibraryEntry,
   type HotkeyStatus,
   type ReaderCacheStats,
 } from "../backend";
 import type { ReaderPerformanceTracker } from "../reader/performance";
-import type { GuideImageDownloadProgress } from "../reader/download";
-import {
-  filterGuideLibraryEntries,
-  guideCacheAction,
-  guideCacheRefreshFellBack,
-  type GuideCacheAction,
-} from "../reader/recent-guide";
-import type { DownloadedGuide } from "../reader/types";
 import type { GripRuntimeStatus, RuntimeStatusStore } from "../runtime-status";
-import type { GuideIdentity } from "../steam/guide-key";
 import { BusyLabel } from "./BusyLabel";
 
 export interface GripPanelProps {
   status: RuntimeStatusStore;
   openReader: () => Promise<void>;
-  openGuide: (identity: GuideIdentity) => Promise<void>;
-  loadGuideLibrary: (appId: string | null) => Promise<GuideLibraryEntry[]>;
   retryPositions: () => Promise<boolean>;
   performance: ReaderPerformanceTracker;
-  cacheGuide: (
-    identity: GuideIdentity,
-    onProgress?: (progress: GuideImageDownloadProgress) => void,
-    forceRefresh?: boolean,
-  ) => Promise<DownloadedGuide>;
   clearGuides: () => Promise<CacheClearResult>;
   clearImages: () => Promise<CacheClearResult>;
   getCacheStats: () => Promise<ReaderCacheStats>;
   repairPositions: () => Promise<string>;
-  removeGuideCache: (guideId: string) => Promise<CacheClearResult>;
 }
 
 function formatBytes(bytes: number): string {
@@ -67,64 +48,23 @@ function describeLastAction(status: GripRuntimeStatus): string | null {
   return null;
 }
 
-function formatReadTime(updatedAt: number): string {
-  const date = new Date(updatedAt);
-  return Number.isNaN(date.getTime())
-    ? "时间未知"
-    : date.toLocaleString("zh-CN", {
-        month: "numeric",
-        day: "numeric",
-        hour: "2-digit",
-        minute: "2-digit",
-      });
-}
-
-function describeGuide(entry: GuideLibraryEntry): string {
-  const details = [
-    `游戏 ${entry.appId}`,
-    entry.cache
-      ? entry.cache.stale
-        ? "正文已缓存，可更新"
-        : "正文已缓存"
-      : "打开时联网下载",
-    `最近记录 ${formatReadTime(entry.updatedAt)}`,
-  ];
-  if (entry.cache?.author) {
-    details.splice(1, 0, `作者：${entry.cache.author}`);
-  }
-  if (entry.cache?.sectionTitle) {
-    details.push(`章节：${entry.cache.sectionTitle}`);
-  }
-  return details.join(" · ");
-}
-
 export function GripPanel({
   status: statusStore,
   openReader,
-  openGuide,
-  loadGuideLibrary,
   retryPositions,
   performance,
-  cacheGuide,
   clearGuides,
   clearImages,
   getCacheStats,
   repairPositions,
-  removeGuideCache,
 }: GripPanelProps) {
   const status = useSyncExternalStore(
     statusStore.subscribe,
     statusStore.getSnapshot,
   );
   const quickAccessVisible = useQuickAccessVisible();
-  const [readerBusy, setReaderBusy] = useState<string | null>(null);
+  const [readerBusy, setReaderBusy] = useState(false);
   const [readerError, setReaderError] = useState<string | null>(null);
-  const [guideLibrary, setGuideLibrary] = useState<GuideLibraryEntry[] | null>(
-    null,
-  );
-  const [libraryError, setLibraryError] = useState<string | null>(null);
-  const [libraryRevision, setLibraryRevision] = useState(0);
-  const [guideFilter, setGuideFilter] = useState("");
   const [hotkeyStatus, setHotkeyStatus] = useState<HotkeyStatus | null>(null);
   const [positionBusy, setPositionBusy] = useState<"retry" | "repair" | null>(
     null,
@@ -133,8 +73,6 @@ export function GripPanel({
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [cacheBusyKey, setCacheBusyKey] = useState<string | null>(null);
   const [cacheMessage, setCacheMessage] = useState<string | null>(null);
-  const [downloadProgress, setDownloadProgress] =
-    useState<GuideImageDownloadProgress | null>(null);
   const [cacheStats, setCacheStats] = useState<ReaderCacheStats | null>(null);
   const [cacheStatsError, setCacheStatsError] = useState<string | null>(null);
   const performanceSnapshot = useSyncExternalStore(
@@ -199,41 +137,6 @@ export function GripPanel({
     };
   }, [getCacheStats]);
 
-  useEffect(() => {
-    setGuideFilter("");
-  }, [status.guideLibraryAppId]);
-
-  useEffect(() => {
-    if (!quickAccessVisible) {
-      return;
-    }
-    let canceled = false;
-    setGuideLibrary(null);
-    setLibraryError(null);
-    void loadGuideLibrary(status.guideLibraryAppId)
-      .then((entries) => {
-        if (!canceled) {
-          setGuideLibrary(entries);
-        }
-      })
-      .catch((error: unknown) => {
-        if (!canceled) {
-          setLibraryError(
-            error instanceof Error ? error.message : String(error),
-          );
-        }
-      });
-    return () => {
-      canceled = true;
-    };
-  }, [
-    libraryRevision,
-    loadGuideLibrary,
-    quickAccessVisible,
-    status.guideLibraryAppId,
-    status.guideLibraryRevision,
-  ]);
-
   const runCacheAction = async <Result,>(
     busyKey: string,
     action: () => Promise<Result>,
@@ -270,70 +173,36 @@ export function GripPanel({
     }
   };
 
-  const runOpen = (key: string, action: () => Promise<void>): void => {
-    if (readerBusy !== null || cacheBusy) {
+  const runOpen = (): void => {
+    if (readerBusy || cacheBusy) {
       return;
     }
-    setReaderBusy(key);
+    setReaderBusy(true);
     setReaderError(null);
-    void action()
+    void openReader()
       .catch((error: unknown) => {
         setReaderError(error instanceof Error ? error.message : String(error));
       })
-      .finally(() => setReaderBusy(null));
-  };
-
-  const removeCachedGuide = async (entry: GuideLibraryEntry): Promise<void> => {
-    const title = entry.cache?.title ?? `指南 ${entry.guideId}`;
-    await runCacheAction(
-      `remove:${entry.appId}:${entry.guideId}`,
-      () => removeGuideCache(entry.guideId),
-      (result) =>
-        `“${title}”缓存已移除：释放 ${formatBytes(result.bytesRemoved)}`,
-      "移除指南缓存",
-    );
-  };
-
-  const downloadGuide = async (
-    entry: GuideLibraryEntry,
-    action: GuideCacheAction,
-  ): Promise<void> => {
-    const title = entry.cache?.title ?? `指南 ${entry.guideId}`;
-    setDownloadProgress(null);
-    await runCacheAction(
-      `cache:${entry.appId}:${entry.guideId}`,
-      () => cacheGuide(entry, setDownloadProgress, action === "refresh"),
-      (guide) =>
-        guideCacheRefreshFellBack(action, guide)
-          ? `“${title}”更新失败，旧版正文和图片已完整保存`
-          : action === "refresh"
-            ? `“${title}”正文和图片已更新，可完整离线阅读`
-            : `“${title}”正文和图片已保存，可完整离线阅读`,
-      `${action === "refresh" ? "更新" : "下载"}指南`,
-    );
+      .finally(() => setReaderBusy(false));
   };
 
   const lastAction = describeLastAction(status);
-  const visibleGuides = filterGuideLibraryEntries(
-    guideLibrary ?? [],
-    guideFilter,
-  );
 
   return (
     <>
-      <PanelSection title="指南库">
+      <PanelSection title="阅读器">
         <PanelSectionRow>
           <ButtonItem
-            disabled={readerBusy !== null || cacheBusy}
+            disabled={readerBusy || cacheBusy}
             label={
-              readerBusy === "recent" ? (
+              readerBusy ? (
                 <BusyLabel>正在打开 GRIP 阅读器…</BusyLabel>
               ) : (
                 "继续当前或最近指南"
               )
             }
             layout="below"
-            onClick={() => runOpen("recent", openReader)}
+            onClick={runOpen}
           >
             优先继续当前游戏正在查看的指南
           </ButtonItem>
@@ -417,151 +286,6 @@ export function GripPanel({
             onChange={setShowAdvanced}
           />
         </PanelSectionRow>
-        {guideLibrary === null && !libraryError && (
-          <PanelSectionRow>
-            <div style={{ opacity: 0.75 }}>正在读取最近指南…</div>
-          </PanelSectionRow>
-        )}
-        {guideLibrary &&
-          (guideLibrary.length > 1 || guideFilter.length > 0) && (
-            <PanelSectionRow>
-              <TextField
-                bShowClearAction
-                label="筛选指南"
-                onChange={(event) => setGuideFilter(event.currentTarget.value)}
-                value={guideFilter}
-              />
-            </PanelSectionRow>
-          )}
-        {libraryError && (
-          <PanelSectionRow>
-            <div style={{ color: "#f0b35a" }}>
-              <div>指南库读取失败：{libraryError}</div>
-              <ButtonItem
-                label="重试读取指南库"
-                layout="below"
-                onClick={() => setLibraryRevision((revision) => revision + 1)}
-              >
-                不会修改阅读位置或正文缓存
-              </ButtonItem>
-              <ButtonItem
-                disabled={positionBusy !== null}
-                label={
-                  positionBusy === "repair" ? (
-                    <BusyLabel>正在修复…</BusyLabel>
-                  ) : (
-                    "备份并修复本地数据"
-                  )
-                }
-                layout="below"
-                onClick={() => {
-                  setPositionBusy("repair");
-                  setRepairMessage(null);
-                  void repairPositions()
-                    .then(setRepairMessage)
-                    .catch((error: unknown) =>
-                      setRepairMessage(
-                        `本地数据恢复失败：${error instanceof Error ? error.message : String(error)}`,
-                      ),
-                    )
-                    .finally(() => {
-                      setLibraryRevision((revision) => revision + 1);
-                      setPositionBusy(null);
-                    });
-                }}
-              >
-                仅在校验失败时备份位置文件，然后重新读取指南库
-              </ButtonItem>
-            </div>
-          </PanelSectionRow>
-        )}
-        {guideLibrary?.length === 0 && (
-          <PanelSectionRow>
-            <div style={{ opacity: 0.75 }}>
-              还没有阅读历史。先打开一次 Steam 指南，再进入 GRIP 阅读器。
-            </div>
-          </PanelSectionRow>
-        )}
-        {guideLibrary &&
-          guideLibrary.length > 0 &&
-          visibleGuides.length === 0 && (
-            <PanelSectionRow>
-              <div style={{ opacity: 0.75 }}>没有匹配的指南。</div>
-            </PanelSectionRow>
-          )}
-        {visibleGuides.map((entry) => {
-          const guideKey = `${entry.appId}:${entry.guideId}`;
-          const cacheAction = guideCacheAction(entry);
-          return (
-            <PanelSectionRow key={guideKey}>
-              <div style={{ width: "100%" }}>
-                <ButtonItem
-                  disabled={readerBusy !== null || cacheBusy}
-                  label={
-                    readerBusy === guideKey ? (
-                      <BusyLabel>正在打开…</BusyLabel>
-                    ) : (
-                      (entry.cache?.title ?? `Steam 指南 ${entry.guideId}`)
-                    )
-                  }
-                  layout="below"
-                  onClick={() =>
-                    runOpen(guideKey, () =>
-                      openGuide({
-                        appId: entry.appId,
-                        guideId: entry.guideId,
-                      }),
-                    )
-                  }
-                >
-                  {describeGuide(entry)}
-                </ButtonItem>
-                {showAdvanced && cacheAction && (
-                  <ButtonItem
-                    disabled={cacheBusy || readerBusy !== null}
-                    label={
-                      cacheBusyKey === `cache:${guideKey}` ? (
-                        <BusyLabel>
-                          {downloadProgress
-                            ? `图片 ${downloadProgress.completed}/${downloadProgress.total}…`
-                            : cacheAction === "refresh"
-                              ? "正在更新…"
-                              : "正在下载…"}
-                        </BusyLabel>
-                      ) : cacheAction === "refresh" ? (
-                        "更新离线指南"
-                      ) : (
-                        "补全离线下载"
-                      )
-                    }
-                    layout="below"
-                    onClick={() => void downloadGuide(entry, cacheAction)}
-                  >
-                    {cacheAction === "refresh"
-                      ? "下载新版正文和全部图片；失败时保留已保存内容"
-                      : "补齐正文和全部图片；已有图片无需重新下载"}
-                  </ButtonItem>
-                )}
-                {showAdvanced && entry.cache && (
-                  <ButtonItem
-                    disabled={cacheBusy || readerBusy !== null}
-                    label={
-                      cacheBusyKey === `remove:${guideKey}` ? (
-                        <BusyLabel>正在移除…</BusyLabel>
-                      ) : (
-                        "移除此指南的正文缓存"
-                      )
-                    }
-                    layout="below"
-                    onClick={() => void removeCachedGuide(entry)}
-                  >
-                    保留阅读位置；下次打开时重新下载
-                  </ButtonItem>
-                )}
-              </div>
-            </PanelSectionRow>
-          );
-        })}
       </PanelSection>
       {showAdvanced && (
         <>

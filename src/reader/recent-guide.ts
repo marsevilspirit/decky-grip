@@ -1,6 +1,5 @@
 import { makeGuideKey, type GuideIdentity } from "../steam/guide-key";
 import type { GuideLibraryEntry } from "../backend";
-import type { DownloadedGuide } from "./types";
 
 export interface RecentGuideSeed {
   identity: GuideIdentity;
@@ -98,25 +97,6 @@ export async function resolveGuideForReaderOpen(
   return resolveIdentity();
 }
 
-export function filterGuideLibraryEntries(
-  entries: readonly GuideLibraryEntry[],
-  query: string,
-): GuideLibraryEntry[] {
-  const needle = query.trim().toLocaleLowerCase();
-  return entries.filter((entry) => {
-    if (!needle) {
-      return true;
-    }
-    return [
-      entry.appId,
-      entry.guideId,
-      entry.cache?.title,
-      entry.cache?.author,
-      entry.cache?.sectionTitle,
-    ].some((value) => value?.toLocaleLowerCase().includes(needle));
-  });
-}
-
 export function guideChoicesForReader(
   entries: readonly GuideLibraryEntry[],
   current: GuideLibraryEntry,
@@ -131,17 +111,4 @@ export function guideChoicesForReader(
       : current,
     ...sameApp.filter((entry) => entry.guideId !== current.guideId),
   ];
-}
-
-export type GuideCacheAction = "download" | "refresh";
-
-export function guideCacheAction(entry: GuideLibraryEntry): GuideCacheAction {
-  return entry.cache?.stale ? "refresh" : "download";
-}
-
-export function guideCacheRefreshFellBack(
-  action: GuideCacheAction,
-  guide: Pick<DownloadedGuide, "stale">,
-): boolean {
-  return action === "refresh" && guide.stale;
 }

@@ -79,10 +79,10 @@ const READER_CSS = `
 .grip-reader-content .bb_h2 { font-size: 22px; }
 .grip-reader-content .bb_h3 { font-size: 20px; }
 .grip-reader-content .bb_code { background: #18232e; border-left: 4px solid #417a9b; margin: 10px 0; padding: 10px 14px; }
-.grip-reader-content .bb_table { border-collapse: collapse; display: table; margin: 12px 0; width: 100%; }
-.grip-reader-content .bb_table_tr { display: table-row; }
-.grip-reader-content .bb_table_td, .grip-reader-content .bb_table_th { border: 1px solid #3d4c5b; display: table-cell; padding: 8px; }
-.grip-reader-content .bb_table_th { background: #223241; font-weight: 700; }
+.grip-reader-content .bb_table, .grip-reader-content table { border-collapse: collapse; display: table; margin: 12px 0; table-layout: fixed; width: 100%; }
+.grip-reader-content .bb_table_tr, .grip-reader-content tr { display: table-row; }
+.grip-reader-content .bb_table_td, .grip-reader-content .bb_table_th, .grip-reader-content td, .grip-reader-content th { border: 1px solid #3d4c5b; display: table-cell; overflow-wrap: anywhere; padding: 8px; vertical-align: top; white-space: normal; }
+.grip-reader-content .bb_table_th, .grip-reader-content th { background: #223241; font-weight: 700; }
 .grip-reader-content .bb_link { color: #67c1f5; text-decoration: underline; }
 `;
 

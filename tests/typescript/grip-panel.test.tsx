@@ -1,18 +1,13 @@
 // @vitest-environment happy-dom
 
-import {
-  act,
-  createElement,
-  type ChangeEventHandler,
-  type ReactNode,
-} from "react";
+import { act, createElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  getGuideLibrary,
   getHotkeyStatus,
   type CacheClearResult,
-  type GuideLibraryEntry,
   type HotkeyStatus,
   type ReaderCacheStats,
 } from "../../src/backend";
@@ -33,11 +28,9 @@ vi.mock("@decky/ui", () => {
     description?: ReactNode;
     disabled?: boolean;
     label?: ReactNode;
-    onChange?:
-      ChangeEventHandler<HTMLInputElement> | ((value: boolean) => void);
+    onChange?: (value: boolean) => void;
     onClick?: () => void;
     title?: ReactNode;
-    value?: string;
   }
 
   return {
@@ -48,12 +41,6 @@ vi.mock("@decky/ui", () => {
     PanelSectionRow: ({ children }: MockProps) =>
       createElement("div", null, children),
     Spinner: () => createElement("span"),
-    TextField: ({ label, onChange, value }: MockProps) =>
-      createElement("input", {
-        "aria-label": label,
-        onChange: onChange as ChangeEventHandler<HTMLInputElement>,
-        value,
-      }),
     ToggleField: ({
       checked,
       description,
@@ -76,6 +63,7 @@ vi.mock("@decky/ui", () => {
 });
 
 vi.mock("../../src/backend", () => ({
+  getGuideLibrary: vi.fn(async () => []),
   getHotkeyStatus: vi.fn(async (): Promise<HotkeyStatus> => ({
     available: false,
     button: "L4",
@@ -111,7 +99,7 @@ describe("GripPanel", () => {
     options: {
       clearGuides?: () => Promise<CacheClearResult>;
       getCacheStats?: () => Promise<ReaderCacheStats>;
-      guides?: GuideLibraryEntry[];
+      openReader?: () => Promise<void>;
       repairPositions?: () => Promise<string>;
       status?: RuntimeStatusStore;
     } = {},
@@ -122,23 +110,14 @@ describe("GripPanel", () => {
     await act(async () => {
       root?.render(
         <GripPanel
-          cacheGuide={async () => {
-            throw new Error("unused");
-          }}
           clearGuides={
             options.clearGuides ??
             (async () => ({ bytesRemoved: 0, filesRemoved: 0 }))
           }
           clearImages={async () => ({ bytesRemoved: 0, filesRemoved: 0 })}
           getCacheStats={options.getCacheStats ?? (async () => cacheStats)}
-          loadGuideLibrary={async () => options.guides ?? []}
-          openGuide={async () => undefined}
-          openReader={async () => undefined}
+          openReader={options.openReader ?? (async () => undefined)}
           performance={new ReaderPerformanceTracker()}
-          removeGuideCache={async () => ({
-            bytesRemoved: 0,
-            filesRemoved: 0,
-          })}
           repairPositions={options.repairPositions ?? (async () => "")}
           retryPositions={async () => true}
           status={options.status ?? new RuntimeStatusStore("1113000")}
@@ -168,6 +147,7 @@ describe("GripPanel", () => {
     root = null;
     container = null;
     deckyApiMock.quickAccessVisible = true;
+    vi.mocked(getGuideLibrary).mockClear();
   });
 
   it("refreshes the hotkey status whenever quick access becomes visible", async () => {
@@ -230,25 +210,10 @@ describe("GripPanel", () => {
   });
 
   it("keeps the default guide actions compact and reveals maintenance controls", async () => {
-    await mount({
-      guides: [
-        {
-          appId: "1113000",
-          guideId: "3414883877",
-          updatedAt: 1,
-          cache: {
-            author: "测试作者",
-            fetchedAt: 1,
-            sectionTitle: null,
-            stale: true,
-            title: "完整攻略",
-          },
-        },
-      ],
-    });
+    await mount();
 
     expect(panelText()).toContain("继续当前或最近指南");
-    expect(panelText()).toContain("完整攻略");
+    expect(container?.querySelectorAll("button")).toHaveLength(2);
     expect(panelText()).not.toContain("筛选指南");
     expect(panelText()).not.toContain("仅看收藏");
     expect(panelText()).not.toContain("清除指南正文缓存");
@@ -261,9 +226,37 @@ describe("GripPanel", () => {
     });
 
     expect(panelText()).toContain("清除指南正文缓存");
-    expect(panelText()).toContain("更新离线指南");
-    expect(panelText()).toContain("移除此指南的正文缓存");
+    expect(panelText()).not.toContain("更新离线指南");
+    expect(panelText()).not.toContain("移除此指南的正文缓存");
     expect(panelText()).toContain("物理 L4 首屏门禁");
+  });
+
+  it("keeps reader opening feedback and allows retry after a failed open", async () => {
+    let finishOpen!: () => void;
+    const openReader = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishOpen = resolve;
+          }),
+      )
+      .mockRejectedValueOnce(new Error("打开失败"));
+    await mount({ openReader });
+
+    await act(async () => button("继续当前或最近指南").click());
+    const opening = button("正在打开 GRIP 阅读器");
+    expect(opening.disabled).toBe(true);
+    expect(opening.querySelector('[data-grip-busy="true"]')).not.toBeNull();
+    await act(async () => opening.click());
+    expect(openReader).toHaveBeenCalledTimes(1);
+
+    await act(async () => finishOpen());
+    expect(button("继续当前或最近指南").disabled).toBe(false);
+
+    await act(async () => button("继续当前或最近指南").click());
+    expect(panelText()).toContain("打开失败");
+    expect(button("继续当前或最近指南").disabled).toBe(false);
   });
 
   it("keeps position repair feedback visible while advanced options are closed", async () => {
@@ -310,48 +303,50 @@ describe("GripPanel", () => {
     );
   });
 
-  it("clears the guide query when the app changes", async () => {
+  it("does not load or display a guide library in normal, advanced, or global views", async () => {
     const status = new RuntimeStatusStore("1113000");
-    await mount({
-      guides: [
-        {
-          appId: "1113000",
-          guideId: "1",
-          updatedAt: 2,
-          cache: null,
+    vi.mocked(getGuideLibrary).mockResolvedValue([
+      {
+        appId: "1113000",
+        guideId: "1",
+        updatedAt: 2,
+        cache: {
+          author: "测试作者",
+          fetchedAt: 1,
+          sectionTitle: null,
+          stale: false,
+          title: "已下载的完整攻略",
         },
-        {
-          appId: "1113000",
-          guideId: "2",
-          updatedAt: 1,
-          cache: null,
-        },
-      ],
-      status,
-    });
-    const filter = container?.querySelector<HTMLInputElement>(
-      'input[aria-label="筛选指南"]',
-    );
-    await act(async () => {
-      const setValue = Object.getOwnPropertyDescriptor(
-        HTMLInputElement.prototype,
-        "value",
-      )?.set;
-      setValue?.call(filter, "攻略");
-      filter?.dispatchEvent(new Event("input", { bubbles: true }));
-      await Promise.resolve();
-    });
-    expect(filter?.value).toBe("攻略");
+      },
+    ]);
+    status.seedRecentGuides([
+      { identity: { appId: "1113000", guideId: "1" }, updatedAt: 2 },
+    ]);
+    await mount({ status });
+    const expectNoGuideList = () => {
+      expect(getGuideLibrary).not.toHaveBeenCalled();
+      expect(container?.querySelector("input")).toBeNull();
+      expect(panelText()).not.toContain("指南库");
+      expect(panelText()).not.toContain("已下载的完整攻略");
+      expect(panelText()).not.toContain("正在读取最近指南");
+      expect(panelText()).not.toContain("筛选指南");
+      expect(panelText()).not.toContain("补全离线下载");
+      expect(panelText()).not.toContain("移除此指南的正文缓存");
+    };
+    expectNoGuideList();
+
+    await act(async () => button("高级选项").click());
+    expectNoGuideList();
 
     await act(async () => {
-      status.setGuideLibraryAppId("222");
-      await Promise.resolve();
+      status.setGuideLibraryAppId(null);
+      status.refreshGuideLibrary();
       await Promise.resolve();
     });
-
-    expect(
-      container?.querySelector<HTMLInputElement>('input[aria-label="筛选指南"]')
-        ?.value,
-    ).toBe("");
+    expectNoGuideList();
+    expect(status.getRecentGuide("1113000")).toEqual({
+      appId: "1113000",
+      guideId: "1",
+    });
   });
 });

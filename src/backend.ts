@@ -116,10 +116,6 @@ export const clearGuideCache = callable<[], CacheClearResult>(
   "clear_guide_cache",
 );
 
-export const removeGuideCache = callable<[guideId: string], CacheClearResult>(
-  "remove_guide_cache",
-);
-
 export const clearImageCache = callable<[], CacheClearResult>(
   "clear_image_cache",
 );
