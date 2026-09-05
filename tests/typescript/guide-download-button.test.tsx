@@ -11,6 +11,7 @@ import {
 import type { DownloadedGuide } from "../../src/reader/types";
 import type { GuideDownloadStatus } from "../../src/backend";
 import type { GuideIdentity } from "../../src/steam/guide-key";
+import { GuideDownloadTasks } from "../../src/reader/download";
 
 vi.mock("@decky/ui", () => ({
   DialogButton: ({
@@ -59,17 +60,68 @@ describe("GuideDownloadButton", () => {
     root = null;
   });
 
+  it("shows a continuing task on remount and lets the user cancel it", async () => {
+    let finish!: () => void;
+    let signal!: AbortSignal;
+    const downloads = new GuideDownloadTasks(
+      async (_id, progress, nextSignal) => {
+        signal = nextSignal;
+        progress({ completed: 13, total: 61 });
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+      },
+    );
+    const work = downloads.start(firstGuide);
+    await Promise.resolve();
+    container = document.createElement("div");
+    portalTarget = document.createElement("div");
+    document.body.append(container, portalTarget);
+    root = createRoot(container);
+    const NavigationContext = createContext<unknown>(null);
+    const getDownloadStatus = vi.fn(async (): Promise<GuideDownloadStatus> => ({
+      state: "partial",
+      completed: 13,
+      total: 61,
+    }));
+    await act(async () =>
+      root?.render(
+        <GuideDownloadButton
+          identity={firstGuide}
+          downloads={downloads}
+          getDownloadStatus={getDownloadStatus}
+          openGuide={async () => {}}
+          target={{
+            element: portalTarget!,
+            navigationNode: {},
+            navigationProvider: NavigationContext,
+          }}
+        />,
+      ),
+    );
+    expect(button()?.textContent).toBe("图片 13/61…");
+    expect(getDownloadStatus).not.toHaveBeenCalled();
+    await act(async () => portalTarget?.querySelectorAll("button")[1]?.click());
+    expect(signal.aborted).toBe(true);
+    expect(button()?.textContent).toBe("正在停止下载…");
+    await act(async () => {
+      finish();
+      await work;
+    });
+    expect(button()?.textContent).toBe("继续下载");
+    expect(portalTarget.querySelectorAll("button")).toHaveLength(1);
+  });
+
   it("restores disk status, resumes partial downloads and isolates old A requests across A → B → A", async () => {
     const first = deferredGuide();
-    const second = deferredGuide();
     const failed = deferredGuide();
     const stale = deferredGuide();
     const downloadGuide = vi
-      .fn<GuideDownloadButtonProps["downloadGuide"]>()
+      .fn<ConstructorParameters<typeof GuideDownloadTasks>[0]>()
       .mockReturnValueOnce(first.promise)
-      .mockReturnValueOnce(second.promise)
       .mockReturnValueOnce(failed.promise)
       .mockReturnValueOnce(stale.promise);
+    const downloads = new GuideDownloadTasks(downloadGuide);
     const states = new Map<string, GuideDownloadStatus>();
     const missing: GuideDownloadStatus = {
       state: "missing",
@@ -96,7 +148,7 @@ describe("GuideDownloadButton", () => {
       await act(async () => {
         root?.render(
           <GuideDownloadButton
-            downloadGuide={downloadGuide}
+            downloads={downloads}
             getDownloadStatus={getDownloadStatus}
             openGuide={openGuide}
             revision={revision}
@@ -135,19 +187,18 @@ describe("GuideDownloadButton", () => {
     await render(secondGuide);
     expect(button()?.disabled).toBe(false);
     await render(firstGuide);
-    expect(button()?.disabled).toBe(false);
-    await act(async () => button()?.click());
-    await act(async () => first.resolve({ stale: true }));
     expect(button()?.disabled).toBe(true);
-    expect(button()?.textContent).toBe("下载中…");
+    expect(button()?.textContent).toBe("图片 13/61…");
+    await act(async () => button()?.click());
+    expect(downloadGuide).toHaveBeenCalledOnce();
     await act(async () => {
       states.set(firstGuide.guideId, complete);
-      second.resolve({ stale: false });
+      first.resolve({ stale: false });
     });
     expect(button()?.textContent).toBe("本地阅读");
     await act(async () => button()?.click());
     expect(openGuide).toHaveBeenCalledWith(firstGuide);
-    expect(downloadGuide).toHaveBeenCalledTimes(2);
+    expect(downloadGuide).toHaveBeenCalledTimes(1);
 
     states.set(secondGuide.guideId, {
       state: "partial",
@@ -170,7 +221,7 @@ describe("GuideDownloadButton", () => {
     await render(null);
     await render(secondGuide);
     expect(button()?.textContent).toBe("本地阅读");
-    expect(downloadGuide).toHaveBeenCalledTimes(4);
+    expect(downloadGuide).toHaveBeenCalledTimes(3);
 
     states.set(secondGuide.guideId, {
       state: "partial",
@@ -218,7 +269,7 @@ describe("GuideDownloadButton", () => {
     await act(async () =>
       root?.render(
         <GuideDownloadButton
-          downloadGuide={downloadGuide}
+          downloads={new GuideDownloadTasks(downloadGuide)}
           getDownloadStatus={getDownloadStatus}
           identity={firstGuide}
           openGuide={openGuide}

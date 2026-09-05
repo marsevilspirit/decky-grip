@@ -20,6 +20,8 @@ import {
   getReaderCacheStats,
   getReaderPosition,
   repairPositionStores,
+  removeOfflineGuide,
+  setImageCacheLimit,
   savePosition,
   saveReaderPosition,
 } from "./backend";
@@ -41,6 +43,7 @@ import {
 import { ReaderImageCacheControl } from "./reader/image-cache-control";
 import {
   downloadGuideImages,
+  GuideDownloadTasks,
   type GuideImageDownloadProgress,
 } from "./reader/download";
 import {
@@ -117,7 +120,7 @@ export default definePlugin(() => {
   const mutateGuideCache = async <Result,>(
     action: () => Promise<Result>,
   ): Promise<Result> => {
-    if (activeGuideDownloads > 0) {
+    if (activeGuideDownloads > 0 || downloads.hasActive()) {
       throw new Error("指南正在下载，完成后才能清理缓存");
     }
     if (guideCacheMutationActive) {
@@ -364,7 +367,9 @@ export default definePlugin(() => {
   const cacheGuide = async (
     identity: GuideIdentity,
     onProgress?: (progress: GuideImageDownloadProgress) => void,
+    signal?: AbortSignal,
   ) => {
+    signal?.throwIfAborted();
     if (guideCacheMutationActive || imageCacheMutationActive) {
       throw new Error("缓存正在清理，请稍后再下载");
     }
@@ -374,13 +379,19 @@ export default definePlugin(() => {
       const snapshot = await readerCache.load(identity, {
         revalidate: true,
       });
+      signal?.throwIfAborted();
       if (mounted) {
         await readerCache.rememberAccess(
           identity,
           snapshot.position ?? handoff,
         );
       }
-      await downloadGuideImages(snapshot.guide, downloadGuideImage, onProgress);
+      await downloadGuideImages(
+        snapshot.guide,
+        downloadGuideImage,
+        onProgress,
+        signal,
+      );
       // A warm session is not proof that its body still exists on disk.
       const saved = await getCachedGuide(identity.guideId);
       if (
@@ -395,7 +406,8 @@ export default definePlugin(() => {
       }
       return snapshot.guide;
     } catch (error: unknown) {
-      toaster.toast({ title: "GRIP：下载未完成", body: errorMessage(error) });
+      if (!signal?.aborted)
+        toaster.toast({ title: "GRIP：下载未完成", body: errorMessage(error) });
       throw error;
     } finally {
       activeGuideDownloads -= 1;
@@ -404,8 +416,12 @@ export default definePlugin(() => {
     }
   };
 
+  const downloads = new GuideDownloadTasks(cacheGuide);
+  const deleteOfflineGuide = (guideId: string) =>
+    mutateGuideCache(() => removeOfflineGuide(guideId));
+
   const clearImages = async () => {
-    if (activeGuideDownloads > 0) {
+    if (activeGuideDownloads > 0 || downloads.hasActive()) {
       throw new Error("指南正在下载，完成后才能清理图片");
     }
     const token = imageCacheControl.beginClear();
@@ -452,6 +468,7 @@ export default definePlugin(() => {
         loadGuideLibrary={getGuideLibrary}
         onClose={closeReader}
         onRepairPositions={repairPositions}
+        onRemoveOffline={deleteOfflineGuide}
         onSwitchGuide={(identity) => openReader(undefined, identity)}
         performance={readerPerformance}
       />
@@ -460,7 +477,7 @@ export default definePlugin(() => {
   routerHook.addRoute(READER_ROUTE, ReaderRoute);
   routerHook.addGlobalComponent(GUIDE_DOWNLOAD_COMPONENT, () => (
     <NativeGuideDownloadButton
-      downloadGuide={cacheGuide}
+      downloads={downloads}
       getDownloadStatus={getGuideDownloadStatus}
       openGuide={async (identity) => {
         try {
@@ -552,6 +569,7 @@ export default definePlugin(() => {
         clearGuides={clearGuides}
         clearImages={clearImages}
         getCacheStats={getReaderCacheStats}
+        setImageLimit={setImageCacheLimit}
         openReader={openReader}
         performance={readerPerformance}
         repairPositions={repairPositions}
@@ -562,6 +580,7 @@ export default definePlugin(() => {
     icon: <BookmarkIcon />,
     onDismount() {
       mounted = false;
+      downloads.dispose();
       routerHook.removeGlobalComponent(GUIDE_DOWNLOAD_COMPONENT);
       stopPreloading();
       readerPerformance.clear();

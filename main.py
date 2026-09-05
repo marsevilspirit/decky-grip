@@ -248,6 +248,14 @@ class Plugin:
     async def clear_image_cache(self):
         return await self._run_destructive_guide_io("images.clear", {})
 
+    async def remove_offline_guide(self, guide_id: str):
+        return await self._run_destructive_guide_io(
+            "guides.remove_offline", {"guide_id": guide_id}
+        )
+
+    async def set_image_cache_limit(self, bytes: int):
+        return await self._run_destructive_guide_io("images.set_limit", {"bytes": bytes})
+
     async def get_reader_cache_stats(self):
         return await self._run_guide_io(self._sidecar.request, "reader_cache.stats", {})
 

@@ -21,6 +21,67 @@ const NOW_MS: u64 = 1_800_000_000_000;
 const CACHE_MAX_AGE_MS: u64 = 6 * 60 * 60 * 1_000;
 const MAX_DOWNLOAD_BYTES: usize = 16 * 1024 * 1024;
 
+#[test]
+fn deleting_one_offline_guide_preserves_shared_images_and_positions() {
+    use grip_sidecar::guide_images::{GuideImageCache, ImageLimits};
+    let directory = TestDirectory::new();
+    let guides = GuideReader::with_fetcher(
+        directory.0.join("guides"),
+        |url, _, _| {
+            let own = if url.contains("?id=1&") {
+                "first"
+            } else {
+                "second"
+            };
+            Ok(format!(r#"<div class="workshopItemTitle">Guide</div><div class="guideAuthors">Author</div><div class="subSection" id="1"><div class="subSectionTitle">Chapter</div><div class="subSectionDesc"><img src="https://images.steamusercontent.com/shared.png"><img src="https://images.steamusercontent.com/{own}.png"></div></div>"#).into_bytes())
+        },
+        || NOW_MS,
+    );
+    let images = GuideImageCache::with_fetcher(
+        directory.0.join("images"),
+        |_, _, _| {
+            Ok((
+                "image/png".into(),
+                b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0test".to_vec(),
+            ))
+        },
+        ImageLimits::default(),
+    )
+    .unwrap();
+    for id in ["1", "2"] {
+        guides.get(id, false).unwrap();
+    }
+    let urls = ["shared", "first", "second"]
+        .map(|name| format!("https://images.steamusercontent.com/{name}.png"));
+    for url in &urls {
+        images.download(url).unwrap();
+    }
+    let positions = directory.0.join("reader_positions.json");
+    fs::write(&positions, b"keep this exact history").unwrap();
+    // Corrupt sibling cache: fail before deleting any possibly shared data.
+    let sibling = directory.0.join("guides/2.json");
+    let body = fs::read(&sibling).unwrap();
+    fs::write(&sibling, b"corrupt").unwrap();
+    assert!(guides.remove_offline_guide("1", &images).is_err());
+    assert!(images.is_downloaded(&urls[1]).unwrap());
+    fs::write(sibling, body).unwrap();
+    assert_eq!(
+        guides.remove_offline_guide("1", &images).unwrap()["filesRemoved"],
+        2
+    );
+    assert!(guides.get_cached("1").unwrap().is_none());
+    assert!(guides.get_cached("2").unwrap().is_some());
+    assert!(images.is_downloaded(&urls[0]).unwrap());
+    assert!(!images.is_downloaded(&urls[1]).unwrap());
+    assert!(images.get(&urls[1], false).unwrap().is_none());
+    assert!(images.is_downloaded(&urls[2]).unwrap());
+    assert_eq!(fs::read(positions).unwrap(), b"keep this exact history");
+    assert_eq!(
+        guides.remove_offline_guide("2", &images).unwrap()["filesRemoved"],
+        3
+    );
+}
+
 enum FetchPlan {
     Body(Vec<u8>),
     Error(String),

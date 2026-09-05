@@ -1,4 +1,4 @@
-use crate::{KeyLockPool, lock};
+use crate::{FileSignature, KeyLockPool, atomic_replace, lock, read_bounded_regular_file};
 use base64::Engine as _;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -164,6 +164,10 @@ pub struct GuideImageCache {
     key_locks: KeyLockPool,
     disk_lock: Mutex<()>,
     state: Mutex<MemoryState>,
+    validated: Mutex<HashMap<PathBuf, FileSignature>>,
+    disk_limit: AtomicU64,
+    #[cfg(test)]
+    validation_reads: AtomicU64,
 }
 
 impl GuideImageCache {
@@ -197,6 +201,11 @@ impl GuideImageCache {
     }
 
     fn build(cache_directory: PathBuf, fetcher: Arc<Fetcher>, limits: ImageLimits) -> Self {
+        let disk_limit = read_bounded_regular_file(&cache_directory.join("quota.json"), 128, None)
+            .ok()
+            .and_then(|(body, _)| serde_json::from_slice::<u64>(&body?).ok())
+            .filter(|bytes| valid_disk_limit(*bytes))
+            .unwrap_or(limits.max_disk_bytes as u64);
         let cache = Self {
             cache_directory,
             fetcher,
@@ -204,6 +213,10 @@ impl GuideImageCache {
             key_locks: KeyLockPool::default(),
             disk_lock: Mutex::new(()),
             state: Mutex::new(MemoryState::default()),
+            validated: Mutex::new(HashMap::new()),
+            disk_limit: AtomicU64::new(disk_limit),
+            #[cfg(test)]
+            validation_reads: AtomicU64::new(0),
         };
         {
             let _disk = lock(&cache.disk_lock);
@@ -224,7 +237,119 @@ impl GuideImageCache {
     /// Only validated, pinned disk files count as complete offline downloads.
     pub fn is_downloaded(&self, url: &str) -> Result<bool, ImageError> {
         let url = canonical_image_url(url)?;
-        Ok(self.read_disk(&url, true).is_some())
+        let _disk = lock(&self.disk_lock);
+        if !safe_directory(&self.cache_directory) {
+            return Ok(false);
+        }
+        for (mime, path) in self.candidate_paths(&url) {
+            if !offline_path(&path) {
+                continue;
+            }
+            let known = lock(&self.validated).get(&path).copied();
+            if let Ok((body, signature)) =
+                read_bounded_regular_file(&path, self.limits.max_image_bytes as u64, known)
+            {
+                #[cfg(test)]
+                if body.is_some() {
+                    self.validation_reads.fetch_add(1, Ordering::Relaxed);
+                }
+                if body.is_none()
+                    || body.is_some_and(|body| {
+                        validate_image(mime, body, self.limits.max_image_bytes).is_ok()
+                    })
+                {
+                    let mut validated = lock(&self.validated);
+                    // ponytail: bounded metadata memo; replace with LRU only if 4096 entries thrash.
+                    if validated.len() >= 4096 {
+                        validated.clear();
+                    }
+                    validated.insert(path, signature);
+                    return Ok(true);
+                }
+            }
+            lock(&self.validated).remove(&path);
+        }
+        Ok(false)
+    }
+
+    pub fn set_disk_limit(&self, bytes: u64) -> Result<Value, ImageError> {
+        if !valid_disk_limit(bytes) {
+            return Err(ImageError::validation("图片额度需在 64 MiB 到 8 GiB 之间"));
+        }
+        {
+            let _disk = lock(&self.disk_lock);
+            let pinned = self
+                .managed_entries_locked()
+                .iter()
+                .filter(|entry| offline_path(&entry.path))
+                .map(|entry| entry.size)
+                .sum::<u64>();
+            if pinned > bytes {
+                return Err(ImageError::download(
+                    "新额度小于已下载图片用量，请先删除不需要的指南",
+                ));
+            }
+            ensure_private_directory(&self.cache_directory)
+                .map_err(|_| ImageError::download("无法保存图片额度：缓存目录不可写"))?;
+            atomic_replace(
+                &self.cache_directory.join("quota.json"),
+                ".quota-",
+                ".tmp",
+                bytes.to_string().as_bytes(),
+            )
+            .map_err(|_| ImageError::download("图片额度保存失败，请重试"))?;
+            self.disk_limit.store(bytes, Ordering::Relaxed);
+            self.prune_to_quota_locked();
+        }
+        Ok(self.stats())
+    }
+
+    /// The caller holds the guide cache lock and excludes URLs used by other guides.
+    pub fn remove_urls(
+        &self,
+        urls: &std::collections::HashSet<String>,
+    ) -> Result<Value, ImageError> {
+        let paths = urls
+            .iter()
+            .map(|url| canonical_image_url(url))
+            .collect::<Result<Vec<_>, _>>()?
+            .iter()
+            .flat_map(|url| self.candidate_paths(url))
+            .map(|(_, path)| path)
+            .collect::<Vec<_>>();
+        let _disk = lock(&self.disk_lock);
+        let mut files = 0;
+        let mut bytes = 0;
+        if !safe_directory(&self.cache_directory) && self.cache_directory.exists() {
+            return Err(ImageError::download("图片目录异常，未删除离线内容"));
+        }
+        {
+            let mut state = lock(&self.state);
+            state.generation = state.generation.wrapping_add(1);
+            for url in urls {
+                if let Some(value) = state.entries.remove(url) {
+                    state.bytes -= value.body.len();
+                }
+                state.order.retain(|entry| entry != url);
+            }
+        }
+        if safe_directory(&self.cache_directory) {
+            for path in paths {
+                let metadata = match fs::symlink_metadata(&path) {
+                    Ok(metadata) if metadata.is_file() => metadata,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    _ => return Err(ImageError::download("图片文件异常，未能安全删除")),
+                };
+                fs::remove_file(&path)
+                    .map_err(|_| ImageError::download("图片删除失败，请检查目录权限"))?;
+                lock(&self.validated).remove(&path);
+                files += 1;
+                bytes += metadata.len();
+            }
+            sync_directory(&self.cache_directory)
+                .map_err(|_| ImageError::download("图片已删除，但目录同步失败"))?;
+        }
+        Ok(json!({"filesRemoved": files, "bytesRemoved": bytes}))
     }
 
     fn resolve(
@@ -250,7 +375,7 @@ impl GuideImageCache {
         offline: bool,
     ) -> Result<Option<Value>, ImageError> {
         let generation = lock(&self.state).generation;
-        if offline && self.read_disk(url, true).is_some() {
+        if offline && self.is_downloaded(url)? {
             return Ok(Some(json!(true)));
         }
         let cached = lock(&self.state).get(url);
@@ -269,9 +394,14 @@ impl GuideImageCache {
         };
         if offline || !from_cache {
             let saved = self.write_disk(url, &value, generation, offline);
+            let saved = if offline {
+                saved?
+            } else {
+                saved.unwrap_or(false)
+            };
             if offline && !saved {
                 return Err(ImageError::download(
-                    "图片未能保存到本机：缓存容量不足、磁盘不可写，或缓存正在清理",
+                    "图片未能保存到本机：缓存正在清理，请稍后重试",
                 ));
             }
         }
@@ -295,6 +425,7 @@ impl GuideImageCache {
         let mut bytes_removed = 0_u64;
         {
             let _disk = lock(&self.disk_lock);
+            lock(&self.validated).clear();
             for entry in self.managed_entries_locked() {
                 if fs::remove_file(&entry.path).is_ok() {
                     files_removed += 1;
@@ -325,7 +456,8 @@ impl GuideImageCache {
         };
         json!({
             "diskBytes": entries.iter().map(|entry| entry.size).sum::<u64>(),
-            "diskLimitBytes": self.limits.max_disk_bytes as u64,
+            "diskLimitBytes": self.disk_limit.load(Ordering::Relaxed),
+            "offlineBytes": entries.iter().filter(|entry| offline_path(&entry.path)).map(|entry| entry.size).sum::<u64>(),
             "files": entries.len() as u64,
             "memoryBytes": memory_bytes,
             "memoryEntries": memory_entries,
@@ -408,9 +540,18 @@ impl GuideImageCache {
         }
     }
 
-    fn write_disk(&self, url: &str, value: &ImageData, generation: u64, offline: bool) -> bool {
-        if self.limits.max_disk_bytes == 0 || value.body.len() > self.limits.max_disk_bytes {
-            return false;
+    fn write_disk(
+        &self,
+        url: &str,
+        value: &ImageData,
+        generation: u64,
+        offline: bool,
+    ) -> Result<bool, ImageError> {
+        let capacity_error = || {
+            ImageError::download("图片离线额度已满，请在 GRIP 高级选项中增加额度或删除不需要的指南")
+        };
+        if value.body.len() as u64 > self.disk_limit.load(Ordering::Relaxed) {
+            return Err(capacity_error());
         }
         let digest = cache_digest(url);
         let extension = extension_for_mime(&value.mime_type).unwrap();
@@ -427,11 +568,11 @@ impl GuideImageCache {
         {
             let state = lock(&self.state);
             if state.generation != generation || state.clearing {
-                return false;
+                return Ok(false);
             }
         }
         if ensure_private_directory(&self.cache_directory).is_err() {
-            return false;
+            return Err(ImageError::download("图片保存失败：缓存目录不可写"));
         }
 
         let mut entries = self.managed_entries_locked();
@@ -454,13 +595,13 @@ impl GuideImageCache {
         if total
             .saturating_sub(entries.iter().map(|entry| entry.size).sum::<u64>())
             .saturating_add(wanted)
-            > self.limits.max_disk_bytes as u64
+            > self.disk_limit.load(Ordering::Relaxed)
         {
-            return false;
+            return Err(capacity_error());
         }
-        while total.saturating_add(wanted) > self.limits.max_disk_bytes as u64 {
+        while total.saturating_add(wanted) > self.disk_limit.load(Ordering::Relaxed) {
             if entries.is_empty() {
-                return false;
+                return Err(capacity_error());
             }
             let entry = entries.remove(0);
             if fs::remove_file(&entry.path).is_ok() {
@@ -471,7 +612,7 @@ impl GuideImageCache {
         let (mut temporary, temporary_path) = match create_temporary(&self.cache_directory, &digest)
         {
             Ok(value) => value,
-            Err(_) => return false,
+            Err(error) => return Err(image_write_error(error)),
         };
         let written = (|| -> io::Result<()> {
             temporary.write_all(&value.body)?;
@@ -492,11 +633,11 @@ impl GuideImageCache {
             Ok(())
         })();
         drop(temporary);
-        if written.is_err() {
+        if let Err(error) = written {
             let _ = fs::remove_file(temporary_path);
-            return false;
+            return Err(image_write_error(error));
         }
-        true
+        Ok(true)
     }
 
     fn managed_entries_locked(&self) -> Vec<DiskEntry> {
@@ -550,7 +691,7 @@ impl GuideImageCache {
                 retained.push(entry);
             }
         }
-        while total > self.limits.max_disk_bytes as u64 && !retained.is_empty() {
+        while total > self.disk_limit.load(Ordering::Relaxed) && !retained.is_empty() {
             let entry = retained.remove(0);
             if fs::remove_file(&entry.path).is_ok() {
                 total = total.saturating_sub(entry.size);
@@ -582,6 +723,20 @@ impl GuideImageCache {
             }
         }
     }
+}
+
+fn valid_disk_limit(bytes: u64) -> bool {
+    (64 * 1024 * 1024..=8 * 1024 * 1024 * 1024).contains(&bytes)
+}
+
+fn image_write_error(error: io::Error) -> ImageError {
+    ImageError::download(
+        if matches!(error.raw_os_error(), Some(libc::ENOSPC | libc::EDQUOT)) {
+            "设备磁盘空间不足，请先释放存储空间"
+        } else {
+            "图片保存失败：磁盘不可写或文件同步失败，请重试"
+        },
+    )
 }
 
 #[derive(Debug)]
@@ -1162,4 +1317,54 @@ fn be_u32(bytes: &[u8]) -> u32 {
 
 fn le_u24(bytes: &[u8]) -> u32 {
     u32::from(bytes[0]) | (u32::from(bytes[1]) << 8) | (u32::from(bytes[2]) << 16)
+}
+
+#[cfg(test)]
+mod offline_tests {
+    use super::*;
+
+    #[test]
+    fn status_memo_skips_unchanged_bytes_and_revalidates_replaced_or_unsafe_files() {
+        let directory = crate::test_support::TestDirectory::new("unused");
+        let body = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0test".to_vec();
+        let cache = GuideImageCache::with_fetcher(
+            directory.0.join("images"),
+            {
+                let body = body.clone();
+                move |_, _, _| Ok(("image/png".into(), body.clone()))
+            },
+            ImageLimits::default(),
+        )
+        .unwrap();
+        let url = "https://images.steamusercontent.com/test.png";
+        cache.download(url).unwrap();
+        assert!(cache.is_downloaded(url).unwrap());
+        let reads = cache.validation_reads.load(Ordering::Relaxed);
+        assert_eq!(reads, 1);
+        for _ in 0..20 {
+            assert!(cache.is_downloaded(url).unwrap());
+        }
+        assert_eq!(cache.validation_reads.load(Ordering::Relaxed), reads);
+        let path = cache
+            .cache_directory
+            .join(format!("offline-{}.png", cache_digest(url)));
+        let mut corrupt = body.clone();
+        corrupt[0] = 0;
+        fs::write(&path, &corrupt).unwrap(); // Same length, changed ctime/mtime.
+        assert!(!cache.is_downloaded(url).unwrap());
+        assert_eq!(cache.validation_reads.load(Ordering::Relaxed), reads + 1);
+        fs::write(&path, &body).unwrap();
+        assert!(cache.is_downloaded(url).unwrap());
+        fs::remove_file(&path).unwrap();
+        assert!(!cache.is_downloaded(url).unwrap());
+        let outside = directory.0.join("unmanaged.png");
+        fs::write(&outside, &body).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        assert!(!cache.is_downloaded(url).unwrap());
+        assert_eq!(fs::read(outside).unwrap(), body);
+        assert_eq!(
+            image_write_error(io::Error::from_raw_os_error(libc::ENOSPC)).message(),
+            "设备磁盘空间不足，请先释放存储空间"
+        );
+    }
 }

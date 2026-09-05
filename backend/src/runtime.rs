@@ -147,7 +147,10 @@ fn guide_request_id(work: &Work) -> Option<&str> {
         return None;
     };
     let (method, params) = request_fields(request).ok()?;
-    if !matches!(method, "guides.get" | "guides.get_cached" | "guides.remove") {
+    if !matches!(
+        method,
+        "guides.get" | "guides.get_cached" | "guides.remove" | "guides.remove_offline"
+    ) {
         return None;
     }
     params?.as_object()?.get("guide_id")?.as_str()
@@ -336,7 +339,7 @@ fn dispatch_general(
             empty_params(params)?;
             guides.clear_guide_cache().map_err(RequestError::Guide)
         }
-        "guides.remove" => {
+        "guides.remove" | "guides.remove_offline" => {
             let object = params_with_fields(params, &["guide_id"])?;
             let guide_id =
                 object
@@ -345,9 +348,15 @@ fn dispatch_general(
                     .ok_or(StoreError::Validation(
                         "guide_id must be a positive decimal string",
                     ))?;
-            guides
-                .remove_guide_cache(guide_id)
-                .map_err(RequestError::Guide)
+            if method == "guides.remove_offline" {
+                guides
+                    .remove_offline_guide(guide_id, images)
+                    .map_err(RequestError::Guide)
+            } else {
+                guides
+                    .remove_guide_cache(guide_id)
+                    .map_err(RequestError::Guide)
+            }
         }
         "guides.stats" => {
             empty_params(params)?;
@@ -379,6 +388,14 @@ fn dispatch_general(
         "images.clear" => {
             empty_params(params)?;
             Ok(images.clear())
+        }
+        "images.set_limit" => {
+            let object = params_with_fields(params, &["bytes"])?;
+            let bytes = object
+                .get("bytes")
+                .and_then(Value::as_u64)
+                .ok_or(StoreError::Validation("图片额度必须是正整数"))?;
+            images.set_disk_limit(bytes).map_err(RequestError::Image)
         }
         "reader_cache.stats" => {
             empty_params(params)?;

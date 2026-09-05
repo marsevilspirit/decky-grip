@@ -203,6 +203,7 @@ fn json_lines_process_handles_ping_repair_and_position_lifecycle() {
             },
             "images": {
                 "diskBytes": 0,
+                "offlineBytes": 0,
                 "diskLimitBytes": 128 * 1024 * 1024,
                 "files": 0,
                 "memoryBytes": 0,
@@ -215,6 +216,61 @@ fn json_lines_process_handles_ping_repair_and_position_lifecycle() {
         fs::metadata(positions_path).unwrap().permissions().mode() & 0o777,
         0o600
     );
+}
+
+#[test]
+fn offline_admin_protocol_validates_inputs_and_restores_quota_after_restart() {
+    let directory = TestDirectory::new();
+    for run in 0..2 {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_grip-sidecar"))
+            .arg(directory.0.join("positions.json"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let mut output = BufReader::new(child.stdout.take().unwrap());
+        if run == 0 {
+            let response = send_and_read_response(
+                &mut input,
+                &mut output,
+                &json!({"id":1,"method":"images.set_limit","params":{"bytes":268435456}}),
+            );
+            assert_eq!(response["ok"], true, "{response}");
+            assert_eq!(response["result"]["diskLimitBytes"], 268435456);
+            for (method, params) in [
+                ("images.set_limit", json!({"bytes":1})),
+                ("images.set_limit", json!({"bytes":true})),
+                ("guides.remove_offline", json!({"guide_id":"../1"})),
+            ] {
+                let response = send_and_read_response(
+                    &mut input,
+                    &mut output,
+                    &json!({"id":2,"method":method,"params":params}),
+                );
+                assert_eq!(response["error"]["kind"], "validation", "{response}");
+            }
+        }
+        let stats = send_and_read_response(
+            &mut input,
+            &mut output,
+            &json!({"id":3,"method":"reader_cache.stats"}),
+        );
+        assert_eq!(stats["result"]["images"]["diskLimitBytes"], 268435456);
+        let removed = send_and_read_response(
+            &mut input,
+            &mut output,
+            &json!({"id":4,"method":"guides.remove_offline","params":{"guide_id":"1"}}),
+        );
+        assert_eq!(
+            removed["result"],
+            json!({"filesRemoved":0,"bytesRemoved":0})
+        );
+        drop(input);
+        output.read_to_end(&mut Vec::new()).unwrap();
+        assert!(child.wait().unwrap().success());
+    }
 }
 
 #[test]

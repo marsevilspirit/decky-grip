@@ -34,6 +34,37 @@ vi.mock("@decky/ui", () => {
   }
 
   return {
+    DropdownItem: ({
+      label,
+      disabled,
+      selectedOption,
+      rgOptions,
+      onChange,
+    }: {
+      label: ReactNode;
+      disabled: boolean;
+      selectedOption: number;
+      rgOptions: Array<{ data: number; label: string }>;
+      onChange: (option: { data: number }) => void;
+    }) =>
+      createElement(
+        "select",
+        {
+          "aria-label": "图片离线额度",
+          disabled,
+          value: selectedOption,
+          onChange: (event: { target: { value: string } }) =>
+            onChange({ data: Number(event.target.value) }),
+        },
+        createElement("option", { value: selectedOption }, label),
+        ...rgOptions.map((option) =>
+          createElement(
+            "option",
+            { key: option.data, value: option.data },
+            option.label,
+          ),
+        ),
+      ),
     ButtonItem: ({ children, disabled, label, onClick }: MockProps) =>
       createElement("button", { disabled, onClick }, label, children),
     PanelSection: ({ children, title }: MockProps) =>
@@ -82,6 +113,7 @@ const cacheStats: ReaderCacheStats = {
     memoryLimitBytes: 1_024,
   },
   images: {
+    offlineBytes: 2_048,
     files: 3,
     diskBytes: 4_096,
     diskLimitBytes: 8_192,
@@ -99,6 +131,7 @@ describe("GripPanel", () => {
     options: {
       clearGuides?: () => Promise<CacheClearResult>;
       getCacheStats?: () => Promise<ReaderCacheStats>;
+      setImageLimit?: (bytes: number) => Promise<ReaderCacheStats["images"]>;
       openReader?: () => Promise<void>;
       repairPositions?: () => Promise<string>;
       status?: RuntimeStatusStore;
@@ -116,6 +149,9 @@ describe("GripPanel", () => {
           }
           clearImages={async () => ({ bytesRemoved: 0, filesRemoved: 0 })}
           getCacheStats={options.getCacheStats ?? (async () => cacheStats)}
+          setImageLimit={
+            options.setImageLimit ?? (async () => cacheStats.images)
+          }
           openReader={options.openReader ?? (async () => undefined)}
           performance={new ReaderPerformanceTracker()}
           repairPositions={options.repairPositions ?? (async () => "")}
@@ -138,6 +174,26 @@ describe("GripPanel", () => {
   };
 
   const panelText = (): string => container?.textContent ?? "";
+
+  it("saves an offline quota choice and shows a failed shrink without clearing downloads", async () => {
+    const setImageLimit = vi.fn(async () => {
+      throw new Error("新额度小于已下载图片用量");
+    });
+    const clearGuides = vi.fn(async () => ({
+      filesRemoved: 0,
+      bytesRemoved: 0,
+    }));
+    await mount({ setImageLimit, clearGuides });
+    await act(async () => button("高级选项").click());
+    const select = container!.querySelector("select")!;
+    await act(async () => {
+      select.value = String(64 * 1024 * 1024);
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(setImageLimit).toHaveBeenCalledExactlyOnceWith(64 * 1024 * 1024);
+    expect(panelText()).toContain("新额度小于已下载图片用量");
+    expect(clearGuides).not.toHaveBeenCalled();
+  });
 
   afterEach(async () => {
     if (root) {

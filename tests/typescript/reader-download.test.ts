@@ -2,8 +2,91 @@
 
 import { expect, it, vi } from "vitest";
 
-import { downloadGuideImages } from "../../src/reader/download";
+import {
+  downloadGuideImages,
+  GuideDownloadTasks,
+} from "../../src/reader/download";
 import type { DownloadedGuide } from "../../src/reader/types";
+
+it("shares an in-flight download across pages, cancels later requests and resumes saved images", async () => {
+  const guide: DownloadedGuide = {
+    guideId: "1",
+    title: "Guide",
+    author: "A",
+    fetchedAt: 1,
+    sourceUrl: "",
+    fromCache: true,
+    stale: false,
+    sections: [
+      {
+        id: "1",
+        title: "Chapter",
+        html: Array.from(
+          { length: 7 },
+          (_, i) =>
+            `<img data-grip-image-url="https://images.steamusercontent.com/${i}.png">`,
+        ).join(""),
+      },
+    ],
+  };
+  const saved = new Set<string>();
+  const pending: Array<() => void> = [];
+  const fetch = vi.fn(async (url: string) => {
+    if (saved.has(url)) return true;
+    await new Promise<void>((resolve) => pending.push(resolve));
+    saved.add(url);
+    return true;
+  });
+  const tick = async () => {
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+  };
+  const run = vi.fn(async (_identity, progress, signal) =>
+    downloadGuideImages(guide, fetch, progress, signal),
+  );
+  const tasks = new GuideDownloadTasks(run);
+  const firstListener = vi.fn();
+  const unsubscribe = tasks.subscribe(firstListener);
+  const first = tasks.start({ appId: "10", guideId: "1" });
+  await tick();
+  expect(fetch).toHaveBeenCalledTimes(3);
+  unsubscribe(); // Native page went away. Another AppID still shares the same content job.
+  expect(tasks.start({ appId: "20", guideId: "1" })).toBe(first);
+  expect(tasks.getSnapshot("1")).toEqual({
+    phase: "downloading",
+    progress: { completed: 0, total: 7 },
+  });
+  tasks.subscribe(() => {
+    if (tasks.getSnapshot("1")?.phase === "canceled")
+      expect(tasks.hasActive()).toBe(false);
+  });
+  tasks.cancel("1");
+  expect(tasks.getSnapshot("1")?.phase).toBe("canceling");
+  expect(tasks.hasActive()).toBe(true);
+  pending.splice(0).forEach((resolve) => resolve());
+  await first;
+  expect(saved.size).toBe(3);
+  expect(fetch).toHaveBeenCalledTimes(3);
+  expect(tasks.hasActive()).toBe(false);
+  expect(tasks.getSnapshot("1")).toEqual({
+    phase: "canceled",
+    progress: { completed: 3, total: 7 },
+  });
+  const secondListener = vi.fn();
+  tasks.subscribe(secondListener);
+  const resumed = tasks.start({ appId: "10", guideId: "1" });
+  await tick();
+  expect(tasks.getSnapshot("1")?.progress?.completed).toBe(3);
+  for (let i = 0; i < 10 && tasks.hasActive(); i++) {
+    pending.splice(0).forEach((resolve) => resolve());
+    await tick();
+  }
+  expect(tasks.hasActive()).toBe(false);
+  await resumed;
+  expect(saved.size).toBe(7);
+  expect(tasks.getSnapshot("1")?.phase).toBe("complete");
+  expect(run).toHaveBeenCalledTimes(2);
+  expect(secondListener).toHaveBeenCalled();
+});
 
 it("waits for every unique image, limits concurrency, and resumes partial downloads", async () => {
   const urls = Array.from(

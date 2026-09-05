@@ -1,6 +1,7 @@
 import { useQuickAccessVisible } from "@decky/api";
 import {
   ButtonItem,
+  DropdownItem,
   PanelSection,
   PanelSectionRow,
   ToggleField,
@@ -25,6 +26,7 @@ export interface GripPanelProps {
   clearGuides: () => Promise<CacheClearResult>;
   clearImages: () => Promise<CacheClearResult>;
   getCacheStats: () => Promise<ReaderCacheStats>;
+  setImageLimit: (bytes: number) => Promise<ReaderCacheStats["images"]>;
   repairPositions: () => Promise<string>;
 }
 
@@ -56,6 +58,7 @@ export function GripPanel({
   clearGuides,
   clearImages,
   getCacheStats,
+  setImageLimit,
   repairPositions,
 }: GripPanelProps) {
   const status = useSyncExternalStore(
@@ -339,9 +342,37 @@ export function GripPanel({
           </PanelSection>
           <PanelSection title="本地缓存">
             <PanelSectionRow>
+              <DropdownItem
+                label={
+                  cacheBusyKey === "limit" ? (
+                    <BusyLabel>正在保存额度…</BusyLabel>
+                  ) : (
+                    "图片离线额度"
+                  )
+                }
+                description="额度满后不会删除已下载图片；单篇删除请在阅读器按 Y。"
+                disabled={cacheBusy || !cacheStats}
+                selectedOption={cacheStats?.images.diskLimitBytes}
+                rgOptions={[64, 128, 256, 512, 1024, 2048, 4096, 8192].map(
+                  (mib) => ({
+                    data: mib * 1024 * 1024,
+                    label: mib < 1024 ? `${mib} MiB` : `${mib / 1024} GiB`,
+                  }),
+                )}
+                onChange={(option) =>
+                  void runCacheAction(
+                    "limit",
+                    () => setImageLimit(option.data as number),
+                    () => "图片离线额度已保存",
+                    "保存额度",
+                  )
+                }
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
               <div style={{ opacity: 0.78 }}>
                 {cacheStats
-                  ? `指南 ${cacheStats.guides.files} 个 / ${formatBytes(cacheStats.guides.bytes)}（上限 ${formatBytes(cacheStats.guides.diskLimitBytes)}）；图片 ${cacheStats.images.files} 个 / ${formatBytes(cacheStats.images.diskBytes)}（上限 ${formatBytes(cacheStats.images.diskLimitBytes)}）`
+                  ? `指南 ${cacheStats.guides.files} 个 / ${formatBytes(cacheStats.guides.bytes)}（上限 ${formatBytes(cacheStats.guides.diskLimitBytes)}）；图片 ${cacheStats.images.files} 个 / ${formatBytes(cacheStats.images.diskBytes)}（其中离线 ${formatBytes(cacheStats.images.offlineBytes)}，上限 ${formatBytes(cacheStats.images.diskLimitBytes)}）`
                   : cacheStatsError
                     ? `缓存用量读取失败：${cacheStatsError}`
                     : "正在读取缓存用量…"}

@@ -68,6 +68,7 @@ export interface ReaderCacheStats {
     files: number;
     diskBytes: number;
     diskLimitBytes: number;
+    offlineBytes: number;
     memoryEntries: number;
     memoryBytes: number;
     memoryLimitBytes: number;
@@ -130,6 +131,15 @@ export const clearGuideCache = callable<[], CacheClearResult>(
 export const clearImageCache = callable<[], CacheClearResult>(
   "clear_image_cache",
 );
+
+export const removeOfflineGuide = callable<[guideId: string], CacheClearResult>(
+  "remove_offline_guide",
+);
+
+export const setImageCacheLimit = callable<
+  [bytes: number],
+  ReaderCacheStats["images"]
+>("set_image_cache_limit");
 
 export const getReaderCacheStats = callable<[], ReaderCacheStats>(
   "get_reader_cache_stats",

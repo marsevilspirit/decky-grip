@@ -1,6 +1,6 @@
 use crate::guide_html::{
     MAX_LABEL_CHARS, MAX_PAGE_NODES, MAX_PAGE_TEXT_CHARS, MAX_SANITIZED_HTML_BYTES, MAX_SECTIONS,
-    localize_guide_images, parse_guide_html, sanitize_fragment_with_stats,
+    localize_guide_images, localized_image_urls, parse_guide_html, sanitize_fragment_with_stats,
     source_url as guide_source_url, valid_guide_id,
 };
 use crate::{
@@ -328,12 +328,58 @@ impl GuideReader {
     }
 
     pub fn remove_guide_cache(&self, guide_id: &str) -> Result<Value, GuideError> {
+        self.remove_cached_guide(guide_id, None)
+    }
+
+    pub fn remove_offline_guide(
+        &self,
+        guide_id: &str,
+        images: &crate::guide_images::GuideImageCache,
+    ) -> Result<Value, GuideError> {
+        self.remove_cached_guide(guide_id, Some(images))
+    }
+
+    fn remove_cached_guide(
+        &self,
+        guide_id: &str,
+        images: Option<&crate::guide_images::GuideImageCache>,
+    ) -> Result<Value, GuideError> {
         validate_guide_id(guide_id)?;
         let guide_lock = self.guide_locks.retain(guide_id);
         let result = {
             let _guide = lock(&guide_lock);
             (|| {
                 let _disk = lock(&self.disk_lock);
+                let mut removed_images = json!({"filesRemoved": 0, "bytesRemoved": 0});
+                if let Some(images) = images {
+                    let mut urls = HashSet::new();
+                    let mut shared = HashSet::new();
+                    // Hold the body-cache lock until deletion finishes, so a refresh cannot
+                    // add a new shared reference between inspection and image removal.
+                    for entry in self.managed_entries_locked()? {
+                        let document = self
+                            .read_cache_without_memoizing(&entry.guide_id)?
+                            .ok_or_else(|| GuideError::cache("指南缓存已变化，请重试删除"))?;
+                        for section in document["sections"].as_array().expect("validated sections")
+                        {
+                            let localized = localize_guide_images(
+                                section["html"].as_str().expect("validated HTML"),
+                            );
+                            let references = localized_image_urls(&localized).map_err(|_| {
+                                GuideError::cache("无法确认共享图片，未删除离线内容")
+                            })?;
+                            if entry.guide_id == guide_id {
+                                urls.extend(references);
+                            } else {
+                                shared.extend(references);
+                            }
+                        }
+                    }
+                    urls.retain(|url| !shared.contains(url));
+                    removed_images = images
+                        .remove_urls(&urls)
+                        .map_err(|error| GuideError::cache(error.message()))?;
+                }
                 let path = self.cache_path(guide_id);
                 let metadata = match fs::symlink_metadata(&path) {
                     Ok(metadata) if metadata.is_file() => Some(metadata),
@@ -358,8 +404,8 @@ impl GuideReader {
                 };
                 lock(&self.memo).remove(guide_id);
                 Ok(json!({
-                    "bytesRemoved": bytes_removed,
-                    "filesRemoved": files_removed,
+                    "bytesRemoved": bytes_removed + removed_images["bytesRemoved"].as_u64().unwrap_or(0),
+                    "filesRemoved": files_removed + removed_images["filesRemoved"].as_u64().unwrap_or(0),
                 }))
             })()
         };

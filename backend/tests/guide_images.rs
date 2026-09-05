@@ -103,6 +103,51 @@ fn canonicalizes_only_trusted_https_urls() {
 }
 
 #[test]
+fn offline_quota_persists_and_rejects_shrinking_below_downloaded_usage() {
+    let directory = TestDirectory::new();
+    let path = directory.0.join("images");
+    let cache = GuideImageCache::new(&path);
+    assert!(cache.set_disk_limit(1).is_err());
+    assert!(cache.set_disk_limit(9 * 1024 * 1024 * 1024).is_err());
+    assert_eq!(
+        cache.set_disk_limit(256 * 1024 * 1024).unwrap()["diskLimitBytes"],
+        256 * 1024 * 1024
+    );
+    let pinned = path.join(format!("offline-{IMAGE_DIGEST}.png"));
+    fs::File::create(&pinned)
+        .unwrap()
+        .set_len(65 * 1024 * 1024)
+        .unwrap();
+    assert!(
+        cache
+            .set_disk_limit(64 * 1024 * 1024)
+            .unwrap_err()
+            .message()
+            .contains("先删除")
+    );
+    assert_eq!(fs::metadata(&pinned).unwrap().len(), 65 * 1024 * 1024);
+    fs::remove_file(pinned).unwrap();
+    cache.clear();
+    assert_eq!(
+        GuideImageCache::new(path).stats()["diskLimitBytes"],
+        256 * 1024 * 1024
+    );
+
+    let full = GuideImageCache::with_fetcher(
+        directory.0.join("full"),
+        |_, _, _| Ok(("image/png".into(), png(b'a', 1, 1))),
+        limits(1024, 1, 1024),
+    )
+    .unwrap();
+    assert!(
+        full.download(IMAGE_URL)
+            .unwrap_err()
+            .message()
+            .contains("离线额度已满")
+    );
+}
+
+#[test]
 fn download_result_requires_matching_static_bounded_raster() {
     let directory = TestDirectory::new();
     let bodies = [
@@ -512,6 +557,7 @@ fn stats_clear_and_reads_only_touch_managed_regular_files() {
         BTreeSet::from([
             "diskBytes",
             "diskLimitBytes",
+            "offlineBytes",
             "files",
             "memoryBytes",
             "memoryEntries",

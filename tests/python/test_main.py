@@ -424,6 +424,8 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
         }
         self.sidecar.responses["guides.clear"] = {"filesRemoved": 1}
         self.sidecar.responses["guides.remove"] = {"filesRemoved": 1}
+        self.sidecar.responses["guides.remove_offline"] = {"filesRemoved": 3}
+        self.sidecar.responses["images.set_limit"] = {"diskLimitBytes": 268435456}
         self.sidecar.responses["images.clear"] = {"filesRemoved": 2}
         self.sidecar.responses["reader_cache.stats"] = {
             "guides": {"files": 0},
@@ -451,6 +453,8 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
             timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
         )
         self.assertEqual((await plugin.remove_guide_cache("1"))["filesRemoved"], 1)
+        self.assertEqual((await plugin.remove_offline_guide("1"))["filesRemoved"], 3)
+        self.assertEqual((await plugin.set_image_cache_limit(268435456))["diskLimitBytes"], 268435456)
         self.assertEqual((await plugin.clear_image_cache())["filesRemoved"], 2)
         self.assertEqual((await plugin.get_reader_cache_stats())["guides"]["files"], 0)
         self.sidecar.request.assert_any_call(
@@ -464,6 +468,8 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
         for method, params in (
             ("guides.clear", {}),
             ("guides.remove", {"guide_id": "1"}),
+            ("guides.remove_offline", {"guide_id": "1"}),
+            ("images.set_limit", {"bytes": 268435456}),
             ("images.clear", {}),
         ):
             self.sidecar.request.assert_any_call(

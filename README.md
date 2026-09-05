@@ -78,7 +78,12 @@ Python tests use only the standard library.
    **下载到 GRIP**. The button checks local disk state on every visit: **补全下载**
    resumes an incomplete download, and **本地阅读** opens GRIP once the body and
    every image are saved for offline use. Download progress counts unique images;
-   retrying preserves images already saved. This status check never goes online.
+   retrying preserves images already saved. Leaving and reopening the page
+   reconnects to the same download progress. **取消下载** stops scheduling further
+   images; up to three in-flight images finish saving before **继续下载** becomes
+   available. Progress lasts until the plugin restarts; saved files survive
+   restarts. The status check never goes online and reuses image validation
+   while each file's identity, size, and timestamps remain unchanged.
 2. Select **GRIP**, then choose **继续当前或最近指南**. The plugin panel does
    not list downloaded guides; switch guides inside the reader with **Y**.
    Open **高级选项** for local cache maintenance and diagnostics.
@@ -88,6 +93,11 @@ Python tests use only the standard library.
    chapter and shows the full focused title in an overlay without resizing the
    article. A failed image offers its own retry button; **A** in the article
    retries the first visible failed image without reloading the guide.
+   Click a loaded image, or press **A** when a loaded image is visible and no
+   failed image needs retrying, to view it full-screen. Use **L1 / R1** or the
+   zoom buttons to change scale, and direction buttons or dragging to pan.
+   **B** returns to the unchanged reading position; the viewer reuses the local
+   image without downloading it again.
    Choose **搜索** to find local
    guide titles, chapters, or body text, preview matching context, and step
    through highlighted matches. GRIP saves each guide's visible text and exact
@@ -149,20 +159,28 @@ limited to 20 MiB each, 256 MiB across the disk LRU, and 32 MiB in the Rust
 memory LRU. Opening a body promotes it; listing guide summaries does not.
 
 Images live under the guide cache's `images/` directory. Each image is limited
-to 8 MiB and a validated 8192-pixel / 16-megapixel canvas, disk storage to
-128 MiB, and the Rust memory LRU to 24 MiB. Explicit downloads use `offline-`
+to 8 MiB and a validated 8192-pixel / 16-megapixel canvas, and the Rust memory
+LRU to 24 MiB. The disk quota defaults to 128 MiB and can be set from 64 MiB to
+8 GiB under **高级选项 → 本地缓存**. The quota is persisted in `images/quota.json`.
+Lowering it below the space occupied by offline images is rejected without
+deleting those images. Explicit downloads use `offline-`
 prefixed cache files that survive ordinary LRU eviction and process restarts;
-if they fill the disk quota, further downloads report an error instead of
-discarding offline images. Clearing the image cache also removes these files.
+if they fill the disk quota, further downloads report a quota error instead of
+discarding offline images. A full device disk is reported separately. Clearing
+the image cache also removes these files, but keeps the configured quota.
 Downloads save up to three images concurrently in Rust without sending their
 bytes through the frontend. The reader still loads only images near the viewport
 and keeps at most 64 MiB / 64 entries of estimated decoded
 frontend image residency. Animated image payloads are rejected, and the reader
 observes at most 512 inert image nodes while staging no more than 48 distinct
 image URLs at once. Under **高级选项**, the panel shows cache usage and provides
-separate controls for clearing all guide bodies, one guide body, or images;
-clearing images also invalidates in-flight frontend work, and none of these
-controls deletes saved reading positions.
+separate controls for clearing all guide bodies or images. To remove one guide,
+open the reader's **Y** switcher and choose **删除当前指南离线副本**, then confirm.
+This removes its body and images not referenced by other cached guides; if
+another guide cannot be inspected safely, deletion stops. The current in-memory
+article remains readable. Cache deletion is unavailable during an active
+download. Clearing images also invalidates in-flight frontend work, and none
+of these controls deletes saved reading positions.
 
 `positions.json` has exactly one owner: the Rust sidecar. Backend RPC calls are
 serialized before entering the file store, so their arrival order is not

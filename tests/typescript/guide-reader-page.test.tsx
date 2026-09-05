@@ -10,7 +10,7 @@ import {
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { GuideLibraryEntry } from "../../src/backend";
+import type { CacheClearResult, GuideLibraryEntry } from "../../src/backend";
 import { GuideReaderPage } from "../../src/components/GuideReaderPage";
 import { ReaderImageCacheControl } from "../../src/reader/image-cache-control";
 import type { GuideImageFetcher } from "../../src/reader/image-hydrator";
@@ -42,6 +42,8 @@ vi.mock("@decky/ui", () => {
           }) => void)
         | undefined;
       const onOKButton = domProps.onOKButton as typeof onOptionsButton;
+      const onGamepadDirection =
+        domProps.onGamepadDirection as typeof onOptionsButton;
       const onGamepadFocus = domProps.onGamepadFocus as
         (() => void) | undefined;
       const onGamepadBlur = domProps.onGamepadBlur as (() => void) | undefined;
@@ -52,7 +54,7 @@ vi.mock("@decky/ui", () => {
       if (domProps.onOptionsActionDescription) {
         domProps["data-options-action"] = domProps.onOptionsActionDescription;
       }
-      if (onCancel || onOptionsButton || onOKButton) {
+      if (onCancel || onOptionsButton || onOKButton || onGamepadDirection) {
         domProps.onKeyDown = (event: KeyboardEvent) => {
           if (event.key === "Options" && onOptionsButton) {
             onOptionsButton({
@@ -65,6 +67,12 @@ vi.mock("@decky/ui", () => {
           } else if (event.key === "Enter" && onOKButton) {
             onOKButton({
               detail: { button: 1, is_repeat: event.repeat, source: 0 },
+              preventDefault: () => event.preventDefault(),
+              stopPropagation: () => event.stopPropagation(),
+            });
+          } else if (event.key === "ArrowRight" && onGamepadDirection) {
+            onGamepadDirection({
+              detail: { button: 15, is_repeat: false, source: 0 },
               preventDefault: () => event.preventDefault(),
               stopPropagation: () => event.stopPropagation(),
             });
@@ -99,6 +107,8 @@ vi.mock("@decky/ui", () => {
       BUMPER_RIGHT: 10,
       DIR_DOWN: 13,
       DIR_UP: 12,
+      DIR_LEFT: 14,
+      DIR_RIGHT: 15,
     },
     Spinner: () => createElement("span"),
     TextField: ({ label, onChange, value }: MockProps) =>
@@ -308,6 +318,7 @@ describe("GuideReaderPage position lifecycle", () => {
       loadGuideLibrary?: (appId: string) => Promise<GuideLibraryEntry[]>;
       onClose?: () => void;
       onSwitchGuide?: (identity: GuideIdentity) => Promise<void>;
+      onRemoveOffline?: (guideId: string) => Promise<CacheClearResult>;
     } = {},
   ): Promise<HTMLElement> => {
     container = document.createElement("div");
@@ -316,6 +327,10 @@ describe("GuideReaderPage position lifecycle", () => {
     await act(async () => {
       root?.render(
         <GuideReaderPage
+          onRemoveOffline={
+            options.onRemoveOffline ??
+            (async () => ({ filesRemoved: 1, bytesRemoved: 100 }))
+          }
           cache={cache}
           fetchImage={fetchImage}
           imageCacheControl={new ReaderImageCacheControl()}
@@ -635,6 +650,136 @@ describe("GuideReaderPage position lifecycle", () => {
     await act(async () => scroller.focus());
     expect(container!.querySelector('[role="tooltip"]')).toBeNull();
     expect(scroller.scrollTop).toBe(650);
+  });
+
+  it("opens an image fullscreen, zooms and pans it, then returns to the untouched reading position", async () => {
+    const guide = guideFixture();
+    guide.sections = [
+      {
+        id: "1",
+        title: "地图",
+        html: '<p>地图位置</p><img alt="攻略地图" data-grip-image-url="https://images.steamusercontent.com/map.png">',
+      },
+    ];
+    const backend: ReaderSessionBackend = {
+      getCachedGuide: async () => guide,
+      getGuide: async () => guide,
+      getReaderPosition: async () => null,
+      saveReaderPosition: async (
+        _key,
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+      ) => ({ scrollTop, sectionId, anchorText, anchorOffset, updatedAt: 2 }),
+    };
+    const cache = new ReaderSessionCache(backend);
+    await cache.load(identity);
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:map");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(800);
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(600);
+    const fetchImage = vi.fn(async () => ({
+      mimeType: "image/png",
+      base64: "AQID",
+      fromCache: true,
+      width: 2000,
+      height: 1000,
+    }));
+    const close = vi.fn();
+    const scroller = await mount(cache, fetchImage, 3000, { onClose: close });
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    const original = scroller.querySelector("img")!;
+    original.getBoundingClientRect = () =>
+      ({ top: 100, bottom: 400 }) as DOMRect;
+    await act(async () => {
+      scroller.scrollTop = 234;
+      scroller.dispatchEvent(new Event("scroll"));
+      original.click();
+    });
+    const viewer = container!.querySelector<HTMLElement>(
+      '[aria-label="图片全屏查看"]',
+    )!;
+    expect(viewer).not.toBeNull();
+    expect(scroller.parentElement?.inert).toBe(true);
+    const enlarged = viewer.querySelector("img")!;
+    expect(enlarged.src).toBe(original.src);
+    const width = parseFloat(enlarged.style.width);
+    await act(async () => buttonNamed("放大").click());
+    expect(parseFloat(enlarged.style.width)).toBeGreaterThan(width);
+    const view = viewer.querySelector<HTMLElement>(
+      '[aria-label="图片移动区域"]',
+    )!;
+    expect(view.scrollLeft).toBeCloseTo(
+      (parseFloat(enlarged.style.width) - 800) / 2,
+    );
+    const left = view.scrollLeft;
+    await act(async () => pressKey(view, "ArrowRight"));
+    expect(view.scrollLeft).toBeGreaterThan(left);
+    await act(async () => pressKey(view, "Escape"));
+    await flushFrame();
+    expect(container!.querySelector('[aria-label="图片全屏查看"]')).toBeNull();
+    expect(document.activeElement).toBe(scroller);
+    expect(scroller.scrollTop).toBe(234);
+    expect(scroller.querySelector("img")).toBe(original);
+    expect(close).not.toHaveBeenCalled();
+    expect(fetchImage).toHaveBeenCalledOnce();
+    expect(scroller.getAttribute("data-ok-action")).toBe("查看图片");
+    await act(async () => pressKey(scroller, "Enter"));
+    expect(
+      container!.querySelector('[aria-label="图片全屏查看"]'),
+    ).not.toBeNull();
+  });
+
+  it("requires a named confirmation for single-guide deletion and preserves the active article", async () => {
+    const guide = guideFixture();
+    const cache = new ReaderSessionCache({
+      getCachedGuide: async () => guide,
+      getGuide: async () => guide,
+      getReaderPosition: async () => null,
+      saveReaderPosition: async (
+        _key,
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+      ) => ({ scrollTop, sectionId, anchorText, anchorOffset, updatedAt: 2 }),
+    });
+    await cache.load(identity);
+    let finish!: () => void;
+    const remove = vi.fn(async () => {
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      return { filesRemoved: 3, bytesRemoved: 1048576 };
+    });
+    const scroller = await mount(cache, async () => null, 5000, {
+      onRemoveOffline: remove,
+    });
+    await act(async () => pressKey(scroller, "Options"));
+    await flushFrame();
+    await act(async () => buttonNamed("删除当前指南离线副本").click());
+    const confirm = container!.querySelector('[role="alertdialog"]')!;
+    expect(confirm.textContent).toContain(guide.title);
+    expect(remove).not.toHaveBeenCalled();
+    await act(async () => buttonNamed("取消").click());
+    expect(remove).not.toHaveBeenCalled();
+    await act(async () => buttonNamed("删除当前指南离线副本").click());
+    await act(async () => {
+      buttonNamed("确认删除").click();
+    });
+    expect(buttonNamed("正在删除…").disabled).toBe(true);
+    expect(remove).toHaveBeenCalledExactlyOnceWith(identity.guideId);
+    await act(async () => {
+      finish();
+    });
+    expect(container!.textContent).toContain("离线副本已删除");
+    expect(buttonNamed("删除当前指南离线副本").disabled).toBe(true);
+    expect(container!.querySelector('[aria-label="指南正文"]')).toBe(scroller);
+    await act(async () => pressKey(scroller, "Escape"));
+    await act(async () => buttonNamed("更新").click());
+    await act(async () => pressKey(scroller, "Options"));
+    expect(buttonNamed("删除当前指南离线副本").disabled).toBe(false);
   });
 
   it("retries a failed image with A or its own button without rebuilding the article or other images", async () => {
