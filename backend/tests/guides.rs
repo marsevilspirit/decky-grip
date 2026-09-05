@@ -161,6 +161,183 @@ fn guide_fixture(title: &str) -> Vec<u8> {
     guide_fixture_with_text(title, "正文")
 }
 
+#[test]
+fn offline_updates_publish_only_after_all_images_and_preserve_the_old_version_on_failure() {
+    use grip_sidecar::guide_images::{GuideImageCache, ImageErrorKind, ImageLimits};
+    let harness = Harness::new();
+    let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0test";
+    let images = GuideImageCache::with_fetcher(
+        harness._directory.0.join("images"),
+        move |_, _, _| Ok(("image/png".into(), png.to_vec())),
+        ImageLimits {
+            max_disk_bytes: png.len(),
+            ..ImageLimits::default()
+        },
+    )
+    .unwrap();
+    let old_url = "https://images.steamusercontent.com/ugc/example/image.png";
+    let new_url = "https://images.steamusercontent.com/ugc/example/new.png";
+    let candidate = harness.reader.prepare(GUIDE_ID, false).unwrap();
+    let token = candidate["token"].as_str().unwrap();
+    assert!(harness.reader.get_cached(GUIDE_ID).unwrap().is_none());
+    assert!(harness.reader.commit(GUIDE_ID, token, &images).is_err());
+    images.download(old_url).unwrap();
+    harness.reader.commit(GUIDE_ID, token, &images).unwrap();
+    let path = harness.cache_path(GUIDE_ID);
+    let original = fs::read(&path).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&original).unwrap()["offline"],
+        true
+    );
+    assert!(harness.reader.get(GUIDE_ID, true).is_err()); // No bypass that drops the offline pin.
+
+    harness.set_error("network unavailable");
+    assert!(harness.reader.prepare(GUIDE_ID, true).is_err());
+    assert_eq!(fs::read(&path).unwrap(), original);
+    *harness.plan.lock().unwrap() = FetchPlan::Body(
+        String::from_utf8(guide_fixture("新版指南"))
+            .unwrap()
+            .replace(old_url, new_url)
+            .into_bytes(),
+    );
+    let candidate = harness.reader.prepare(GUIDE_ID, true).unwrap();
+    let token = candidate["token"].as_str().unwrap();
+    assert_eq!(
+        harness.reader.get_cached(GUIDE_ID).unwrap().unwrap()["title"],
+        "初始指南"
+    );
+    assert!(!harness.reader.discard(GUIDE_ID, "stale-token").unwrap());
+    assert!(
+        harness
+            .reader
+            .commit(GUIDE_ID, "stale-token", &images)
+            .is_err()
+    );
+    assert!(harness.reader.commit(GUIDE_ID, token, &images).is_err());
+    assert_eq!(
+        images.download(new_url).unwrap_err().kind(),
+        ImageErrorKind::Capacity
+    );
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert!(images.is_downloaded(old_url).unwrap());
+
+    images.set_disk_limit(64 * 1024 * 1024).unwrap();
+    images.download(new_url).unwrap();
+    if unsafe { libc::geteuid() } != 0 {
+        fs::set_permissions(&harness.cache_directory, fs::Permissions::from_mode(0o500)).unwrap();
+        assert!(harness.reader.commit(GUIDE_ID, token, &images).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        fs::set_permissions(&harness.cache_directory, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let committed = harness.reader.commit(GUIDE_ID, token, &images).unwrap();
+    assert_eq!(committed["title"], "新版指南");
+    assert_eq!(committed["offline"], true);
+    assert!(!harness.reader.discard(GUIDE_ID, token).unwrap());
+    assert_eq!(fs::read_dir(&harness.cache_directory).unwrap().count(), 1); // No routine backup litter.
+    let offline = GuideReader::with_fetcher(
+        &harness.cache_directory,
+        |_, _, _| panic!("offline read fetched"),
+        || NOW_MS,
+    );
+    assert_eq!(offline.get(GUIDE_ID, false).unwrap()["title"], "新版指南");
+
+    let pending = harness.reader.prepare(GUIDE_ID, true).unwrap();
+    let committed_bytes = fs::read(&path).unwrap();
+    images.clear();
+    assert!(
+        harness
+            .reader
+            .commit(GUIDE_ID, pending["token"].as_str().unwrap(), &images)
+            .is_err()
+    );
+    assert_eq!(fs::read(&path).unwrap(), committed_bytes);
+    harness.reader.remove_guide_cache(GUIDE_ID).unwrap();
+    images.download(new_url).unwrap();
+    assert!(
+        harness
+            .reader
+            .commit(GUIDE_ID, pending["token"].as_str().unwrap(), &images)
+            .is_err()
+    );
+    assert!(!path.exists());
+    let pending = harness.reader.prepare(GUIDE_ID, true).unwrap();
+    harness.reader.clear_guide_cache().unwrap();
+    assert!(
+        harness
+            .reader
+            .commit(GUIDE_ID, pending["token"].as_str().unwrap(), &images)
+            .is_err()
+    );
+    assert!(!path.exists());
+}
+
+#[test]
+fn downloaded_and_legacy_bodies_survive_lru_and_restart_until_manual_deletion() {
+    use grip_sidecar::guide_images::{GuideImageCache, ImageLimits};
+    let harness = Harness::with_limits(GuideLimits {
+        max_disk_bytes: 1,
+        max_memory_bytes: 0,
+    });
+    let images = GuideImageCache::with_fetcher(
+        harness._directory.0.join("images"),
+        |_, _, _| {
+            Ok((
+                "image/png".into(),
+                b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0test".to_vec(),
+            ))
+        },
+        ImageLimits::default(),
+    )
+    .unwrap();
+    images
+        .download("https://images.steamusercontent.com/ugc/example/image.png")
+        .unwrap();
+    let candidate = harness.reader.prepare(GUIDE_ID, false).unwrap();
+    harness
+        .reader
+        .commit(GUIDE_ID, candidate["token"].as_str().unwrap(), &images)
+        .unwrap();
+    let path = harness.cache_path(GUIDE_ID);
+    let original = fs::read(&path).unwrap();
+    let mut legacy: Value = serde_json::from_slice(&original).unwrap();
+    legacy["guideId"] = json!(THIRD_GUIDE_ID);
+    legacy["sourceUrl"] = json!(format!(
+        "https://steamcommunity.com/sharedfiles/filedetails/?id={THIRD_GUIDE_ID}&l=schinese"
+    ));
+    legacy["schemaVersion"] = json!(1);
+    legacy.as_object_mut().unwrap().remove("offline");
+    fs::write(
+        harness.cache_path(THIRD_GUIDE_ID),
+        serde_json::to_vec(&legacy).unwrap(),
+    )
+    .unwrap();
+    harness.reader.get(OTHER_GUIDE_ID, false).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert!(!harness.cache_path(OTHER_GUIDE_ID).exists());
+    let restarted = GuideReader::with_fetcher_and_limits(
+        &harness.cache_directory,
+        |_, _, _| panic!("pinned body must be offline"),
+        || NOW_MS,
+        GuideLimits {
+            max_disk_bytes: 1,
+            max_memory_bytes: 0,
+        },
+    );
+    assert!(restarted.get_cached(GUIDE_ID).unwrap().is_some());
+    assert!(restarted.get_cached(THIRD_GUIDE_ID).unwrap().is_some());
+    restarted.remove_offline_guide(GUIDE_ID, &images).unwrap();
+    assert!(!path.exists());
+    assert!(
+        images
+            .is_downloaded("https://images.steamusercontent.com/ugc/example/image.png")
+            .unwrap()
+    );
+    restarted
+        .remove_offline_guide(THIRD_GUIDE_ID, &images)
+        .unwrap();
+    assert_eq!(images.stats()["files"], 0);
+}
+
 fn guide_fixture_with_text(title: &str, text: &str) -> Vec<u8> {
     format!(
         "<div class=\"workshopItemTitle\">{title}</div>\
@@ -206,6 +383,7 @@ fn downloads_then_serves_the_validated_network_inert_cache() {
             "fetchedAt",
             "fromCache",
             "guideId",
+            "offline",
             "sections",
             "sourceUrl",
             "stale",
@@ -411,7 +589,8 @@ fn corrupt_cache_is_preserved_until_a_successful_force_refresh() {
     assert_eq!(refreshed["fromCache"], false);
     assert_eq!(refreshed["title"], "修复后的指南");
     let stored: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-    assert_eq!(stored["schemaVersion"], 1);
+    assert_eq!(stored["schemaVersion"], 2);
+    assert_eq!(stored["offline"], false);
     assert_eq!(stored["guideId"], GUIDE_ID);
 }
 

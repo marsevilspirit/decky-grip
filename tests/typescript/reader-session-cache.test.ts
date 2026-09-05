@@ -67,6 +67,45 @@ function backend(overrides: Partial<ReaderSessionBackend> = {}) {
 }
 
 describe("ReaderSessionCache", () => {
+  it("adopts committed bodies without losing in-flight positions or resurrecting stale preloads", async () => {
+    const preload = deferred<DownloadedGuide | null>();
+    const save = deferred<ReaderPosition>();
+    const injected = backend({
+      getCachedGuide: vi.fn(() => preload.promise),
+      saveReaderPosition: vi.fn(() => save.promise),
+    });
+    const cache = new ReaderSessionCache(injected);
+    const latePreload = cache.preload(identity);
+    const old = await cache.load(identity);
+    const saving = cache.savePosition(identity, capturedPosition(420));
+    const committed = guide("Complete offline update");
+    expect(cache.peek(identity)?.guide).toBe(old.guide);
+    cache.acceptOfflineGuide(committed);
+    preload.resolve(guide("Stale preload"));
+    save.resolve(readerPosition(420, 400));
+    await saving;
+    expect((await latePreload)?.guide).toBe(committed);
+    expect(cache.peek(identity)?.guide).toBe(committed);
+    expect(cache.peek(identity)?.position?.scrollTop).toBe(420);
+  });
+
+  it("rereads a foreground result that crossed a completed offline update", async () => {
+    const pending = deferred<DownloadedGuide>();
+    const committed = guide("Committed");
+    const injected = backend({
+      getGuide: vi
+        .fn()
+        .mockReturnValueOnce(pending.promise)
+        .mockResolvedValue(committed),
+    });
+    const cache = new ReaderSessionCache(injected);
+    const work = cache.load(identity);
+    cache.acceptOfflineGuide(committed);
+    pending.resolve(guide("Old body"));
+    expect((await work).guide).toBe(committed);
+    expect(cache.peek(identity)?.guide).toBe(committed);
+  });
+
   it("retains the mounted guide object for a stale force-refresh fallback", () => {
     const existing = {
       guide: guide("Mounted guide"),
@@ -99,7 +138,7 @@ describe("ReaderSessionCache", () => {
     expect(cache.peek(identity)).toBe(loaded);
     await expect(cache.load(identity)).resolves.toBe(loaded);
     expect(injected.getGuide).toHaveBeenCalledOnce();
-    expect(injected.getGuide).toHaveBeenCalledWith(identity.guideId, false);
+    expect(injected.getGuide).toHaveBeenCalledWith(identity, false);
     expect(injected.getReaderPosition).toHaveBeenCalledWith(guideKey);
   });
 
@@ -109,7 +148,7 @@ describe("ReaderSessionCache", () => {
     await cache.load(identity);
     const checked = await cache.load(identity, { revalidate: true });
     expect(injected.getGuide).toHaveBeenCalledTimes(2);
-    expect(injected.getGuide).toHaveBeenLastCalledWith(identity.guideId, false);
+    expect(injected.getGuide).toHaveBeenLastCalledWith(identity, false);
     expect(checked.position?.scrollTop).toBe(120);
     expect(cache.peek(identity)).toBe(checked);
     await expect(cache.load(identity)).resolves.toBe(checked);
@@ -383,7 +422,7 @@ describe("ReaderSessionCache", () => {
     const foreground = await cache.load(identity);
 
     expect(foreground.guide.title).toBe("Foreground guide");
-    expect(injected.getGuide).toHaveBeenCalledWith(identity.guideId, false);
+    expect(injected.getGuide).toHaveBeenCalledWith(identity, false);
     pendingPreload.resolve(guide("Late preload"));
     await expect(preloading).resolves.toBe(foreground);
     expect(cache.peek(identity)).toBe(foreground);
@@ -402,10 +441,7 @@ describe("ReaderSessionCache", () => {
     const foreground = await cache.load(secondIdentity);
 
     expect(foreground.guide.title).toBe("Foreground B");
-    expect(injected.getGuide).toHaveBeenCalledWith(
-      secondIdentity.guideId,
-      false,
-    );
+    expect(injected.getGuide).toHaveBeenCalledWith(secondIdentity, false);
     pendingPreload.resolve(null);
     await preloading;
   });
@@ -434,7 +470,7 @@ describe("ReaderSessionCache", () => {
     });
     const cache = new ReaderSessionCache(
       backend({
-        getGuide: vi.fn(async (guideId) => ({
+        getGuide: vi.fn(async ({ guideId }) => ({
           ...guide(`Guide ${guideId}`),
           guideId,
         })),
@@ -458,7 +494,7 @@ describe("ReaderSessionCache", () => {
     const thirdIdentity = { appId: "1113000", guideId: "3414883879" };
     const injected = backend({
       getCachedGuide: vi.fn(() => pendingPreload.promise),
-      getGuide: vi.fn(async (guideId) => guide(`Foreground ${guideId}`)),
+      getGuide: vi.fn(async ({ guideId }) => guide(`Foreground ${guideId}`)),
     });
     const cache = new ReaderSessionCache(injected);
     const oldPreload = cache.preload(identity);
@@ -484,7 +520,7 @@ describe("ReaderSessionCache", () => {
     await cache.load(identity, { forceRefresh: true });
 
     expect(injected.getGuide).toHaveBeenCalledOnce();
-    expect(injected.getGuide).toHaveBeenCalledWith(identity.guideId, true);
+    expect(injected.getGuide).toHaveBeenCalledWith(identity, true);
   });
 
   it("does not persist a staged handoff during background preloading", async () => {
@@ -561,7 +597,7 @@ describe("ReaderSessionCache", () => {
     const refreshing = cache.load(identity, { forceRefresh: true });
 
     expect(cache.peek(identity)).toBe(oldSnapshot);
-    expect(getGuide).toHaveBeenLastCalledWith(identity.guideId, true);
+    expect(getGuide).toHaveBeenLastCalledWith(identity, true);
     refreshGuide.resolve(guide("New guide"));
     await Promise.resolve();
     expect(cache.peek(identity)).toBe(oldSnapshot);

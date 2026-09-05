@@ -169,11 +169,15 @@ function GuideDownloadButtonForGuide({
               ? "正在打开…"
               : task?.phase === "canceling"
                 ? "正在停止下载…"
-                : downloading
-                  ? progress
-                    ? `图片 ${progress.completed}/${progress.total}…`
-                    : "下载中…"
-                  : "检查下载…"}
+                : progress?.publishing
+                  ? "保存新版…"
+                  : progress?.stopped
+                    ? "空间不足，已停止后续下载"
+                    : downloading
+                      ? progress
+                        ? `图片 ${progress.completed}/${progress.total}…`
+                        : "下载中…"
+                      : "检查下载…"}
           </BusyLabel>
         ) : checkFailed ? (
           "检查失败，重试"
@@ -195,11 +199,27 @@ function GuideDownloadButtonForGuide({
       </DialogButton>
       {downloading && (
         <DialogButton
-          disabled={task?.phase === "canceling"}
+          disabled={task?.phase === "canceling" || progress?.publishing}
           onClick={() => downloads.cancel(identity.guideId)}
         >
           取消下载
         </DialogButton>
+      )}
+      {(progress?.error || task?.error) && (
+        <div
+          role="status"
+          style={{ color: "#ffc582", fontSize: 14, padding: "6px 0" }}
+        >
+          {progress?.stopped
+            ? "已暂停："
+            : progress?.failed
+              ? `${progress.failed} 张图片失败：`
+              : ""}
+          {progress?.error ?? task?.error}
+          {downloading && !progress?.stopped
+            ? "；其余图片继续下载，完成后可重试失败图片。"
+            : "；已下载内容保留。"}
+        </div>
       )}
     </NavigationProvider>,
     target.element,

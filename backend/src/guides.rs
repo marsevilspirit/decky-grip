@@ -15,6 +15,7 @@ use std::fs::{self, FileTimes, OpenOptions};
 use std::io;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
@@ -26,7 +27,8 @@ pub const MAX_MEMORY_CACHE_BYTES: usize = 32 * 1024 * 1024;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 pub const CACHE_MAX_AGE_MS: u64 = 6 * 60 * 60 * 1_000;
 
-const CACHE_SCHEMA_VERSION: u64 = 1;
+const CACHE_SCHEMA_VERSION: u64 = 2;
+static PREPARE_COUNTER: AtomicU64 = AtomicU64::new(0);
 const MAX_FUTURE_TIMESTAMP_MS: u64 = 24 * 60 * 60 * 1_000;
 const MAX_REDIRECTS: usize = 10;
 
@@ -196,6 +198,16 @@ pub struct GuideReader {
     memo: Mutex<MemoState>,
     disk_lock: Mutex<()>,
     generation: Mutex<u64>,
+    prepared: Mutex<HashMap<String, PreparedGuide>>,
+    #[cfg(test)]
+    fail_publish_sync: std::sync::atomic::AtomicBool,
+}
+
+struct PreparedGuide {
+    token: String,
+    document: Value,
+    generation: u64,
+    bytes: usize,
 }
 
 impl GuideReader {
@@ -230,6 +242,9 @@ impl GuideReader {
             memo: Mutex::new(MemoState::default()),
             disk_lock: Mutex::new(()),
             generation: Mutex::new(0),
+            prepared: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            fail_publish_sync: std::sync::atomic::AtomicBool::new(false),
         };
         {
             let _disk = lock(&reader.disk_lock);
@@ -262,6 +277,127 @@ impl GuideReader {
         )))
     }
 
+    /// Fetch a candidate without exposing it to readers or replacing the last offline version.
+    pub fn prepare(&self, guide_id: &str, force_refresh: bool) -> Result<Value, GuideError> {
+        validate_guide_id(guide_id)?;
+        let guide_lock = self.guide_locks.retain(guide_id);
+        let result = {
+            let _guide = lock(&guide_lock);
+            (|| {
+                let generation = *lock(&self.generation);
+                let (document, from_cache) = if force_refresh {
+                    (self.fetch_and_validate(guide_id, (self.now_ms)())?, false)
+                } else {
+                    match self.read_cache(guide_id)? {
+                        Some(document) => (document, true),
+                        None => (self.fetch_and_validate(guide_id, (self.now_ms)())?, false),
+                    }
+                };
+                let bytes = serde_json::to_vec(&document)
+                    .map_err(|_| GuideError::cache("指南无法编码"))?
+                    .len();
+                let _disk = lock(&self.disk_lock);
+                if generation != *lock(&self.generation) {
+                    return Err(GuideError::cache("缓存已清理，请重新下载"));
+                }
+                let mut prepared = lock(&self.prepared);
+                // ponytail: byte-bounded staging in memory; persistent resumable manifests only if needed.
+                let used: usize = prepared
+                    .iter()
+                    .filter(|(id, _)| id.as_str() != guide_id)
+                    .map(|(_, candidate)| candidate.bytes)
+                    .sum();
+                if bytes > MAX_CACHE_BYTES as usize || used + bytes > MAX_MEMORY_CACHE_BYTES {
+                    return Err(GuideError::cache("正在准备的指南过多，请等待其他下载完成"));
+                }
+                let token = format!(
+                    "{}-{}-{}",
+                    std::process::id(),
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos(),
+                    PREPARE_COUNTER.fetch_add(1, Ordering::Relaxed)
+                );
+                let guide = with_cache_status(
+                    &document,
+                    from_cache,
+                    is_stale((self.now_ms)(), fetched_at(&document)),
+                );
+                prepared.insert(
+                    guide_id.to_owned(),
+                    PreparedGuide {
+                        token: token.clone(),
+                        document,
+                        generation,
+                        bytes,
+                    },
+                );
+                Ok(json!({"token": token, "guide": guide}))
+            })()
+        };
+        self.guide_locks.release(guide_id, &guide_lock);
+        result
+    }
+
+    pub fn commit(
+        &self,
+        guide_id: &str,
+        token: &str,
+        images: &crate::guide_images::GuideImageCache,
+    ) -> Result<Value, GuideError> {
+        validate_guide_id(guide_id)?;
+        let guide_lock = self.guide_locks.retain(guide_id);
+        let result = {
+            let _guide = lock(&guide_lock);
+            (|| {
+                let _disk = lock(&self.disk_lock);
+                let mut prepared = lock(&self.prepared);
+                let candidate = prepared
+                    .get(guide_id)
+                    .filter(|candidate| {
+                        candidate.token == token && candidate.generation == *lock(&self.generation)
+                    })
+                    .ok_or_else(|| GuideError::cache("下载任务已失效，未替换原指南，请重试"))?;
+                let mut urls = HashSet::new();
+                for section in candidate.document["sections"]
+                    .as_array()
+                    .expect("validated sections")
+                {
+                    urls.extend(
+                        localized_image_urls(&localize_guide_images(
+                            section["html"].as_str().unwrap(),
+                        ))
+                        .map_err(|_| GuideError::cache("无法确认图片完整性，未替换原指南"))?,
+                    );
+                }
+                let _images = images
+                    .downloaded_guard(&urls)
+                    .map_err(|error| GuideError::cache(error.message()))?;
+                let mut document = candidate.document.clone();
+                document["offline"] = json!(true);
+                self.write_cache_unlocked(&document)?;
+                prepared.remove(guide_id);
+                Ok(with_cache_status(&document, true, false))
+            })()
+        };
+        self.guide_locks.release(guide_id, &guide_lock);
+        result
+    }
+
+    pub fn discard(&self, guide_id: &str, token: &str) -> Result<bool, GuideError> {
+        validate_guide_id(guide_id)?;
+        let mut prepared = lock(&self.prepared);
+        if prepared
+            .get(guide_id)
+            .is_some_and(|candidate| candidate.token == token)
+        {
+            prepared.remove(guide_id);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     pub fn cached_summary(
         &self,
         guide_id: &str,
@@ -286,11 +422,12 @@ impl GuideReader {
     }
 
     pub fn clear_guide_cache(&self) -> Result<Value, GuideError> {
+        let _disk = lock(&self.disk_lock);
         {
             let mut generation = lock(&self.generation);
             *generation = generation.wrapping_add(1);
         }
-        let _disk = lock(&self.disk_lock);
+        lock(&self.prepared).clear();
         let mut files_removed = 0_u64;
         let mut bytes_removed = 0_u64;
         if let Some(entries) = read_cache_directory(&self.cache_directory)? {
@@ -350,6 +487,7 @@ impl GuideReader {
             let _guide = lock(&guide_lock);
             (|| {
                 let _disk = lock(&self.disk_lock);
+                lock(&self.prepared).remove(guide_id);
                 let mut removed_images = json!({"filesRemoved": 0, "bytesRemoved": 0});
                 if let Some(images) = images {
                     let mut urls = HashSet::new();
@@ -437,6 +575,15 @@ impl GuideReader {
             Err(error) => return Err(error),
         };
         let now = (self.now_ms)();
+        if force_refresh
+            && cached
+                .as_ref()
+                .is_some_and(|document| document["offline"] == true)
+        {
+            return Err(GuideError::cache(
+                "已下载指南需通过完整离线更新，未替换原指南",
+            ));
+        }
         if !force_refresh {
             if let Some(document) = &cached {
                 return Ok(with_cache_status(
@@ -483,6 +630,7 @@ impl GuideReader {
             .expect("parse_guide_html always returns an object");
         object.insert("fetchedAt".into(), json!(fetched_at_ms));
         object.insert("schemaVersion".into(), json!(CACHE_SCHEMA_VERSION));
+        object.insert("offline".into(), json!(false));
         self.validate_cached_document(guide_id, &document)
     }
 
@@ -572,22 +720,34 @@ impl GuideReader {
     }
 
     fn validate_cached_document(&self, guide_id: &str, value: &Value) -> Result<Value, GuideError> {
-        let object = exact_object(
-            value,
-            &[
-                "schemaVersion",
-                "guideId",
-                "title",
-                "author",
-                "sourceUrl",
-                "fetchedAt",
-                "sections",
-            ],
-            "cached guide has unknown or missing fields",
-        )?;
-        if object.get("schemaVersion").and_then(Value::as_u64) != Some(CACHE_SCHEMA_VERSION) {
+        let legacy = value["schemaVersion"].as_u64() == Some(1);
+        let mut fields = vec![
+            "schemaVersion",
+            "guideId",
+            "title",
+            "author",
+            "sourceUrl",
+            "fetchedAt",
+            "sections",
+        ];
+        if !legacy {
+            fields.push("offline");
+        }
+        let object = exact_object(value, &fields, "cached guide has unknown or missing fields")?;
+        if !legacy
+            && object.get("schemaVersion").and_then(Value::as_u64) != Some(CACHE_SCHEMA_VERSION)
+        {
             return Err(GuideError::cache("cached guide uses an unsupported schema"));
         }
+        // Old versions did not distinguish downloads from body-only cache. Protect them on upgrade.
+        let offline = if legacy {
+            true
+        } else {
+            object
+                .get("offline")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| GuideError::cache("cached guide has an invalid offline flag"))?
+        };
         if object.get("guideId").and_then(Value::as_str) != Some(guide_id) {
             return Err(GuideError::cache(
                 "cached guide id does not match its file name",
@@ -687,6 +847,7 @@ impl GuideReader {
             "fetchedAt": fetched_at_ms,
             "guideId": guide_id,
             "schemaVersion": CACHE_SCHEMA_VERSION,
+            "offline": offline,
             "sections": normalized_sections,
             "sourceUrl": guide_source_url(guide_id),
             "title": object["title"],
@@ -738,7 +899,56 @@ impl GuideReader {
                 .as_str()
                 .expect("validated document has a guide id"),
         );
-        match atomic_replace(&cache_path, ".guide-", ".tmp", &payload) {
+        // A rollback link costs no second copy of a large body and survives a failed directory sync.
+        let backup = if document["offline"] == true {
+            match fs::symlink_metadata(&cache_path) {
+                Ok(metadata) if metadata.is_file() => {
+                    let backup = self.cache_directory.join(format!(
+                        ".guide-{}-{}-{}.previous",
+                        document["guideId"].as_str().unwrap(),
+                        std::process::id(),
+                        PREPARE_COUNTER.fetch_add(1, Ordering::Relaxed)
+                    ));
+                    fs::hard_link(&cache_path, &backup)
+                        .map_err(|_| GuideError::cache("无法保护原指南，未替换，请检查磁盘空间"))?;
+                    if sync_directory(&self.cache_directory).is_err() {
+                        let _ = fs::remove_file(&backup);
+                        return Err(GuideError::cache("无法同步原指南备份，未替换"));
+                    }
+                    Some(backup)
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                _ => return Err(GuideError::cache("原指南文件异常，未替换")),
+            }
+        } else {
+            None
+        };
+        let replaced = atomic_replace(&cache_path, ".guide-", ".tmp", &payload);
+        #[cfg(test)]
+        let replaced = if self.fail_publish_sync.swap(false, Ordering::Relaxed) && replaced.is_ok()
+        {
+            Err(AtomicReplaceError::Durability)
+        } else {
+            replaced
+        };
+        if matches!(replaced, Err(AtomicReplaceError::Durability)) && document["offline"] == true {
+            lock(&self.memo).remove(document["guideId"].as_str().unwrap());
+            let restored = if let Some(backup) = &backup {
+                fs::rename(backup, &cache_path)
+            } else {
+                fs::remove_file(&cache_path)
+            };
+            if restored.is_err() {
+                return Err(GuideError::cache(
+                    "磁盘同步及回滚失败，原指南备份保留在 .previous 文件中，请检查磁盘",
+                ));
+            }
+            let _ = sync_directory(&self.cache_directory);
+        }
+        if let Some(backup) = &backup {
+            let _ = fs::remove_file(backup);
+        }
+        match replaced {
             Ok(()) => {}
             Err(AtomicReplaceError::Prepare) => {
                 return Err(GuideError::cache("could not create a guide cache file"));
@@ -749,9 +959,11 @@ impl GuideReader {
                 ));
             }
             Err(AtomicReplaceError::Durability) => {
-                return Err(GuideError::cache(
-                    "guide cache was replaced but its directory could not be synced",
-                ));
+                return Err(GuideError::cache(if document["offline"] == true {
+                    "新版正文同步失败，已撤销替换，请检查磁盘"
+                } else {
+                    "guide cache was replaced but its directory could not be synced"
+                }));
             }
         }
         match fs::symlink_metadata(&cache_path) {
@@ -815,6 +1027,14 @@ impl GuideReader {
             ))
         });
         let mut total = entries.iter().map(|entry| entry.size).sum::<u64>();
+        if total > self.limits.max_disk_bytes as u64 {
+            entries.retain(|entry| {
+                self.read_cache_without_memoizing(&entry.guide_id)
+                    .is_ok_and(|document| {
+                        document.is_some_and(|document| document["offline"] == false)
+                    })
+            });
+        }
         while total > self.limits.max_disk_bytes as u64 && !entries.is_empty() {
             let index = entries
                 .iter()
@@ -1130,5 +1350,30 @@ mod tests {
         fs::write(path, serde_json::to_vec(&document).unwrap()).unwrap();
         assert!(reader.cached_summary("1", None).is_err());
         assert!(lock(&reader.memo).is_empty());
+    }
+
+    #[test]
+    fn failed_publication_sync_restores_old_bytes_and_memo_or_removes_a_new_body() {
+        let directory = TestDirectory::new("guide-rollback");
+        let reader = GuideReader::with_fetcher(directory.path(), |_, _, _| unreachable!(), || 1);
+        let mut document = json!({"schemaVersion": 2, "offline": true, "guideId": "1", "title": "Old", "author": "A", "fetchedAt": 1,
+            "sourceUrl": "https://steamcommunity.com/sharedfiles/filedetails/?id=1&l=schinese",
+            "sections": [{"id": "1", "title": "Chapter", "html": "<p>old body</p>"}]});
+        reader.write_cache_unlocked(&document).unwrap();
+        let path = reader.cache_path("1");
+        let original = fs::read(&path).unwrap();
+        assert_eq!(reader.get_cached("1").unwrap().unwrap()["title"], "Old");
+        document["title"] = json!("New");
+        reader.fail_publish_sync.store(true, Ordering::Relaxed);
+        assert!(reader.write_cache_unlocked(&document).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert_eq!(reader.get_cached("1").unwrap().unwrap()["title"], "Old");
+        document["guideId"] = json!("2");
+        document["sourceUrl"] =
+            json!("https://steamcommunity.com/sharedfiles/filedetails/?id=2&l=schinese");
+        reader.fail_publish_sync.store(true, Ordering::Relaxed);
+        assert!(reader.write_cache_unlocked(&document).is_err());
+        assert!(!reader.cache_path("2").exists());
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 }

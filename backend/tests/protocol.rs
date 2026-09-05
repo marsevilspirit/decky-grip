@@ -19,6 +19,88 @@ fn responses_by_id(messages: Vec<Value>) -> BTreeMap<u64, Value> {
         .collect()
 }
 
+#[test]
+fn offline_transactions_round_trip_through_the_real_process() {
+    let directory = TestDirectory::new();
+    let guides = directory.0.join("guides");
+    fs::create_dir(&guides).unwrap();
+    let body = json!({"schemaVersion": 1, "guideId": "1", "title": "Old", "author": "A", "fetchedAt": 1,
+        "sourceUrl": "https://steamcommunity.com/sharedfiles/filedetails/?id=1&l=schinese",
+        "sections": [{"id": "1", "title": "Chapter", "html": "<p>Offline body</p>"}]});
+    let path = guides.join("1.json");
+    fs::write(&path, serde_json::to_vec(&body).unwrap()).unwrap();
+    let original = fs::read(&path).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_grip-sidecar"))
+        .arg(directory.0.join("positions.json"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut call = |method: &str, params: Value| {
+        send_and_read_response(
+            &mut input,
+            &mut output,
+            &json!({"id": 1, "method": method, "params": params}),
+        )
+    };
+    assert_eq!(
+        call(
+            "guides.prepare",
+            json!({"guide_id": "1", "force_refresh": "yes"})
+        )["error"]["kind"],
+        "validation"
+    );
+    let prepared = call(
+        "guides.prepare",
+        json!({"guide_id": "1", "force_refresh": false}),
+    );
+    assert_eq!(prepared["ok"], true);
+    let token = &prepared["result"]["token"];
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert_eq!(
+        call("guides.commit", json!({"guide_id": "1", "token": "wrong"}))["ok"],
+        false
+    );
+    assert_eq!(
+        call("guides.discard", json!({"guide_id": "1", "token": "wrong"}))["result"],
+        false
+    );
+    let committed = call("guides.commit", json!({"guide_id": "1", "token": token}));
+    assert_eq!(committed["ok"], true, "{committed}");
+    assert_eq!(committed["result"]["offline"], true);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&path).unwrap()).unwrap()["schemaVersion"],
+        2
+    );
+    assert_eq!(
+        call("guides.download_status", json!({"guide_id": "1"}))["result"]["state"],
+        "complete"
+    );
+    let prepared = call(
+        "guides.prepare",
+        json!({"guide_id": "1", "force_refresh": false}),
+    );
+    assert_eq!(
+        call(
+            "guides.discard",
+            json!({"guide_id": "1", "token": prepared["result"]["token"]})
+        )["result"],
+        true
+    );
+    assert_eq!(
+        call(
+            "guides.commit",
+            json!({"guide_id": "1", "token": prepared["result"]["token"]})
+        )["ok"],
+        false
+    );
+    drop(input);
+    assert!(child.wait().unwrap().success());
+}
+
 fn send_and_expect_ok(input: &mut impl Write, output: &mut impl BufRead, request: &Value) {
     let response = send_and_read_response(input, output, request);
     assert_eq!(response["ok"], true, "{response}");

@@ -11,7 +11,10 @@ import {
 import type { DownloadedGuide } from "../../src/reader/types";
 import type { GuideDownloadStatus } from "../../src/backend";
 import type { GuideIdentity } from "../../src/steam/guide-key";
-import { GuideDownloadTasks } from "../../src/reader/download";
+import {
+  GuideDownloadTasks,
+  type GuideImageDownloadProgress,
+} from "../../src/reader/download";
 
 vi.mock("@decky/ui", () => ({
   DialogButton: ({
@@ -63,9 +66,11 @@ describe("GuideDownloadButton", () => {
   it("shows a continuing task on remount and lets the user cancel it", async () => {
     let finish!: () => void;
     let signal!: AbortSignal;
+    let report!: (progress: GuideImageDownloadProgress) => void;
     const downloads = new GuideDownloadTasks(
       async (_id, progress, nextSignal) => {
         signal = nextSignal;
+        report = progress;
         progress({ completed: 13, total: 61 });
         await new Promise<void>((resolve) => {
           finish = resolve;
@@ -101,6 +106,26 @@ describe("GuideDownloadButton", () => {
     );
     expect(button()?.textContent).toBe("图片 13/61…");
     expect(getDownloadStatus).not.toHaveBeenCalled();
+    await act(async () =>
+      report({ completed: 13, total: 61, failed: 1, error: "网络中断" }),
+    );
+    expect(
+      portalTarget.querySelector('[role="status"]')?.textContent,
+    ).toContain("1 张图片失败：网络中断");
+    expect(portalTarget.textContent).toContain("其余图片继续下载");
+    await act(async () =>
+      report({
+        completed: 13,
+        total: 61,
+        failed: 2,
+        error: "空间不足",
+        stopped: true,
+      }),
+    );
+    expect(button()?.textContent).toBe("空间不足，已停止后续下载");
+    expect(
+      portalTarget.querySelector('[role="status"]')?.textContent,
+    ).toContain("已暂停：空间不足");
     await act(async () => portalTarget?.querySelectorAll("button")[1]?.click());
     expect(signal.aborted).toBe(true);
     expect(button()?.textContent).toBe("正在停止下载…");

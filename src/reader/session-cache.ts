@@ -4,7 +4,10 @@ import { makeGuideKey, type GuideIdentity } from "../steam/guide-key";
 
 export interface ReaderSessionBackend {
   getCachedGuide(guideId: string): Promise<DownloadedGuide | null>;
-  getGuide(guideId: string, forceRefresh?: boolean): Promise<DownloadedGuide>;
+  getGuide(
+    identity: GuideIdentity,
+    forceRefresh?: boolean,
+  ): Promise<DownloadedGuide>;
   getReaderPosition(guideKey: string): Promise<ReaderPosition | null>;
   saveReaderPosition(
     guideKey: string,
@@ -97,11 +100,21 @@ export class ReaderSessionCache {
   private readonly positionSaveStates = new Map<string, PositionSaveState>();
   private accessOperation: Promise<void> = Promise.resolve();
   private generation = 0;
+  private contentGeneration = 0;
 
   constructor(
     private readonly backend: ReaderSessionBackend,
     private readonly onStagedSaveError: (error: unknown) => void = () => {},
   ) {}
+
+  acceptOfflineGuide(guide: DownloadedGuide): void {
+    // In-flight preloads must not put the previous body back after publication.
+    this.contentGeneration += 1;
+    for (const [key, snapshot] of this.snapshots) {
+      if (snapshot.guide.guideId === guide.guideId)
+        this.snapshots.set(key, { ...snapshot, guide });
+    }
+  }
 
   peek(identity: GuideIdentity): ReaderSessionSnapshot | null {
     const guideKey = makeGuideKey(identity);
@@ -436,11 +449,14 @@ export class ReaderSessionCache {
     forceRefresh: boolean,
     generation: number,
   ): Promise<ReaderSessionSnapshot> {
+    const contentGeneration = this.contentGeneration;
     const previousPosition = this.snapshots.get(guideKey)?.position ?? null;
     const [guide, positionResult] = await Promise.all([
-      this.backend.getGuide(identity.guideId, forceRefresh),
+      this.backend.getGuide(identity, forceRefresh),
       this.loadPosition(guideKey),
     ]);
+    if (!forceRefresh && contentGeneration !== this.contentGeneration)
+      return this.fetch(identity, guideKey, false, generation);
     const backendPosition = positionResult.position;
     const currentSnapshot = this.snapshots.get(guideKey) ?? null;
     const positionChanged =
@@ -484,11 +500,14 @@ export class ReaderSessionCache {
     generation: number,
     token: object,
   ): Promise<ReaderSessionSnapshot | null> {
+    const contentGeneration = this.contentGeneration;
     const guide = await this.backend.getCachedGuide(identity.guideId);
     if (guide === null) {
       return null;
     }
     const positionResult = await this.loadPosition(guideKey);
+    if (contentGeneration !== this.contentGeneration)
+      return this.snapshots.get(guideKey) ?? null;
     const backendPosition = positionResult.position;
     const previousPosition = this.snapshots.get(guideKey)?.position ?? null;
     const staged = this.stagedHandoffs.get(guideKey);

@@ -14,10 +14,12 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { createPortal } from "react-dom";
 
 import type { CacheClearResult, GuideLibraryEntry } from "../backend";
+import type { GuideDownloadTasks } from "../reader/download";
 import {
   captureReaderPosition,
   ReaderAnchorIndex,
@@ -156,6 +158,7 @@ function readIdentity(
 
 export interface GuideReaderPageProps {
   cache: ReaderSessionCache;
+  downloads?: GuideDownloadTasks;
   fetchImage: GuideImageFetcher;
   imageCacheControl: ReaderImageCacheControl;
   loadGuideLibrary: (appId: string) => Promise<GuideLibraryEntry[]>;
@@ -171,8 +174,11 @@ interface SectionRenderState {
   count: number;
 }
 
+const noDownloadSubscription = () => () => {};
+
 export function GuideReaderPage({
   cache,
+  downloads,
   fetchImage,
   imageCacheControl,
   loadGuideLibrary,
@@ -184,6 +190,12 @@ export function GuideReaderPage({
 }: GuideReaderPageProps) {
   const params = useParams<{ appId?: string; guideId?: string }>();
   const identity = readIdentity(params.appId, params.guideId);
+  const downloadTask = useSyncExternalStore(
+    downloads?.subscribe ?? noDownloadSubscription,
+    () =>
+      identity ? (downloads?.getSnapshot(identity.guideId) ?? null) : null,
+  );
+  const downloadProgress = downloadTask?.progress;
   const initialSnapshot = identity ? cache.peek(identity) : null;
   const [loaded, setLoaded] = useState<ReaderSessionSnapshot | null>(
     initialSnapshot,
@@ -1038,6 +1050,41 @@ export function GuideReaderPage({
     [cache, checkpoint, identity?.appId, identity?.guideId],
   );
 
+  useEffect(() => {
+    // An update can finish after this reader was closed and reopened with its old warm snapshot.
+    if (
+      downloadTask?.phase !== "complete" ||
+      refreshPending ||
+      loading ||
+      !identity
+    )
+      return;
+    const next = cache.peek(identity);
+    if (!next || next.guide === loadedRef.current?.guide) return;
+    const captured =
+      scrollerRef.current && contentRef.current
+        ? captureReaderPosition(
+            scrollerRef.current,
+            contentRef.current,
+            anchorIndexRef.current ?? undefined,
+          )
+        : null;
+    if (captured) void persistPosition(captured);
+    setLoaded({
+      ...next,
+      position: captured ? { ...captured, updatedAt: 0 } : next.position,
+    });
+    setGuideSwitcherRevision((revision) => revision + 1);
+  }, [
+    cache,
+    downloadTask,
+    identity?.appId,
+    identity?.guideId,
+    loading,
+    refreshPending,
+    persistPosition,
+  ]);
+
   const retrySavePosition = async (): Promise<void> => {
     if (saveRetryPending) {
       return;
@@ -1731,7 +1778,15 @@ export function GuideReaderPage({
     ? guideChoicesForReader(guideLibrary, currentGuideEntry)
     : null;
   const readerWarning =
-    restoreWarning ?? loadWarning ?? loaded?.positionWarning ?? null;
+    (downloadTask?.phase === "downloading" && downloadProgress?.error
+      ? `${downloadProgress.stopped ? "空间不足，已停止后续下载" : `${downloadProgress.failed} 张图片失败，其余继续下载`}：${downloadProgress.error}。旧版仍可阅读。`
+      : downloadTask?.phase === "failed" && downloadTask.error
+        ? `下载未完成：${downloadTask.error}`
+        : null) ??
+    restoreWarning ??
+    loadWarning ??
+    loaded?.positionWarning ??
+    null;
   const readerCovered = guideSwitcherOpen || previewImage !== null;
 
   return (
@@ -1965,6 +2020,7 @@ export function GuideReaderPage({
 
       {readerWarning && (
         <div
+          role="status"
           aria-hidden={readerCovered}
           inert={readerCovered ? true : undefined}
           style={{
@@ -2325,7 +2381,17 @@ export function GuideReaderPage({
                     width: "100%",
                   }}
                 >
-                  {refreshPending ? <BusyLabel>更新中…</BusyLabel> : "更新"}
+                  {refreshPending ? (
+                    <BusyLabel>
+                      {downloadProgress?.stopped
+                        ? "已暂停"
+                        : downloadProgress
+                          ? `${downloadProgress.completed}/${downloadProgress.total}`
+                          : "更新中…"}
+                    </BusyLabel>
+                  ) : (
+                    "更新"
+                  )}
                 </Button>
                 {loaded.guide.sections
                   .slice(0, renderedSectionCount)

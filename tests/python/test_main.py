@@ -446,7 +446,7 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
             {"guide_id": "1"},
             timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
         )
-        self.assertTrue(await plugin.download_guide_image("https://images.steamusercontent.com/a.png"))
+        self.assertEqual(await plugin.download_guide_image("https://images.steamusercontent.com/a.png"), {"saved": True})
         self.sidecar.request.assert_any_call(
             "images.download",
             {"url": "https://images.steamusercontent.com/a.png"},
@@ -477,6 +477,25 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
                 params,
                 timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
             )
+
+
+    async def test_offline_transaction_and_structured_image_errors(self):
+        plugin = self.plugin()
+        self.sidecar.responses["guides.prepare"] = {"token": "candidate", "guide": {"title": "New"}}
+        self.sidecar.responses["guides.commit"] = {"title": "New"}
+        self.sidecar.responses["guides.discard"] = True
+        self.assertEqual((await plugin.prepare_guide("1", True))["token"], "candidate")
+        self.assertEqual((await plugin.commit_guide("1", "candidate"))["title"], "New")
+        self.assertTrue(await plugin.discard_guide("1", "candidate"))
+        for method, params in (
+            ("guides.prepare", {"guide_id": "1", "force_refresh": True}),
+            ("guides.commit", {"guide_id": "1", "token": "candidate"}),
+            ("guides.discard", {"guide_id": "1", "token": "candidate"}),
+        ):
+            self.sidecar.request.assert_any_call(method, params, timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS)
+        for kind in ("capacity", "download", "transport"):
+            self.sidecar.responses["images.download"] = RustSidecarError("image error", kind=kind)
+            self.assertEqual(await plugin.download_guide_image("https://images.steamusercontent.com/a.png"), {"saved": False, "kind": kind, "error": "image error"})
 
 
 if __name__ == "__main__":

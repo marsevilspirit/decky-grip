@@ -155,8 +155,19 @@ GRIP Reader uses separate `reader_positions.json` and `guides/<guide-id>.json`
 files. Reader bookmarks include `section_id`, `anchor_text`, and
 `anchor_offset`; downloaded HTML is revalidated on the first process read and
 again whenever the cache file's identity or metadata changes. Guide bodies are
-limited to 20 MiB each, 256 MiB across the disk LRU, and 32 MiB in the Rust
-memory LRU. Opening a body promotes it; listing guide summaries does not.
+limited to 20 MiB each and 32 MiB in the Rust memory LRU. Ordinary body caches
+are automatically pruned against a 256 MiB disk target; explicitly downloaded
+bodies are pinned until manual deletion, even above that target. Schema-v1
+bodies are conservatively protected on upgrade because they did not record
+whether a user explicitly downloaded them. Opening a body promotes it;
+listing guide summaries does not.
+
+Downloads and reader updates first stage a candidate body (up to 32 MiB of
+pending bodies in the backend), then save and verify all referenced images.
+Only the final commit atomically replaces the live body and its offline flag.
+A failed or canceled download leaves the previous version readable; saved
+images remain available for retries. Abandoned staging is released on cancel,
+failure, or backend restart. A short final publication step cannot be canceled.
 
 Images live under the guide cache's `images/` directory. Each image is limited
 to 8 MiB and a validated 8192-pixel / 16-megapixel canvas, and the Rust memory
@@ -169,7 +180,10 @@ if they fill the disk quota, further downloads report a quota error instead of
 discarding offline images. A full device disk is reported separately. Clearing
 the image cache also removes these files, but keeps the configured quota.
 Downloads save up to three images concurrently in Rust without sending their
-bytes through the frontend. The reader still loads only images near the viewport
+bytes through the frontend. An image failure is shown immediately while other
+images continue. Quota or device-space failures stop scheduling new images
+immediately; already in-flight requests finish, and the old body is not replaced.
+The reader still loads only images near the viewport
 and keeps at most 64 MiB / 64 entries of estimated decoded
 frontend image residency. Animated image payloads are rejected, and the reader
 observes at most 512 inert image nodes while staging no more than 48 distinct

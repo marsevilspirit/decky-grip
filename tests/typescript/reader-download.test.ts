@@ -4,7 +4,9 @@ import { expect, it, vi } from "vitest";
 
 import {
   downloadGuideImages,
+  downloadOfflineGuide,
   GuideDownloadTasks,
+  type GuideImageDownloadResult,
 } from "../../src/reader/download";
 import type { DownloadedGuide } from "../../src/reader/types";
 
@@ -32,10 +34,10 @@ it("shares an in-flight download across pages, cancels later requests and resume
   const saved = new Set<string>();
   const pending: Array<() => void> = [];
   const fetch = vi.fn(async (url: string) => {
-    if (saved.has(url)) return true;
+    if (saved.has(url)) return { saved: true } as const;
     await new Promise<void>((resolve) => pending.push(resolve));
     saved.add(url);
-    return true;
+    return { saved: true } as const;
   });
   const tick = async () => {
     for (let i = 0; i < 20; i++) await Promise.resolve();
@@ -117,7 +119,7 @@ it("waits for every unique image, limits concurrency, and resumes partial downlo
   let failing = true;
   let maxConcurrent = 0;
   const downloadImage = vi.fn(async (url: string) => {
-    if (disk.has(url)) return true;
+    if (disk.has(url)) return { saved: true } as const;
     requests.push(url);
     await new Promise<void>((resolve) => {
       pending.set(url, resolve);
@@ -131,7 +133,7 @@ it("waits for every unique image, limits concurrency, and resumes partial downlo
       });
     }
     disk.add(url);
-    return true;
+    return { saved: true } as const;
   });
   const progress = vi.fn();
   const tick = async () => {
@@ -163,9 +165,20 @@ it("waits for every unique image, limits concurrency, and resumes partial downlo
   await tick();
   expect(pending.size).toBe(1);
   expect(settled).toBe(false);
+  expect(progress).toHaveBeenLastCalledWith({
+    completed: 3,
+    total: 5,
+    failed: 1,
+    error: "网络中断",
+  });
   release();
   await failed;
-  expect(progress).toHaveBeenLastCalledWith({ completed: 4, total: 5 });
+  expect(progress).toHaveBeenLastCalledWith({
+    completed: 4,
+    total: 5,
+    failed: 1,
+    error: "网络中断",
+  });
   expect(downloadImage).toHaveBeenCalledTimes(5);
   expect(maxConcurrent).toBe(3);
 
@@ -185,4 +198,132 @@ it("waits for every unique image, limits concurrency, and resumes partial downlo
     progress,
   );
   expect(progress).toHaveBeenLastCalledWith({ completed: 0, total: 0 });
+});
+
+it("stops scheduling as soon as capacity fails, reports it before in-flight requests finish, and never commits", async () => {
+  const guide: DownloadedGuide = {
+    guideId: "1",
+    title: "New",
+    author: "A",
+    sourceUrl: "",
+    fetchedAt: 2,
+    fromCache: false,
+    stale: false,
+    sections: [
+      {
+        id: "1",
+        title: "Chapter",
+        html: Array.from(
+          { length: 8 },
+          (_, i) =>
+            `<img data-grip-image-url="https://images.steamusercontent.com/${i}.png">`,
+        ).join(""),
+      },
+    ],
+  };
+  const pending: Array<(result: GuideImageDownloadResult) => void> = [];
+  const backend = {
+    prepareGuide: vi.fn(async () => ({ token: "candidate", guide })),
+    downloadGuideImage: vi.fn(
+      () =>
+        new Promise<GuideImageDownloadResult>((resolve) =>
+          pending.push(resolve),
+        ),
+    ),
+    commitGuide: vi.fn(async () => guide),
+    discardGuide: vi.fn(async () => true),
+  };
+  const tick = async () => {
+    for (let i = 0; i < 12; i++) await Promise.resolve();
+  };
+  const progress = vi.fn();
+  const work = downloadOfflineGuide("1", true, backend, progress);
+  const failed = expect(work).rejects.toThrow("设备磁盘空间不足");
+  await tick();
+  expect(pending).toHaveLength(3);
+  pending[0]({ saved: false, kind: "capacity", error: "设备磁盘空间不足" });
+  await tick();
+  expect(progress).toHaveBeenLastCalledWith({
+    completed: 0,
+    total: 8,
+    failed: 1,
+    error: "设备磁盘空间不足",
+    stopped: true,
+  });
+  expect(backend.downloadGuideImage).toHaveBeenCalledTimes(3);
+  expect(backend.discardGuide).not.toHaveBeenCalled();
+  pending[1]({ saved: true });
+  pending[2]({ saved: false, kind: "download", error: "网络中断" });
+  await failed;
+  expect(progress).toHaveBeenLastCalledWith({
+    completed: 1,
+    total: 8,
+    failed: 2,
+    error: "设备磁盘空间不足",
+    stopped: true,
+  });
+  expect(backend.commitGuide).not.toHaveBeenCalled();
+  expect(backend.discardGuide).toHaveBeenCalledWith("1", "candidate");
+
+  backend.downloadGuideImage.mockImplementation(async () => ({ saved: true }));
+  expect(await downloadOfflineGuide("1", true, backend, progress)).toBe(guide);
+  expect(backend.prepareGuide).toHaveBeenLastCalledWith("1", true);
+  expect(backend.commitGuide).toHaveBeenCalledWith("1", "candidate");
+  expect(progress).toHaveBeenLastCalledWith({
+    completed: 8,
+    total: 8,
+    publishing: true,
+  });
+});
+
+it("discards canceled staging without publishing and disables cancellation once atomic publication begins", async () => {
+  const guide: DownloadedGuide = {
+    guideId: "1",
+    title: "New",
+    author: "A",
+    sourceUrl: "",
+    fetchedAt: 2,
+    fromCache: false,
+    stale: false,
+    sections: [],
+  };
+  const controller = new AbortController();
+  const backend = {
+    prepareGuide: vi.fn(async () => {
+      controller.abort();
+      return { token: "candidate", guide };
+    }),
+    downloadGuideImage: vi.fn(async (): Promise<GuideImageDownloadResult> => ({
+      saved: true,
+    })),
+    commitGuide: vi.fn(async () => guide),
+    discardGuide: vi.fn(async () => true),
+  };
+  await expect(
+    downloadOfflineGuide("1", false, backend, undefined, controller.signal),
+  ).rejects.toThrow();
+  expect(backend.commitGuide).not.toHaveBeenCalled();
+  expect(backend.discardGuide).toHaveBeenCalledWith("1", "candidate");
+  backend.prepareGuide.mockImplementation(async () => ({
+    token: "next",
+    guide,
+  }));
+  let publish!: () => void;
+  backend.commitGuide.mockImplementation(async () => {
+    await new Promise<void>((resolve) => {
+      publish = resolve;
+    });
+    return guide;
+  });
+  const tasks = new GuideDownloadTasks((identity, progress, signal, refresh) =>
+    downloadOfflineGuide(identity.guideId, refresh, backend, progress, signal),
+  );
+  const work = tasks.start({ appId: "10", guideId: "1" }, true);
+  for (let i = 0; i < 12; i++) await Promise.resolve();
+  expect(tasks.getSnapshot("1")?.progress?.publishing).toBe(true);
+  tasks.cancel("1");
+  expect(tasks.getSnapshot("1")?.phase).toBe("downloading");
+  publish();
+  await work;
+  expect(tasks.getSnapshot("1")?.phase).toBe("complete");
 });

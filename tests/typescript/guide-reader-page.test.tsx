@@ -13,6 +13,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CacheClearResult, GuideLibraryEntry } from "../../src/backend";
 import { GuideReaderPage } from "../../src/components/GuideReaderPage";
 import { ReaderImageCacheControl } from "../../src/reader/image-cache-control";
+import {
+  GuideDownloadTasks,
+  type GuideImageDownloadProgress,
+} from "../../src/reader/download";
 import type { GuideImageFetcher } from "../../src/reader/image-hydrator";
 import { ReaderPerformanceTracker } from "../../src/reader/performance";
 import {
@@ -315,6 +319,7 @@ describe("GuideReaderPage position lifecycle", () => {
     fetchImage: GuideImageFetcher,
     scrollHeight: number,
     options: {
+      downloads?: GuideDownloadTasks;
       loadGuideLibrary?: (appId: string) => Promise<GuideLibraryEntry[]>;
       onClose?: () => void;
       onSwitchGuide?: (identity: GuideIdentity) => Promise<void>;
@@ -332,6 +337,7 @@ describe("GuideReaderPage position lifecycle", () => {
             (async () => ({ filesRemoved: 1, bytesRemoved: 100 }))
           }
           cache={cache}
+          downloads={options.downloads}
           fetchImage={fetchImage}
           imageCacheControl={new ReaderImageCacheControl()}
           loadGuideLibrary={options.loadGuideLibrary ?? (async () => [])}
@@ -506,7 +512,17 @@ describe("GuideReaderPage position lifecycle", () => {
     };
     const cache = new ReaderSessionCache(backend);
     await cache.load(identity);
-    const scroller = await mount(cache, async () => null, 12_000);
+    let report!: (progress: GuideImageDownloadProgress) => void;
+    let finish!: () => void;
+    const downloads = new GuideDownloadTasks(async (_identity, progress) => {
+      report = progress;
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+    });
+    const scroller = await mount(cache, async () => null, 12_000, {
+      downloads,
+    });
     for (let frame = 0; frame < 8; frame += 1) {
       await flushFrame();
     }
@@ -524,6 +540,19 @@ describe("GuideReaderPage position lifecycle", () => {
     ).not.toBeNull();
     expect(buttonNamed("搜索").disabled).toBe(true);
     expect(buttonNamed("章节 1").disabled).toBe(true);
+    let work!: Promise<void>;
+    await act(async () => {
+      work = downloads.start(identity, true);
+    });
+    await act(async () =>
+      report({ completed: 2, total: 5, failed: 1, error: "网络中断" }),
+    );
+    expect(container?.querySelector('[role="status"]')?.textContent).toContain(
+      "1 张图片失败，其余继续下载",
+    );
+    expect(container?.textContent).toContain("旧版仍可阅读");
+    expect(buttonNamed("2/5").disabled).toBe(true);
+    expect(cache.peek(identity)?.guide).toBe(guide);
 
     await act(async () => {
       scroller.dispatchEvent(new Event("wheel", { bubbles: true }));
@@ -532,6 +561,8 @@ describe("GuideReaderPage position lifecycle", () => {
     });
     await act(async () => {
       resolveRefresh({ ...guide, fetchedAt: 2 });
+      finish();
+      await work;
       await Promise.resolve();
     });
     await flushMicrotasks();
@@ -545,6 +576,75 @@ describe("GuideReaderPage position lifecycle", () => {
 
     expect(saves[saves.length - 1]).toBe(4_600);
     expect(persistedPosition.scrollTop).toBe(4_600);
+  });
+
+  it("adopts a background update after reopening without replacing the old body early or losing scroll", async () => {
+    const guide = guideFixture();
+    let saved = savedPosition;
+    const cache = new ReaderSessionCache({
+      getCachedGuide: async () => guide,
+      getGuide: async () => guide,
+      getReaderPosition: async () => saved,
+      saveReaderPosition: async (
+        _key,
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+      ) => {
+        saved = {
+          scrollTop,
+          sectionId,
+          anchorText,
+          anchorOffset,
+          updatedAt: 2,
+        };
+        return saved;
+      },
+    });
+    await cache.load(identity);
+    let finish!: () => void;
+    const updated = {
+      ...guide,
+      fetchedAt: 2,
+      sections: guide.sections.map((section) => ({
+        ...section,
+        html: section.html.replace("正文", "新版正文"),
+      })),
+    };
+    const downloads = new GuideDownloadTasks(async () => {
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      cache.acceptOfflineGuide(updated);
+    });
+    const work = downloads.start(identity, true);
+    await Promise.resolve();
+    await mount(cache, async () => null, 12_000, { downloads });
+    await unmount();
+    const scroller = await mount(cache, async () => null, 12_000, {
+      downloads,
+    });
+    for (let frame = 0; frame < 8; frame++) await flushFrame();
+    await flushMicrotasks();
+    notifyResize();
+    await act(async () => vi.advanceTimersByTime(101));
+    expect(cache.peek(identity)?.guide).toBe(guide);
+    await act(async () => {
+      scroller.dispatchEvent(new Event("wheel", { bubbles: true }));
+      scroller.scrollTop = 4600;
+      scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+    });
+    await act(async () => {
+      finish();
+      await work;
+    });
+    await flushMicrotasks();
+    for (let frame = 0; frame < 4; frame++) await flushFrame();
+    expect(cache.peek(identity)?.guide).toBe(updated);
+    expect(scroller.scrollTop).toBe(4600);
+    await act(async () => vi.advanceTimersByTime(400));
+    expect(saved.scrollTop).toBe(4600);
   });
 
   it("fits both Steam and HTML tables with wrapping cells and bounded images", async () => {
@@ -1156,7 +1256,7 @@ describe("GuideReaderPage position lifecycle", () => {
         guideId,
         title: `指南 ${guideId}`,
       }),
-      getGuide: async (guideId) => ({
+      getGuide: async ({ guideId }) => ({
         ...guide,
         guideId,
         title: `指南 ${guideId}`,
@@ -1235,7 +1335,7 @@ describe("GuideReaderPage position lifecycle", () => {
     const backend: ReaderSessionBackend = {
       getCachedGuide: async (guideId) =>
         guideId === identity.guideId ? guide : null,
-      getGuide: async (guideId) => {
+      getGuide: async ({ guideId }) => {
         if (guideId === identity.guideId) {
           return guide;
         }

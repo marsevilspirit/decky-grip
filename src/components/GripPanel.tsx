@@ -372,7 +372,7 @@ export function GripPanel({
             <PanelSectionRow>
               <div style={{ opacity: 0.78 }}>
                 {cacheStats
-                  ? `指南 ${cacheStats.guides.files} 个 / ${formatBytes(cacheStats.guides.bytes)}（上限 ${formatBytes(cacheStats.guides.diskLimitBytes)}）；图片 ${cacheStats.images.files} 个 / ${formatBytes(cacheStats.images.diskBytes)}（其中离线 ${formatBytes(cacheStats.images.offlineBytes)}，上限 ${formatBytes(cacheStats.images.diskLimitBytes)}）`
+                  ? `指南 ${cacheStats.guides.files} 个 / ${formatBytes(cacheStats.guides.bytes)}（自动缓存额度 ${formatBytes(cacheStats.guides.diskLimitBytes)}，已下载正文不自动删除）；图片 ${cacheStats.images.files} 个 / ${formatBytes(cacheStats.images.diskBytes)}（其中离线 ${formatBytes(cacheStats.images.offlineBytes)}，上限 ${formatBytes(cacheStats.images.diskLimitBytes)}）`
                   : cacheStatsError
                     ? `缓存用量读取失败：${cacheStatsError}`
                     : "正在读取缓存用量…"}

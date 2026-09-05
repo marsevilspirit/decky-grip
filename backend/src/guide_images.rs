@@ -11,7 +11,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 use url::Url;
 
@@ -38,6 +38,7 @@ type Fetcher = dyn Fn(&str, Duration, usize) -> Result<(String, Vec<u8>), ImageE
 pub enum ImageErrorKind {
     Validation,
     Download,
+    Capacity,
 }
 
 #[derive(Debug)]
@@ -238,10 +239,28 @@ impl GuideImageCache {
     pub fn is_downloaded(&self, url: &str) -> Result<bool, ImageError> {
         let url = canonical_image_url(url)?;
         let _disk = lock(&self.disk_lock);
-        if !safe_directory(&self.cache_directory) {
-            return Ok(false);
+        Ok(self.is_downloaded_locked(&url))
+    }
+
+    /// Keep checked images on disk until the caller publishes the corresponding body.
+    pub(crate) fn downloaded_guard(
+        &self,
+        urls: &std::collections::HashSet<String>,
+    ) -> Result<MutexGuard<'_, ()>, ImageError> {
+        let guard = lock(&self.disk_lock);
+        for url in urls {
+            if !self.is_downloaded_locked(&canonical_image_url(url)?) {
+                return Err(ImageError::download("图片尚未完整离线，未替换原指南"));
+            }
         }
-        for (mime, path) in self.candidate_paths(&url) {
+        Ok(guard)
+    }
+
+    fn is_downloaded_locked(&self, url: &str) -> bool {
+        if !safe_directory(&self.cache_directory) {
+            return false;
+        }
+        for (mime, path) in self.candidate_paths(url) {
             if !offline_path(&path) {
                 continue;
             }
@@ -264,12 +283,12 @@ impl GuideImageCache {
                         validated.clear();
                     }
                     validated.insert(path, signature);
-                    return Ok(true);
+                    return true;
                 }
             }
             lock(&self.validated).remove(&path);
         }
-        Ok(false)
+        false
     }
 
     pub fn set_disk_limit(&self, bytes: u64) -> Result<Value, ImageError> {
@@ -548,7 +567,10 @@ impl GuideImageCache {
         offline: bool,
     ) -> Result<bool, ImageError> {
         let capacity_error = || {
-            ImageError::download("图片离线额度已满，请在 GRIP 高级选项中增加额度或删除不需要的指南")
+            ImageError::new(
+                ImageErrorKind::Capacity,
+                "图片离线额度已满，请在 GRIP 高级选项中增加额度或删除不需要的指南",
+            )
         };
         if value.body.len() as u64 > self.disk_limit.load(Ordering::Relaxed) {
             return Err(capacity_error());
@@ -571,9 +593,7 @@ impl GuideImageCache {
                 return Ok(false);
             }
         }
-        if ensure_private_directory(&self.cache_directory).is_err() {
-            return Err(ImageError::download("图片保存失败：缓存目录不可写"));
-        }
+        ensure_private_directory(&self.cache_directory).map_err(image_write_error)?;
 
         let mut entries = self.managed_entries_locked();
         entries.retain(|entry| {
@@ -730,13 +750,14 @@ fn valid_disk_limit(bytes: u64) -> bool {
 }
 
 fn image_write_error(error: io::Error) -> ImageError {
-    ImageError::download(
-        if matches!(error.raw_os_error(), Some(libc::ENOSPC | libc::EDQUOT)) {
-            "设备磁盘空间不足，请先释放存储空间"
-        } else {
-            "图片保存失败：磁盘不可写或文件同步失败，请重试"
-        },
-    )
+    if matches!(error.raw_os_error(), Some(libc::ENOSPC | libc::EDQUOT)) {
+        ImageError::new(
+            ImageErrorKind::Capacity,
+            "设备磁盘空间不足，请先释放存储空间",
+        )
+    } else {
+        ImageError::download("图片保存失败：磁盘不可写或文件同步失败，请重试")
+    }
 }
 
 #[derive(Debug)]
@@ -1365,6 +1386,16 @@ mod offline_tests {
         assert_eq!(
             image_write_error(io::Error::from_raw_os_error(libc::ENOSPC)).message(),
             "设备磁盘空间不足，请先释放存储空间"
+        );
+        for code in [libc::ENOSPC, libc::EDQUOT] {
+            assert_eq!(
+                image_write_error(io::Error::from_raw_os_error(code)).kind(),
+                ImageErrorKind::Capacity
+            );
+        }
+        assert_eq!(
+            image_write_error(io::Error::from_raw_os_error(libc::EACCES)).kind(),
+            ImageErrorKind::Download
         );
     }
 }

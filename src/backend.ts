@@ -120,9 +120,22 @@ export const getGuideImage = callable<
   GuideImagePayload | null
 >("get_guide_image");
 
-export const downloadGuideImage = callable<[url: string], boolean>(
-  "download_guide_image",
+export const prepareGuide = callable<
+  [guideId: string, forceRefresh: boolean],
+  import("./reader/download").PreparedGuide
+>("prepare_guide");
+export const commitGuide = callable<
+  [guideId: string, token: string],
+  DownloadedGuide
+>("commit_guide");
+export const discardGuide = callable<[guideId: string, token: string], boolean>(
+  "discard_guide",
 );
+
+export const downloadGuideImage = callable<
+  [url: string],
+  import("./reader/download").GuideImageDownloadResult
+>("download_guide_image");
 
 export const clearGuideCache = callable<[], CacheClearResult>(
   "clear_guide_cache",

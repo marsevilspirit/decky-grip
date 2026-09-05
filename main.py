@@ -8,7 +8,7 @@ from typing import Any, Callable, Optional
 
 import decky
 
-from rust_sidecar import RustSidecar
+from rust_sidecar import RustSidecar, RustSidecarError
 
 
 class _ExecutorUnavailable(RuntimeError):
@@ -205,6 +205,24 @@ class Plugin:
         except _ExecutorUnavailable:
             return None
 
+    async def prepare_guide(self, guide_id: str, force_refresh: bool):
+        return await self._run_guide_io(
+            self._sidecar.request,
+            "guides.prepare",
+            {"guide_id": guide_id, "force_refresh": force_refresh},
+            timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
+        )
+
+    async def commit_guide(self, guide_id: str, token: str):
+        return await self._run_destructive_guide_io(
+            "guides.commit", {"guide_id": guide_id, "token": token}
+        )
+
+    async def discard_guide(self, guide_id: str, token: str):
+        return await self._run_destructive_guide_io(
+            "guides.discard", {"guide_id": guide_id, "token": token}
+        )
+
     async def get_guide_library(self, app_id: Optional[str]):
         return await self._run_guide_io(
             self._sidecar.request,
@@ -230,12 +248,16 @@ class Plugin:
         )
 
     async def download_guide_image(self, url: str):
-        return await self._run_guide_io(
-            self._sidecar.request,
-            "images.download",
-            {"url": url},
-            timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
-        )
+        try:
+            saved = await self._run_guide_io(
+                self._sidecar.request,
+                "images.download",
+                {"url": url},
+                timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
+            )
+            return {"saved": True} if saved else {"saved": False, "kind": "download", "error": "图片未保存"}
+        except RustSidecarError as error:
+            return {"saved": False, "kind": error.kind, "error": str(error)}
 
     async def clear_guide_cache(self):
         return await self._run_destructive_guide_io("guides.clear", {})

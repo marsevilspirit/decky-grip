@@ -10,6 +10,9 @@ import { Router, staticClasses, useParams } from "@decky/ui";
 import {
   clearGuideCache,
   clearImageCache,
+  prepareGuide,
+  commitGuide,
+  discardGuide,
   downloadGuideImage,
   getCachedGuide,
   getGuide,
@@ -42,7 +45,7 @@ import {
 } from "./reader/recent-guide";
 import { ReaderImageCacheControl } from "./reader/image-cache-control";
 import {
-  downloadGuideImages,
+  downloadOfflineGuide,
   GuideDownloadTasks,
   type GuideImageDownloadProgress,
 } from "./reader/download";
@@ -103,7 +106,16 @@ export default definePlugin(() => {
   const readerCache = new ReaderSessionCache(
     {
       getCachedGuide,
-      getGuide,
+      getGuide: async (identity, forceRefresh) => {
+        if (!forceRefresh) return getGuide(identity.guideId, false);
+        await downloads.start(identity, true);
+        const task = downloads.getSnapshot(identity.guideId);
+        if (task?.phase !== "complete")
+          throw new Error(task?.error ?? "更新已取消，保留原指南");
+        const guide = await getCachedGuide(identity.guideId);
+        if (!guide) throw new Error("本地正文已变化，请重试更新");
+        return guide;
+      },
       getReaderPosition,
       saveReaderPosition: async (
         ...args: Parameters<typeof saveReaderPosition>
@@ -368,6 +380,7 @@ export default definePlugin(() => {
     identity: GuideIdentity,
     onProgress?: (progress: GuideImageDownloadProgress) => void,
     signal?: AbortSignal,
+    forceRefresh = false,
   ) => {
     signal?.throwIfAborted();
     if (guideCacheMutationActive || imageCacheMutationActive) {
@@ -376,35 +389,30 @@ export default definePlugin(() => {
     activeGuideDownloads += 1;
     try {
       const handoff = controller.captureReaderHandoff(identity);
-      const snapshot = await readerCache.load(identity, {
-        revalidate: true,
-      });
-      signal?.throwIfAborted();
-      if (mounted) {
-        await readerCache.rememberAccess(
-          identity,
-          snapshot.position ?? handoff,
-        );
-      }
-      await downloadGuideImages(
-        snapshot.guide,
-        downloadGuideImage,
+      const guide = await downloadOfflineGuide(
+        identity.guideId,
+        forceRefresh,
+        { prepareGuide, commitGuide, discardGuide, downloadGuideImage },
         onProgress,
         signal,
       );
-      // A warm session is not proof that its body still exists on disk.
-      const saved = await getCachedGuide(identity.guideId);
-      if (
-        !saved ||
-        saved.sections.some(
-          (section, index) =>
-            section.html !== snapshot.guide.sections[index]?.html,
-        ) ||
-        saved.sections.length !== snapshot.guide.sections.length
-      ) {
-        throw new Error("本地正文已变化，请重试下载");
+      readerCache.acceptOfflineGuide(guide);
+      if (mounted) {
+        try {
+          // A native-page download may have no warm reader, but must retain its saved bookmark.
+          const position =
+            readerCache.peek(identity)?.position ??
+            (await getReaderPosition(makeGuideKey(identity))) ??
+            handoff;
+          await readerCache.rememberAccess(identity, position);
+        } catch (error: unknown) {
+          toaster.toast({
+            title: "GRIP：图文已下载，阅读记录保存失败",
+            body: errorMessage(error),
+          });
+        }
       }
-      return snapshot.guide;
+      return guide;
     } catch (error: unknown) {
       if (!signal?.aborted)
         toaster.toast({ title: "GRIP：下载未完成", body: errorMessage(error) });
@@ -462,6 +470,7 @@ export default definePlugin(() => {
     return (
       <GuideReaderPage
         cache={readerCache}
+        downloads={downloads}
         fetchImage={getGuideImage}
         imageCacheControl={imageCacheControl}
         key={`${params.appId ?? ""}:${params.guideId ?? ""}`}

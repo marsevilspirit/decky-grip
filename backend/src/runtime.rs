@@ -149,7 +149,13 @@ fn guide_request_id(work: &Work) -> Option<&str> {
     let (method, params) = request_fields(request).ok()?;
     if !matches!(
         method,
-        "guides.get" | "guides.get_cached" | "guides.remove" | "guides.remove_offline"
+        "guides.get"
+            | "guides.get_cached"
+            | "guides.remove"
+            | "guides.remove_offline"
+            | "guides.prepare"
+            | "guides.commit"
+            | "guides.discard"
     ) {
         return None;
     }
@@ -202,6 +208,7 @@ fn image_error_kind(kind: ImageErrorKind) -> &'static str {
     match kind {
         ImageErrorKind::Validation => "validation",
         ImageErrorKind::Download => "download",
+        ImageErrorKind::Capacity => "capacity",
     }
 }
 
@@ -254,7 +261,7 @@ fn dispatch_general(
                 "running": status.running,
             }))
         }
-        "guides.get" => {
+        "guides.get" | "guides.prepare" => {
             let object = params_with_fields(params, &["guide_id", "force_refresh"])?;
             let guide_id =
                 object
@@ -267,9 +274,37 @@ fn dispatch_general(
                 .get("force_refresh")
                 .and_then(Value::as_bool)
                 .ok_or(StoreError::Validation("force_refresh must be a boolean"))?;
-            guides
-                .get(guide_id, force_refresh)
-                .map_err(RequestError::Guide)
+            if method == "guides.prepare" {
+                guides
+                    .prepare(guide_id, force_refresh)
+                    .map_err(RequestError::Guide)
+            } else {
+                guides
+                    .get(guide_id, force_refresh)
+                    .map_err(RequestError::Guide)
+            }
+        }
+        "guides.commit" | "guides.discard" => {
+            let object = params_with_fields(params, &["guide_id", "token"])?;
+            let guide_id = object["guide_id"].as_str().ok_or(StoreError::Validation(
+                "guide_id must be a positive decimal string",
+            ))?;
+            let token = object["token"]
+                .as_str()
+                .filter(|token| !token.is_empty() && token.len() <= 128)
+                .ok_or(StoreError::Validation(
+                    "token must be a nonempty string of at most 128 bytes",
+                ))?;
+            if method == "guides.commit" {
+                guides
+                    .commit(guide_id, token, images)
+                    .map_err(RequestError::Guide)
+            } else {
+                guides
+                    .discard(guide_id, token)
+                    .map(Value::Bool)
+                    .map_err(RequestError::Guide)
+            }
         }
         "guides.get_cached" | "guides.download_status" => {
             let object = params_with_fields(params, &["guide_id"])?;
@@ -304,7 +339,7 @@ fn dispatch_general(
                 completed += usize::from(images.is_downloaded(url).map_err(RequestError::Image)?);
             }
             Ok(json!({
-                "state": if completed == urls.len() { "complete" } else { "partial" },
+                "state": if completed == urls.len() && guide["offline"] == true { "complete" } else { "partial" },
                 "completed": completed,
                 "total": urls.len(),
             }))
@@ -868,6 +903,11 @@ mod tests {
                 .download("https://images.steamusercontent.com/b.png")
                 .unwrap()
         );
+        assert_eq!(query("1")["state"], "partial"); // Body-only cache is not an explicit download.
+        let candidate = guides.prepare("1", false).unwrap();
+        guides
+            .commit("1", candidate["token"].as_str().unwrap(), &images)
+            .unwrap();
         assert_eq!(
             query("1"),
             json!({"state": "complete", "completed": 2, "total": 2})
@@ -888,6 +928,11 @@ mod tests {
         assert_eq!(guide_calls.load(Ordering::SeqCst), 1);
         assert_eq!(image_calls.load(Ordering::SeqCst), 2);
         guides.get("2", false).unwrap();
+        assert_eq!(query("2")["state"], "partial");
+        let candidate = guides.prepare("2", false).unwrap();
+        guides
+            .commit("2", candidate["token"].as_str().unwrap(), &images)
+            .unwrap();
         assert_eq!(
             query("2"),
             json!({"state": "complete", "completed": 0, "total": 0})
@@ -986,6 +1031,7 @@ mod tests {
     fn image_error_kinds_keep_the_python_contract() {
         assert_eq!(image_error_kind(ImageErrorKind::Validation), "validation");
         assert_eq!(image_error_kind(ImageErrorKind::Download), "download");
+        assert_eq!(image_error_kind(ImageErrorKind::Capacity), "capacity");
     }
 
     #[test]
