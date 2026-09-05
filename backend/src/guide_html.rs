@@ -879,6 +879,37 @@ pub fn localize_guide_images(fragment: &str) -> String {
     parts.concat()
 }
 
+pub fn localized_image_urls(fragment: &str) -> Result<HashSet<String>, GuideHtmlError> {
+    #[derive(Default)]
+    struct ImageUrls(HashSet<String>);
+
+    impl HtmlSink for ImageUrls {
+        fn handle_starttag(
+            &mut self,
+            tag: &str,
+            attributes: Attributes,
+        ) -> Result<(), GuideHtmlError> {
+            if tag == "img" {
+                for (name, value) in attributes {
+                    if name == "data-grip-image-url" {
+                        let url = value
+                            .as_deref()
+                            .and_then(|url| canonical_image_url(url).ok())
+                            .ok_or_else(|| GuideHtmlError::new("invalid cached image URL"))?;
+                        self.0.insert(url);
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    HtmlParser::new(ImageUrls::default())
+        .parse(fragment)
+        .map(|images| images.0)
+        .map_err(|error| public_parse_error(error, "invalid cached guide images"))
+}
+
 #[derive(Default)]
 struct WorkingSection {
     id: String,

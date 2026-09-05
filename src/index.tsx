@@ -15,6 +15,7 @@ import {
   getGuide,
   getGuideLibrary,
   getGuideImage,
+  getGuideDownloadStatus,
   getPositions,
   getReaderCacheStats,
   getReaderPosition,
@@ -129,6 +130,7 @@ export default definePlugin(() => {
       readerCache.clear();
       guideCacheMutationActive = false;
       status.refreshGuideLibrary();
+      status.refreshDownloads();
     }
   };
   const controller = new GripController({
@@ -398,6 +400,7 @@ export default definePlugin(() => {
     } finally {
       activeGuideDownloads -= 1;
       status.refreshGuideLibrary();
+      status.refreshDownloads();
     }
   };
 
@@ -416,6 +419,7 @@ export default definePlugin(() => {
       throw error;
     } finally {
       imageCacheMutationActive = false;
+      status.refreshDownloads();
     }
   };
 
@@ -455,7 +459,19 @@ export default definePlugin(() => {
   };
   routerHook.addRoute(READER_ROUTE, ReaderRoute);
   routerHook.addGlobalComponent(GUIDE_DOWNLOAD_COMPONENT, () => (
-    <NativeGuideDownloadButton downloadGuide={cacheGuide} status={status} />
+    <NativeGuideDownloadButton
+      downloadGuide={cacheGuide}
+      getDownloadStatus={getGuideDownloadStatus}
+      openGuide={async (identity) => {
+        try {
+          await openReader(undefined, identity);
+        } catch (error: unknown) {
+          toaster.toast({ title: "GRIP：打开失败", body: errorMessage(error) });
+          throw error;
+        }
+      }}
+      status={status}
+    />
   ));
 
   let lifetimeRegistration: { unregister(): void } | undefined;

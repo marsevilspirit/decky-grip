@@ -38,9 +38,9 @@ restore it when the guide is opened again.
   overwriting the saved value.
 - Guide and app ids stay decimal strings so large Steam ids never lose
   precision.
-- The panel lists up to 20 recent GRIP Reader guides for the running game (or
-  globally when no game is running), with cached title, chapter, and offline
-  state. Reader history remains available when a guide body cache is removed.
+- The reader's **Y** switcher lists up to 20 recent guides for that game, with
+  cached titles and last-read chapters. Reader history remains available when a
+  guide body cache is removed; the plugin panel stays compact.
 - The plugin does not need root privileges.
 
 The current Steam UI findings and implementation boundaries are recorded in
@@ -75,14 +75,20 @@ Python tests use only the standard library.
 ## Using GRIP Reader
 
 1. Open a Steam Community guide, scroll to the paragraph you want, then choose
-   **下载到 GRIP**. The button reports image progress and only shows **已下载**
-   after the body and every image are saved locally. Failed downloads can be
-   retried without downloading already-saved images again.
+   **下载到 GRIP**. The button checks local disk state on every visit: **补全下载**
+   resumes an incomplete download, and **本地阅读** opens GRIP once the body and
+   every image are saved for offline use. Download progress counts unique images;
+   retrying preserves images already saved. This status check never goes online.
 2. Select **GRIP**, then choose **继续当前或最近指南**. The plugin panel does
    not list downloaded guides; switch guides inside the reader with **Y**.
    Open **高级选项** for local cache maintenance and diagnostics.
 3. Scroll normally in the full-screen reader. Press **Y** to open the current
-   game's guide list and **B** to close the list or leave the reader. Choose **搜索** to find local
+   game's guide list with focus directly on another guide, and **B** to close the
+   list or leave the reader. The narrow chapter list highlights the current
+   chapter and shows the full focused title in an overlay without resizing the
+   article. A failed image offers its own retry button; **A** in the article
+   retries the first visible failed image without reloading the guide.
+   Choose **搜索** to find local
    guide titles, chapters, or body text, preview matching context, and step
    through highlighted matches. GRIP saves each guide's visible text and exact
    viewport offset independently.

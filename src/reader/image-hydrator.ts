@@ -194,6 +194,28 @@ export class ReaderImageHydrator {
     this.pump();
   }
 
+  retryImage(image: HydratableImage): void {
+    const url = image.dataset.gripImageUrl;
+    if (
+      !url ||
+      !image.isConnected ||
+      image.dataset.gripImageState !== "unavailable"
+    )
+      return;
+    const blob = this.blobs.get(url);
+    const images = new Set([image, ...(blob?.images ?? [])]);
+    if (blob) {
+      this.blobs.delete(url);
+      this.evictBlob(url, blob);
+    }
+    for (const candidate of images) {
+      candidate.removeAttribute("src");
+      candidate.dataset.gripImageState = "retrying";
+      this.capacityDeferredAt.delete(candidate);
+    }
+    this.hydrateImages(images);
+  }
+
   clear(): void {
     this.generation += 1;
     this.queue.length = 0;

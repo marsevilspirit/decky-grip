@@ -213,6 +213,14 @@ class Plugin:
             timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
         )
 
+    async def get_guide_download_status(self, guide_id: str):
+        return await self._run_guide_io(
+            self._sidecar.request,
+            "guides.download_status",
+            {"guide_id": guide_id},
+            timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
+        )
+
     async def get_guide_image(self, url: str, allow_download: bool = True):
         return await self._run_guide_io(
             self._sidecar.request,

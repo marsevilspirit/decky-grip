@@ -221,6 +221,12 @@ impl GuideImageCache {
         Ok(self.resolve(url, true, true)?.is_some())
     }
 
+    /// Only validated, pinned disk files count as complete offline downloads.
+    pub fn is_downloaded(&self, url: &str) -> Result<bool, ImageError> {
+        let url = canonical_image_url(url)?;
+        Ok(self.read_disk(&url, true).is_some())
+    }
+
     fn resolve(
         &self,
         url: &str,

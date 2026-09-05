@@ -29,6 +29,12 @@ export interface GuideImagePayload {
   height: number;
 }
 
+export interface GuideDownloadStatus {
+  state: "missing" | "partial" | "complete";
+  completed: number;
+  total: number;
+}
+
 export interface CacheClearResult {
   filesRemoved: number;
   bytesRemoved: number;
@@ -97,6 +103,11 @@ export const getCachedGuide = callable<
   [guideId: string],
   DownloadedGuide | null
 >("get_cached_guide");
+
+export const getGuideDownloadStatus = callable<
+  [guideId: string],
+  GuideDownloadStatus
+>("get_guide_download_status");
 
 export const getGuideLibrary = callable<
   [appId: string | null],

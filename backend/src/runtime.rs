@@ -2,6 +2,7 @@ use super::{
     MAX_REQUEST_BYTES, PositionStore, ReaderPositionStore, StoreError, dispatch, empty_params,
     params_with_fields, protocol_info, request_fields, valid_id,
 };
+use crate::guide_html::localized_image_urls;
 use crate::guide_images::{GuideImageCache, ImageError, ImageErrorKind};
 use crate::guides::{GuideError, GuideErrorKind, GuideReader};
 use crate::hotkey::{HotkeyEvent, L4HotkeyMonitor};
@@ -138,7 +139,7 @@ impl Drop for GeneralLease<'_> {
 
 fn is_image_request(work: &Work) -> bool {
     matches!(work, Work::Request(request) if request_fields(request)
-        .is_ok_and(|(method, _)| matches!(method, "images.get" | "images.download")))
+        .is_ok_and(|(method, _)| matches!(method, "images.get" | "images.download" | "guides.download_status")))
 }
 
 fn guide_request_id(work: &Work) -> Option<&str> {
@@ -267,7 +268,7 @@ fn dispatch_general(
                 .get(guide_id, force_refresh)
                 .map_err(RequestError::Guide)
         }
-        "guides.get_cached" => {
+        "guides.get_cached" | "guides.download_status" => {
             let object = params_with_fields(params, &["guide_id"])?;
             let guide_id =
                 object
@@ -276,10 +277,34 @@ fn dispatch_general(
                     .ok_or(StoreError::Validation(
                         "guide_id must be a positive decimal string",
                     ))?;
-            Ok(guides
-                .get_cached(guide_id)
-                .map_err(RequestError::Guide)?
-                .unwrap_or(Value::Null))
+            let guide = guides.get_cached(guide_id).map_err(RequestError::Guide)?;
+            if method == "guides.get_cached" {
+                return Ok(guide.unwrap_or(Value::Null));
+            }
+            let Some(guide) = guide else {
+                return Ok(json!({"state": "missing", "completed": 0, "total": 0}));
+            };
+            let mut urls = HashSet::new();
+            for section in guide["sections"]
+                .as_array()
+                .expect("validated guide sections")
+            {
+                urls.extend(
+                    localized_image_urls(section["html"].as_str().expect("validated HTML"))
+                        .map_err(|_| {
+                            StoreError::Storage("cached guide images could not be inspected")
+                        })?,
+                );
+            }
+            let mut completed = 0;
+            for url in &urls {
+                completed += usize::from(images.is_downloaded(url).map_err(RequestError::Image)?);
+            }
+            Ok(json!({
+                "state": if completed == urls.len() { "complete" } else { "partial" },
+                "completed": completed,
+                "total": urls.len(),
+            }))
         }
         "guides.list" => {
             let object = params_with_fields(params, &["app_id"])?;
@@ -752,6 +777,106 @@ mod tests {
             images,
             reader_store: ReaderPositionStore::new(root.join("reader_positions.json")),
         })
+    }
+
+    #[test]
+    fn download_status_checks_pinned_disk_images_without_fetching_or_trusting_memory() {
+        let directory = crate::test_support::TestDirectory::new("reader_positions.json");
+        let guide_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&guide_calls);
+        let guides = Arc::new(GuideReader::with_fetcher(
+            directory.0.join("guides"),
+            move |url, _, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let body = if url.contains("?id=2&") {
+                    "<p>Text only</p>"
+                } else {
+                    r#"<img src="https://images.steamusercontent.com/a.png?x=1&amp;y=2"><img src="https://images.steamusercontent.com/a.png?x=1&amp;y=2"><img src="https://images.steamusercontent.com/b.png">"#
+                };
+                Ok(format!(r#"<div class="workshopItemTitle">Guide</div><div class="guideAuthors">Author</div><div class="subSection" id="1"><div class="subSectionTitle">Chapter</div><div class="subSectionDesc">{body}</div></div>"#).into_bytes())
+            },
+            || 1,
+        ));
+        let image_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&image_calls);
+        let images = Arc::new(
+            GuideImageCache::with_fetcher(
+                directory.0.join("images"),
+                move |_, _, _| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok((
+                        "image/png".to_owned(),
+                        b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0test"
+                            .to_vec(),
+                    ))
+                },
+                crate::guide_images::ImageLimits::default(),
+            )
+            .unwrap(),
+        );
+        let (events, _receiver) = mpsc::channel();
+        let (device, sysfs, proc_root) = missing_roots();
+        let monitor = Arc::new(Mutex::new(L4HotkeyMonitor::new(
+            events, device, sysfs, proc_root,
+        )));
+        let reader_store = ReaderPositionStore::new(directory.path());
+        let query = |guide_id: &str| {
+            let response = response_for_request(
+                &json!({"id": 1, "method": "guides.download_status", "params": {"guide_id": guide_id}}),
+                |method, params| {
+                    dispatch_general(&monitor, &guides, &images, &reader_store, method, params)
+                },
+            );
+            assert_eq!(response["ok"], true, "{response}");
+            response["result"].clone()
+        };
+        assert_eq!(
+            query("1"),
+            json!({"state": "missing", "completed": 0, "total": 0})
+        );
+        assert_eq!(guide_calls.load(Ordering::SeqCst), 0);
+        guides.get("1", false).unwrap();
+        assert_eq!(
+            query("1"),
+            json!({"state": "partial", "completed": 0, "total": 2})
+        );
+        assert_eq!(image_calls.load(Ordering::SeqCst), 0);
+        let first = "https://images.steamusercontent.com/a.png?x=1&y=2";
+        images.get(first, true).unwrap();
+        assert_eq!(query("1")["completed"], 0);
+        assert!(images.download(first).unwrap());
+        assert_eq!(query("1")["completed"], 1);
+        assert!(
+            images
+                .download("https://images.steamusercontent.com/b.png")
+                .unwrap()
+        );
+        assert_eq!(
+            query("1"),
+            json!({"state": "complete", "completed": 2, "total": 2})
+        );
+        let pinned = std::fs::read_dir(directory.0.join("images"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::write(pinned, b"corrupt").unwrap();
+        assert_eq!(
+            query("1"),
+            json!({"state": "partial", "completed": 1, "total": 2})
+        );
+        images.clear();
+        assert_eq!(query("1")["completed"], 0);
+        assert_eq!(guide_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(image_calls.load(Ordering::SeqCst), 2);
+        guides.get("2", false).unwrap();
+        assert_eq!(
+            query("2"),
+            json!({"state": "complete", "completed": 0, "total": 0})
+        );
+        guides.clear_guide_cache().unwrap();
+        assert_eq!(query("1")["state"], "missing");
     }
 
     #[test]

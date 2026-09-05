@@ -30,6 +30,54 @@ const cached: CachedGuideImage = {
 };
 
 describe("reader image hydration", () => {
+  it("retries only the failed URL, guards double presses and replaces failed decode blobs", async () => {
+    const failed = image("https://a/failed");
+    const healthy = image("https://a/healthy");
+    let release!: (result: CachedGuideImage) => void;
+    const fetchImage = vi
+      .fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(cached)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = resolve;
+          }),
+      )
+      .mockResolvedValue(cached);
+    let nextBlob = 0;
+    const revoke = vi.fn();
+    const hydrator = new ReaderImageHydrator(
+      fetchImage,
+      1,
+      () => `blob:${++nextBlob}`,
+      revoke,
+    );
+    hydrator.hydrateImages([failed, healthy]);
+    await vi.waitFor(() => expect(healthy.src).toBe("blob:1"));
+    expect(failed.dataset.gripImageState).toBe("unavailable");
+    hydrator.hydrateImages([failed]);
+    expect(fetchImage).toHaveBeenCalledTimes(2);
+    hydrator.retryImage(failed);
+    hydrator.retryImage(failed);
+    expect(fetchImage).toHaveBeenCalledTimes(3);
+    expect(failed.dataset.gripImageState).toBe("loading");
+    release(cached);
+    await vi.waitFor(() => expect(failed.src).toBe("blob:2"));
+    expect(healthy.src).toBe("blob:1");
+    failed.dataset.gripImageState = "unavailable";
+    hydrator.retryImage(failed);
+    await vi.waitFor(() => expect(failed.src).toBe("blob:3"));
+    expect(revoke).toHaveBeenCalledWith("blob:2");
+    expect(healthy.src).toBe("blob:1");
+    expect(fetchImage.mock.calls.map(([url]) => url)).toEqual([
+      "https://a/failed",
+      "https://a/healthy",
+      "https://a/failed",
+      "https://a/failed",
+    ]);
+  });
+
   it("loads inert URLs through a bounded RPC and assigns only blob URLs", async () => {
     let active = 0;
     let maximumActive = 0;

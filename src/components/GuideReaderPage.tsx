@@ -15,6 +15,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 
 import type { GuideLibraryEntry } from "../backend";
 import {
@@ -72,6 +73,7 @@ const READER_CSS = `
 .grip-reader-content img { display: block; max-width: 100%; height: auto; margin: 14px auto; border-radius: 4px; }
 .grip-reader-content img[data-grip-image-url]:not([src]) { background: #17212b; min-height: 48px; opacity: 0.55; }
 .grip-reader-content img[data-grip-image-state="unavailable"] { border: 1px dashed #6b747d; }
+.grip-reader-toc [aria-current="location"] { box-shadow: inset 3px 0 #67c1f5; font-weight: 700; }
 .grip-reader-content .grip-reader-section { margin: 0 auto 34px; max-width: 920px; }
 .grip-reader-content .grip-reader-section-title { color: #67c1f5; font-size: 27px; margin: 24px 0 14px; }
 .grip-reader-content .bb_h1, .grip-reader-content .bb_h2, .grip-reader-content .bb_h3 { color: #f3f3f3; font-weight: 700; margin: 20px 0 8px; }
@@ -205,6 +207,29 @@ export function GuideReaderPage({
   const [switchPending, setSwitchPending] = useState<string | null>(null);
   const [guideSearchOpen, setGuideSearchOpen] = useState(false);
   const [guideSearchQuery, setGuideSearchQuery] = useState("");
+  const [activeSectionId, setActiveSectionId] = useState<string | null>(
+    initialSnapshot?.position?.sectionId ??
+      initialSnapshot?.guide.sections[0]?.id ??
+      null,
+  );
+  const [tocHint, setTocHint] = useState<{
+    sectionId: string;
+    title: string;
+    right: number;
+    top?: number;
+    bottom?: number;
+  } | null>(null);
+  const [imageRetries, setImageRetries] = useState<
+    Array<{
+      image: HTMLImageElement;
+      host: HTMLSpanElement;
+      key: number;
+      busy: boolean;
+    }>
+  >([]);
+  const [visibleRetryImage, setVisibleRetryImage] =
+    useState<HTMLImageElement | null>(null);
+  const [imageRetryError, setImageRetryError] = useState<string | null>(null);
   const [activeGuideSearchResultIndex, setActiveGuideSearchResultIndex] =
     useState<number | null>(null);
   const [sectionRenderState, setSectionRenderState] =
@@ -214,7 +239,9 @@ export function GuideReaderPage({
     }));
   const positionRepairBusy = positionRepairMode !== null;
   const scrollerRef = useRef<HTMLDivElement | null>(null);
-  const guideSwitcherCloseRef = useRef<HTMLDivElement | null>(null);
+  const guideSwitcherRef = useRef<HTMLDivElement | null>(null);
+  const tocRef = useRef<HTMLDivElement | null>(null);
+  const focusedTocSectionRef = useRef<string | null>(null);
   const guideSearchButtonRef = useRef<HTMLDivElement | null>(null);
   const guideSearchIndexRef = useRef<{
     guide: ReaderSessionSnapshot["guide"];
@@ -277,11 +304,17 @@ export function GuideReaderPage({
     );
   };
 
+  const hideTocTitle = () => {
+    focusedTocSectionRef.current = null;
+    setTocHint(null);
+  };
+
   const openGuideSwitcher = () => {
     if (guideSwitcherOpen) {
       return;
     }
     setGuideSearchOpen(false);
+    hideTocTitle();
     setGuideSwitcherOpen(true);
   };
 
@@ -307,6 +340,7 @@ export function GuideReaderPage({
         index: buildGuideSearchIndex(guide),
       };
     }
+    hideTocTitle();
     setGuideSearchOpen(true);
   };
 
@@ -401,10 +435,15 @@ export function GuideReaderPage({
       return;
     }
     const animationFrame = requestAnimationFrame(() => {
-      focusWithoutScrolling(guideSwitcherCloseRef.current);
+      const dialog = guideSwitcherRef.current;
+      focusWithoutScrolling(
+        dialog?.querySelector<HTMLElement>(
+          "[data-grip-guide-choice], [data-grip-guide-list-retry]",
+        ) ?? dialog,
+      );
     });
     return () => cancelAnimationFrame(animationFrame);
-  }, [guideSwitcherOpen]);
+  }, [guideSwitcherOpen, guideLibrary, guideSwitcherError]);
 
   useEffect(() => {
     if (!identity) {
@@ -618,6 +657,154 @@ export function GuideReaderPage({
       anchorIndexRef.current.refresh();
     }
   }, [loaded?.guide, renderedSectionCount]);
+
+  const updateVisibleImageRetry = useCallback(() => {
+    const scroller = scrollerRef.current;
+    const content = contentRef.current;
+    if (!scroller || !content) return;
+    const viewport = scroller.getBoundingClientRect();
+    const image = [
+      ...content.querySelectorAll<HTMLImageElement>(
+        'img[data-grip-image-state="unavailable"]',
+      ),
+    ].find((image) => {
+      const rect = image.getBoundingClientRect();
+      return rect.bottom > viewport.top && rect.top < viewport.bottom;
+    });
+    setVisibleRetryImage(image ?? null);
+  }, []);
+
+  const updateActiveSection = useCallback(() => {
+    const scroller = scrollerRef.current;
+    const content = contentRef.current;
+    if (!scroller || !content) return;
+    const sections = content.querySelectorAll<HTMLElement>(
+      "[data-guide-section-id]",
+    );
+    const top = scroller.getBoundingClientRect().top + 1;
+    let low = 0;
+    let high = sections.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (sections[middle].getBoundingClientRect().top <= top) low = middle + 1;
+      else high = middle;
+    }
+    setActiveSectionId(
+      sections[Math.max(0, low - 1)]?.dataset.guideSectionId ?? null,
+    );
+    updateVisibleImageRetry();
+  }, [updateVisibleImageRetry]);
+
+  useLayoutEffect(() => {
+    updateActiveSection();
+  }, [loaded?.guide, renderedSectionCount, updateActiveSection]);
+
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!content) return;
+    const observer = new ResizeObserver(updateActiveSection);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [loaded?.guide, updateActiveSection]);
+
+  const showTocTitle = (sectionId: string) => {
+    const section = loadedRef.current?.guide.sections.find(
+      (entry) => entry.id === sectionId,
+    );
+    const toc = tocRef.current;
+    const button = [
+      ...(toc?.querySelectorAll<HTMLElement>("[data-grip-toc-section]") ?? []),
+    ].find((element) => element.dataset.gripTocSection === sectionId);
+    if (!section || !button || !toc) return;
+    focusedTocSectionRef.current = sectionId;
+    const rect = button.getBoundingClientRect();
+    const view = button.ownerDocument.defaultView ?? window;
+    const above = rect.top > view.innerHeight / 2;
+    setTocHint({
+      sectionId,
+      title: section.title,
+      right: view.innerWidth - toc.getBoundingClientRect().left + 10,
+      top: above ? undefined : Math.max(STEAM_TOP_BAR_HEIGHT, rect.top),
+      bottom: above ? Math.max(64, view.innerHeight - rect.bottom) : undefined,
+    });
+  };
+
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!content) return;
+    const controls = new Map<
+      HTMLImageElement,
+      { host: HTMLSpanElement; key: number }
+    >();
+    let nextKey = 0;
+    const synchronize = () => {
+      for (const image of content.querySelectorAll<HTMLImageElement>(
+        'img[data-grip-image-state="unavailable"]',
+      )) {
+        if (controls.has(image)) continue;
+        const host = image.ownerDocument.createElement("span");
+        host.style.display = "block";
+        image.after(host);
+        controls.set(image, { host, key: ++nextKey });
+      }
+      const next: typeof imageRetries = [];
+      for (const [image, control] of controls) {
+        const state = image.dataset.gripImageState;
+        const busy =
+          state === "queued" || state === "loading" || state === "deferred";
+        if (!image.isConnected || (!busy && state !== "unavailable")) {
+          if (control.host.contains(control.host.ownerDocument.activeElement)) {
+            focusWithoutScrolling(scrollerRef.current);
+          }
+          control.host.remove();
+          controls.delete(image);
+        } else {
+          next.push({ image, ...control, busy });
+        }
+      }
+      setImageRetries((current) =>
+        current.length === next.length &&
+        current.every(
+          (entry, index) =>
+            entry.image === next[index].image &&
+            entry.host === next[index].host &&
+            entry.busy === next[index].busy,
+        )
+          ? current
+          : next,
+      );
+      updateVisibleImageRetry();
+    };
+    const onImageError = (event: Event) => {
+      const image = event.target as HTMLImageElement | null;
+      if (image?.tagName === "IMG" && image.dataset.gripImageUrl) {
+        image.dataset.gripImageState = "unavailable";
+      }
+    };
+    const observer = new MutationObserver(synchronize);
+    observer.observe(content, {
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["data-grip-image-state"],
+    });
+    content.addEventListener("error", onImageError, true);
+    synchronize();
+    return () => {
+      observer.disconnect();
+      content.removeEventListener("error", onImageError, true);
+      for (const { host } of controls.values()) host.remove();
+    };
+  }, [loaded?.guide, updateVisibleImageRetry]);
+
+  const retryImage = (image: HTMLImageElement) => {
+    imageCacheControl.resume();
+    if (imageCacheControl.getSnapshot().paused) {
+      setImageRetryError("缓存清理中，请稍后重试");
+      return;
+    }
+    setImageRetryError(null);
+    imageHydrator.retryImage(image);
+  };
 
   useLayoutEffect(() => {
     const guide = loaded?.guide ?? null;
@@ -1043,6 +1230,7 @@ export function GuideReaderPage({
   );
 
   const onScroll = () => {
+    updateActiveSection();
     if (restoringRef.current || loading) {
       return;
     }
@@ -1500,12 +1688,42 @@ export function GuideReaderPage({
       }}
     >
       <style>{READER_CSS}</style>
+      {tocHint && (
+        <div
+          id="grip-reader-chapter-title"
+          role="tooltip"
+          style={{
+            background: "#223241",
+            border: "1px solid #67c1f5",
+            borderRadius: 6,
+            boxShadow: "0 4px 18px #0008",
+            boxSizing: "border-box",
+            color: "#fff",
+            fontSize: 16,
+            lineHeight: 1.5,
+            maxWidth: "min(420px, calc(100vw - 120px))",
+            overflowWrap: "anywhere",
+            padding: "12px 16px",
+            pointerEvents: "none",
+            position: "fixed",
+            right: tocHint.right,
+            top: tocHint.top,
+            bottom: tocHint.bottom,
+            zIndex: 5,
+          }}
+        >
+          {tocHint.title}
+        </div>
+      )}
       {guideSwitcherOpen && (
         <Focusable
           aria-label="切换指南"
           aria-modal="true"
           className="grip-reader-guide-switcher"
+          onCancelActionDescription="返回阅读"
+          ref={guideSwitcherRef}
           role="dialog"
+          tabIndex={0}
           style={{
             background: "linear-gradient(180deg, #16202b 0%, #0d141c 100%)",
             bottom: 0,
@@ -1529,17 +1747,7 @@ export function GuideReaderPage({
           >
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 24, fontWeight: 700 }}>本游戏指南</div>
-              <div style={{ opacity: 0.7 }}>
-                仅显示 AppID {identity.appId} 的已记录指南
-              </div>
             </div>
-            <Button
-              onClick={closeGuideSwitcher}
-              preferredFocus
-              ref={guideSwitcherCloseRef}
-            >
-              关闭
-            </Button>
           </div>
           {guideLibrary === null && !guideSwitcherError && (
             <div
@@ -1558,6 +1766,7 @@ export function GuideReaderPage({
             <div role="alert" style={{ color: "#ff8a8a", marginBottom: 16 }}>
               <div>{guideSwitcherError}</div>
               <Button
+                data-grip-guide-list-retry="true"
                 disabled={switchPending !== null}
                 onClick={() =>
                   setGuideSwitcherRevision((revision) => revision + 1)
@@ -1605,9 +1814,11 @@ export function GuideReaderPage({
                 return (
                   <Button
                     aria-label={`打开指南：${entry.cache?.title ?? entry.guideId}`}
+                    data-grip-guide-choice="true"
                     disabled={switchPending !== null}
                     key={guideKey}
                     onClick={() => void switchGuide(entry)}
+                    preferredFocus={entry === guideChoices[1]}
                     style={style}
                   >
                     {content}
@@ -1700,6 +1911,15 @@ export function GuideReaderPage({
             ref={scrollerRef}
             flow-children="none"
             onButtonDown={onReaderButton}
+            onOKActionDescription={visibleRetryImage ? "重试图片" : undefined}
+            onOKButton={(event) => {
+              if (event.detail.is_repeat || !visibleRetryImage) return;
+              const target = event.target as Element | null;
+              if (target?.closest?.("[data-grip-image-retry]")) return;
+              event.preventDefault();
+              event.stopPropagation();
+              retryImage(visibleRetryImage);
+            }}
             onGamepadDirection={onReaderDirection}
             onScroll={onScroll}
             preferredFocus={!guideSwitcherOpen}
@@ -1733,10 +1953,49 @@ export function GuideReaderPage({
                   </section>
                 ))}
             </div>
+            {imageRetries.map(({ image, host, key, busy }) =>
+              createPortal(
+                <Button
+                  aria-label={`重试图片：${image.alt || image.title || key}`}
+                  aria-live="polite"
+                  data-grip-image-retry="true"
+                  disabled={busy}
+                  onClick={() => retryImage(image)}
+                  style={{
+                    boxSizing: "border-box",
+                    marginBottom: 12,
+                    minWidth: 0,
+                    whiteSpace: "normal",
+                    width: "100%",
+                  }}
+                >
+                  {busy ? (
+                    <BusyLabel>正在重试图片…</BusyLabel>
+                  ) : (
+                    (imageRetryError ?? "图片读取失败，重试此图")
+                  )}
+                </Button>,
+                host,
+                key,
+              ),
+            )}
           </Focusable>
           <div
             aria-label={guideSearchOpen ? "指南搜索" : "指南目录"}
             className="grip-reader-toc"
+            onFocusCapture={(event) => {
+              const target = (event.target as HTMLElement).closest<HTMLElement>(
+                "[data-grip-toc-section]",
+              );
+              if (target?.dataset.gripTocSection)
+                showTocTitle(target.dataset.gripTocSection);
+            }}
+            onBlurCapture={hideTocTitle}
+            onScroll={() => {
+              if (focusedTocSectionRef.current)
+                showTocTitle(focusedTocSectionRef.current);
+            }}
+            ref={tocRef}
             role={guideSearchOpen ? "search" : "navigation"}
             style={{
               background: "rgba(7, 12, 18, 0.48)",
@@ -1922,10 +2181,21 @@ export function GuideReaderPage({
                   .slice(0, renderedSectionCount)
                   .map((section) => (
                     <Button
+                      aria-current={
+                        activeSectionId === section.id ? "location" : undefined
+                      }
+                      aria-describedby={
+                        tocHint?.sectionId === section.id
+                          ? "grip-reader-chapter-title"
+                          : undefined
+                      }
                       aria-label={`跳转到章节：${section.title}`}
+                      data-grip-toc-section={section.id}
                       disabled={loading || refreshPending}
                       key={section.id}
                       onClick={() => jumpToSection(section.id)}
+                      onGamepadFocus={() => showTocTitle(section.id)}
+                      onGamepadBlur={hideTocTitle}
                       style={{
                         boxSizing: "border-box",
                         fontSize: 16,

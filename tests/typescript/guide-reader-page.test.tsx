@@ -41,10 +41,18 @@ vi.mock("@decky/ui", () => {
             stopPropagation(): void;
           }) => void)
         | undefined;
+      const onOKButton = domProps.onOKButton as typeof onOptionsButton;
+      const onGamepadFocus = domProps.onGamepadFocus as
+        (() => void) | undefined;
+      const onGamepadBlur = domProps.onGamepadBlur as (() => void) | undefined;
+      if (onGamepadFocus) domProps.onFocus = onGamepadFocus;
+      if (onGamepadBlur) domProps.onBlur = onGamepadBlur;
+      if (domProps.onOKActionDescription)
+        domProps["data-ok-action"] = domProps.onOKActionDescription;
       if (domProps.onOptionsActionDescription) {
         domProps["data-options-action"] = domProps.onOptionsActionDescription;
       }
-      if (onCancel || onOptionsButton) {
+      if (onCancel || onOptionsButton || onOKButton) {
         domProps.onKeyDown = (event: KeyboardEvent) => {
           if (event.key === "Options" && onOptionsButton) {
             onOptionsButton({
@@ -54,6 +62,12 @@ vi.mock("@decky/ui", () => {
             });
           } else if (event.key === "Escape" && onCancel) {
             onCancel(event as unknown as CustomEvent);
+          } else if (event.key === "Enter" && onOKButton) {
+            onOKButton({
+              detail: { button: 1, is_repeat: event.repeat, source: 0 },
+              preventDefault: () => event.preventDefault(),
+              stopPropagation: () => event.stopPropagation(),
+            });
           }
         };
       }
@@ -65,6 +79,11 @@ vi.mock("@decky/ui", () => {
         "onGamepadDirection",
         "onOptionsActionDescription",
         "onOptionsButton",
+        "onOKButton",
+        "onOKActionDescription",
+        "onCancelActionDescription",
+        "onGamepadFocus",
+        "onGamepadBlur",
         "preferredFocus",
       ]) {
         delete domProps[name];
@@ -274,9 +293,11 @@ describe("GuideReaderPage position lifecycle", () => {
   };
 
   const notifyResize = (): void => {
-    for (const callback of [...resizeCallbacks]) {
-      callback([], {} as ResizeObserver);
-    }
+    act(() => {
+      for (const callback of [...resizeCallbacks]) {
+        callback([], {} as ResizeObserver);
+      }
+    });
   };
 
   const mount = async (
@@ -549,6 +570,209 @@ describe("GuideReaderPage position lifecycle", () => {
     }
   });
 
+  it("shows full focused chapter titles in an overlay and highlights the current chapter without reflow", async () => {
+    const guide = guideFixture();
+    const title = "第一章：完整的章节名称与很长的任务说明";
+    guide.sections = [
+      { id: "1", title, html: "<p>第一章正文</p>" },
+      { id: "2", title: "第二章", html: "<p>第二章正文</p>" },
+    ];
+    const cache = new ReaderSessionCache({
+      getCachedGuide: async () => guide,
+      getGuide: async () => guide,
+      getReaderPosition: async () => null,
+      saveReaderPosition: async (
+        _key,
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+      ) => ({ scrollTop, sectionId, anchorText, anchorOffset, updatedAt: 2 }),
+    });
+    await cache.load(identity);
+    const scroller = await mount(cache, async () => null, 3_000);
+    await flushFrame();
+    const sections = [
+      ...scroller.querySelectorAll<HTMLElement>("[data-guide-section-id]"),
+    ];
+    sections.forEach((section, index) => {
+      section.getBoundingClientRect = () =>
+        ({ top: index * 600 - scroller.scrollTop }) as DOMRect;
+    });
+    await act(async () => {
+      scroller.scrollTop = 650;
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    const toc = container!.querySelector<HTMLElement>(
+      '[aria-label="指南目录"]',
+    )!;
+    const first = toc.querySelector<HTMLElement>(
+      '[data-grip-toc-section="1"]',
+    )!;
+    const second = toc.querySelector<HTMLElement>(
+      '[data-grip-toc-section="2"]',
+    )!;
+    toc.getBoundingClientRect = () => ({ left: 712 }) as DOMRect;
+    first.getBoundingClientRect = () => ({ top: 100, bottom: 140 }) as DOMRect;
+    expect(second.getAttribute("aria-current")).toBe("location");
+    expect(first.hasAttribute("aria-current")).toBe(false);
+    const body = scroller.querySelector("[data-guide-search-body]");
+    await act(async () => first.focus());
+    const hint = container!.querySelector<HTMLElement>('[role="tooltip"]')!;
+    expect(hint.textContent).toBe(title);
+    expect(hint.style.position).toBe("fixed");
+    expect(hint.style.overflowWrap).toBe("anywhere");
+    expect(toc.contains(hint)).toBe(false);
+    expect(first.getAttribute("aria-describedby")).toBe(hint.id);
+    expect(toc.style.flexBasis).toBe("88px");
+    expect(scroller.scrollTop).toBe(650);
+    expect(scroller.querySelector("[data-guide-search-body]")).toBe(body);
+    first.getBoundingClientRect = () => ({ top: 200, bottom: 240 }) as DOMRect;
+    await act(async () => toc.dispatchEvent(new Event("scroll")));
+    expect(
+      container!.querySelector<HTMLElement>('[role="tooltip"]')?.style.top,
+    ).toBe("200px");
+    await act(async () => scroller.focus());
+    expect(container!.querySelector('[role="tooltip"]')).toBeNull();
+    expect(scroller.scrollTop).toBe(650);
+  });
+
+  it("retries a failed image with A or its own button without rebuilding the article or other images", async () => {
+    const failedUrl = "https://images.steamusercontent.com/failed.png";
+    const healthyUrl = "https://images.steamusercontent.com/healthy.png";
+    const guide = guideFixture();
+    guide.sections = [
+      {
+        id: "1",
+        title: "图文章节",
+        html: `<p>正文</p><img alt="失败图片" data-grip-image-url="${failedUrl}"><img data-grip-image-url="${healthyUrl}">`,
+      },
+    ];
+    const cache = new ReaderSessionCache({
+      getCachedGuide: async () => guide,
+      getGuide: async () => guide,
+      getReaderPosition: async () => null,
+      saveReaderPosition: async (
+        _key,
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+      ) => ({ scrollTop, sectionId, anchorText, anchorOffset, updatedAt: 2 }),
+    });
+    await cache.load(identity);
+    const payload = {
+      mimeType: "image/png",
+      base64: "AQID",
+      fromCache: true,
+      width: 1,
+      height: 1,
+    };
+    let failedAttempts = 0;
+    let release!: (image: typeof payload) => void;
+    const fetchImage = vi.fn(async (url: string) => {
+      if (url === healthyUrl) return payload;
+      if (failedAttempts++ === 0) return null;
+      return new Promise<typeof payload>((resolve) => {
+        release = resolve;
+      });
+    });
+    let nextBlob = 0;
+    vi.spyOn(URL, "createObjectURL").mockImplementation(
+      () => `blob:test-${++nextBlob}`,
+    );
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    const scroller = await mount(cache, fetchImage, 3_000);
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    const failed =
+      scroller.querySelector<HTMLImageElement>('img[alt="失败图片"]')!;
+    const healthy = scroller.querySelector<HTMLImageElement>(
+      `img[data-grip-image-url="${healthyUrl}"]`,
+    )!;
+    const body = scroller.querySelector("[data-guide-search-body]");
+    const healthyBlob = healthy.src;
+    failed.getBoundingClientRect = () => ({ top: 100, bottom: 148 }) as DOMRect;
+    await act(async () => {
+      scroller.scrollTop = 234;
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    expect(scroller.getAttribute("data-ok-action")).toBe("重试图片");
+    expect(buttonNamed("图片读取失败，重试此图")).not.toBeNull();
+    await act(async () => {
+      pressKey(scroller, "Enter");
+      pressKey(scroller, "Enter");
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(buttonNamed("正在重试图片…").disabled).toBe(true);
+    expect(fetchImage).toHaveBeenCalledTimes(3);
+    await act(async () => {
+      release(payload);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(scroller.querySelector("[data-grip-image-retry]")).toBeNull();
+    expect(healthy.src).toBe(healthyBlob);
+    expect(failed.src).toBe("blob:test-2");
+    expect(scroller.querySelector("[data-guide-search-body]")).toBe(body);
+    expect(scroller.scrollTop).toBe(234);
+
+    await act(async () => {
+      failed.dispatchEvent(new Event("error"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    const retry = buttonNamed("图片读取失败，重试此图");
+    await act(async () => {
+      retry.focus();
+      retry.click();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      release(payload);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(document.activeElement).toBe(scroller);
+    expect(failed.src).toBe("blob:test-3");
+    expect(
+      fetchImage.mock.calls.filter(([url]) => url === healthyUrl),
+    ).toHaveLength(1);
+    expect(scroller.scrollTop).toBe(234);
+  });
+
+  it("focuses the first alternative when a guide list finishes loading", async () => {
+    const guide = guideFixture();
+    const cache = new ReaderSessionCache({
+      getCachedGuide: async () => guide,
+      getGuide: async () => guide,
+      getReaderPosition: async () => null,
+      saveReaderPosition: vi.fn(),
+    });
+    await cache.load(identity);
+    let resolveList!: (entries: GuideLibraryEntry[]) => void;
+    const scroller = await mount(cache, async () => null, 12_000, {
+      loadGuideLibrary: () =>
+        new Promise((resolve) => {
+          resolveList = resolve;
+        }),
+    });
+    await act(async () => pressKey(scroller, "Options"));
+    await flushFrame();
+    const dialog = container!.querySelector<HTMLElement>(
+      '[aria-label="切换指南"]',
+    )!;
+    expect(document.activeElement).toBe(dialog);
+    await act(async () =>
+      resolveList([
+        { appId: identity.appId, guideId: "123", updatedAt: 1, cache: null },
+      ]),
+    );
+    await flushFrame();
+    expect(document.activeElement).toBe(
+      dialog.querySelector("[data-grip-guide-choice]"),
+    );
+    await act(async () => pressKey(dialog, "Escape"));
+    await flushFrame();
+    expect(document.activeElement).toBe(scroller);
+  });
+
   it("keeps the reader headerless and the current guide non-interactive", async () => {
     const guide = guideFixture();
     const backend: ReaderSessionBackend = {
@@ -587,11 +811,16 @@ describe("GuideReaderPage position lifecycle", () => {
     });
     await flushFrame();
     await flushMicrotasks();
-    expect(document.activeElement).toBe(buttonNamed("关闭"));
     const page = container?.firstElementChild as HTMLElement | null;
     const dialog = container?.querySelector<HTMLElement>(
       '[aria-label="切换指南"]',
     );
+    expect(document.activeElement).toBe(dialog);
+    expect(
+      [...dialog!.querySelectorAll("button")].some(
+        (button) => button.textContent === "关闭",
+      ),
+    ).toBe(false);
     expect(page?.style.paddingTop).toBe("40px");
     expect(dialog?.style.top).toBe("40px");
     expect(dialog?.classList.contains("grip-reader-guide-switcher")).toBe(true);
@@ -661,8 +890,14 @@ describe("GuideReaderPage position lifecycle", () => {
       container?.querySelector('[aria-current="page"]')?.textContent,
     ).toContain(guide.title);
     expect(container?.textContent).toContain("另一篇指南");
+    await flushFrame();
+    expect(document.activeElement?.getAttribute("aria-label")).toBe(
+      "打开指南：另一篇指南",
+    );
 
-    await act(async () => buttonNamed("关闭").click());
+    await act(async () =>
+      pressKey(container!.querySelector('[aria-label="切换指南"]')!, "Escape"),
+    );
     await act(async () => {
       pressKey(scroller, "Options");
     });
@@ -734,7 +969,7 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(optionsEvent.defaultPrevented).toBe(true);
     const dialog = container?.querySelector('[aria-label="切换指南"]');
     expect(dialog).not.toBeNull();
-    expect(document.activeElement).toBe(buttonNamed("关闭"));
+    expect(document.activeElement).toBe(dialog);
     expect(page?.hasAttribute("data-options-action")).toBe(false);
 
     await act(async () => {
@@ -755,7 +990,9 @@ describe("GuideReaderPage position lifecycle", () => {
       pressKey(buttonNamed("搜索"), "Options");
     });
     await flushFrame();
-    await act(async () => buttonNamed("关闭").click());
+    await act(async () =>
+      pressKey(container!.querySelector('[aria-label="切换指南"]')!, "Escape"),
+    );
     await flushFrame();
     expect(document.activeElement).toBe(scroller);
 
@@ -1037,7 +1274,7 @@ describe("GuideReaderPage position lifecycle", () => {
       vi.advanceTimersByTime(1_800);
     });
     expect(selectedRange.current).toBeNull();
-    expect(resizeCallbacks).toHaveLength(1);
+    expect(resizeCallbacks).toHaveLength(2);
 
     searchLayoutShift = 500;
     notifyResize();
@@ -1047,32 +1284,32 @@ describe("GuideReaderPage position lifecycle", () => {
       '[data-guide-section-id="20"] img',
     );
     searchLayoutShift = 650;
-    image?.dispatchEvent(new Event("load"));
+    await act(async () => image?.dispatchEvent(new Event("load")));
     expect(scroller.scrollTop).toBe(4_602);
     searchLayoutShift = 700;
-    image?.dispatchEvent(new Event("error"));
+    await act(async () => image?.dispatchEvent(new Event("error")));
     expect(scroller.scrollTop).toBe(4_652);
 
     await act(async () => {
       vi.advanceTimersByTime(8_200);
     });
-    expect(resizeCallbacks).toHaveLength(0);
+    expect(resizeCallbacks).toHaveLength(1);
     searchLayoutShift = 900;
     notifyResize();
     expect(scroller.scrollTop).toBe(4_652);
 
     vi.mocked(window.getSelection).mockReturnValue(null);
     await act(async () => results[1]?.click());
-    expect(resizeCallbacks).toHaveLength(1);
+    expect(resizeCallbacks).toHaveLength(2);
     await act(async () => {
       vi.advanceTimersByTime(10_000);
     });
-    expect(resizeCallbacks).toHaveLength(0);
+    expect(resizeCallbacks).toHaveLength(1);
 
     await act(async () => results[0]?.click());
+    expect(resizeCallbacks).toHaveLength(2);
+    await act(async () => scroller.dispatchEvent(new Event("wheel")));
     expect(resizeCallbacks).toHaveLength(1);
-    scroller.dispatchEvent(new Event("wheel"));
-    expect(resizeCallbacks).toHaveLength(0);
 
     await act(async () => {
       const setValue = Object.getOwnPropertyDescriptor(

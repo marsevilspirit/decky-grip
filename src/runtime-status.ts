@@ -12,6 +12,7 @@ export interface GripRuntimeStatus {
   message: string;
   guideLibraryAppId: string | null;
   guideLibraryRevision: number;
+  downloadRevision: number;
   positionWarning: string | null;
   savedCount: number;
   activeGuide: GuideIdentity | null;
@@ -32,6 +33,7 @@ export class RuntimeStatusStore {
       message: "Connecting to Steam's guide reader…",
       guideLibraryAppId,
       guideLibraryRevision: 0,
+      downloadRevision: 0,
       positionWarning: null,
       savedCount: 0,
       activeGuide: null,
@@ -67,6 +69,10 @@ export class RuntimeStatusStore {
     this.update({
       guideLibraryRevision: this.snapshot.guideLibraryRevision + 1,
     });
+  }
+
+  refreshDownloads(): void {
+    this.update({ downloadRevision: this.snapshot.downloadRevision + 1 });
   }
 
   setGuideLibraryAppId(appId: string | null): void {

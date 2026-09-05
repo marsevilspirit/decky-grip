@@ -419,6 +419,9 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
         plugin = self.plugin()
         self.sidecar.responses["images.get"] = {"fromCache": True}
         self.sidecar.responses["images.download"] = True
+        self.sidecar.responses["guides.download_status"] = {
+            "state": "partial", "completed": 13, "total": 61
+        }
         self.sidecar.responses["guides.clear"] = {"filesRemoved": 1}
         self.sidecar.responses["guides.remove"] = {"filesRemoved": 1}
         self.sidecar.responses["images.clear"] = {"filesRemoved": 2}
@@ -435,6 +438,12 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
             )["fromCache"]
         )
         self.assertEqual((await plugin.clear_guide_cache())["filesRemoved"], 1)
+        self.assertEqual((await plugin.get_guide_download_status("1"))["state"], "partial")
+        self.sidecar.request.assert_any_call(
+            "guides.download_status",
+            {"guide_id": "1"},
+            timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
+        )
         self.assertTrue(await plugin.download_guide_image("https://images.steamusercontent.com/a.png"))
         self.sidecar.request.assert_any_call(
             "images.download",
