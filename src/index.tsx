@@ -141,6 +141,7 @@ export default definePlugin(() => {
       throw new Error("指南正文缓存正在清理，请稍后再试");
     }
     guideCacheMutationActive = true;
+    imageHydrator.cancelPreload();
     try {
       return await action();
     } finally {
@@ -196,7 +197,12 @@ export default definePlugin(() => {
       return;
     }
     const identity = resolveReaderIdentity(targetAppId);
-    if (!identity || readerCache.peek(identity)) {
+    if (
+      !identity ||
+      guideCacheMutationActive ||
+      imageCacheControl.getSnapshot().paused ||
+      isReaderRoute(currentMainPath())
+    ) {
       return;
     }
     const guideKey = makeGuideKey(identity);
@@ -206,9 +212,33 @@ export default definePlugin(() => {
     }
     lastPreloadKey = guideKey;
     lastPreloadAt = now;
-    void readerCache.preload(identity).catch((error: unknown) => {
-      console.warn("[GRIP] Could not preload the current guide", error);
-    });
+    const canContinue = () => {
+      const currentIdentity = resolveReaderIdentity(currentRunningAppId());
+      return (
+        mounted &&
+        currentRunningAppId() === targetAppId &&
+        !guideCacheMutationActive &&
+        !imageCacheControl.getSnapshot().paused &&
+        !isReaderRoute(currentMainPath()) &&
+        currentIdentity !== null &&
+        makeGuideKey(currentIdentity) === guideKey
+      );
+    };
+    void readerCache
+      .preload(identity)
+      .then((snapshot) => {
+        if (snapshot && canContinue()) {
+          return imageHydrator.preloadGuide(
+            snapshot.guide,
+            snapshot.position,
+            canContinue,
+          );
+        }
+        return undefined;
+      })
+      .catch((error: unknown) => {
+        console.warn("[GRIP] Could not preload the current guide", error);
+      });
   };
 
   const stopPreloading = status.subscribe(() =>
@@ -228,6 +258,7 @@ export default definePlugin(() => {
     hotkeyPress?: InstrumentedHotkeyPress,
     requestedIdentity?: GuideIdentity,
   ): Promise<void> => {
+    imageHydrator.cancelPreload();
     const openGeneration = ++readerOpenGeneration;
     const performanceTrace = hotkeyPress
       ? readerPerformance.begin(hotkeyPress)

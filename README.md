@@ -96,7 +96,8 @@ Python tests use only the standard library.
    Click a loaded image, or press **A** when a loaded image is visible and no
    failed image needs retrying, to view it full-screen. Use **L1 / R1** or the
    zoom buttons to change scale, and direction buttons or dragging to pan.
-   **B** returns to the unchanged reading position; the viewer reuses the local
+   Tall images initially fit the reading width and scroll vertically; **适应屏幕**
+   still shows the complete image. **B** returns to the unchanged reading position; the viewer reuses the local
    image without downloading it again.
    Choose **搜索** to find local
    guide titles, chapters, or body text, preview matching context, and step
@@ -115,6 +116,10 @@ The download action fetches the public guide; if you skip it, the first
 foreground reader open does the same. After that, GRIP preloads the most recent
 guide only when its validated local cache already exists, and keeps that document
 and reader position in memory for the lifetime of the plugin.
+Background preloading also prepares and decodes up to three local images near
+the saved text in its section and adjacent sections, using the same bounded
+image LRU. Foreground opens, game changes, cleanup and unload cancel stale
+warming. Legacy pixel-only bookmarks without a known section skip image warming.
 Background preloading never starts a network request. A cache older than six
 hours still opens immediately; use **更新** when you want to fetch the newest
 version. While downloading, that same button becomes **取消更新**, including

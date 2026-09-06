@@ -25,13 +25,15 @@ export function GuideImageViewer({
   const [scale, setScale] = useState(1);
   const [failed, setFailed] = useState(false);
   const previousScale = useRef<number | null>(null);
-  const fit = () => {
+  const fit = (initial = false) => {
     const view = viewport.current;
     if (!view) return;
     const fitted = Math.min(
       1,
       Math.max(1, view.clientWidth - 32) / image.width,
-      Math.max(1, view.clientHeight - 32) / image.height,
+      initial && image.height > image.width
+        ? 1
+        : Math.max(1, view.clientHeight - 32) / image.height,
     );
     previousScale.current = fitted === scale ? scale : null;
     setScale(fitted);
@@ -40,7 +42,7 @@ export function GuideImageViewer({
   const zoom = (factor: number) =>
     setScale((value) => Math.min(8, Math.max(0.01, value * factor)));
   useLayoutEffect(() => {
-    fit();
+    fit(true);
     viewport.current?.focus({ preventScroll: true });
   }, [image.src]);
   useLayoutEffect(() => {
@@ -204,7 +206,7 @@ export function GuideImageViewer({
         <Button onClick={() => zoom(1.5)} disabled={scale >= 8}>
           放大
         </Button>
-        <Button onClick={fit}>适应屏幕</Button>
+        <Button onClick={() => fit()}>适应屏幕</Button>
         <Button onClick={onClose}>返回正文</Button>
         <span style={{ opacity: 0.7, fontSize: 14 }}>
           方向键移动 · L1 / R1 缩放

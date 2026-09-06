@@ -1,3 +1,6 @@
+import { normalizeAnchorText } from "./anchor";
+import type { DownloadedGuide, ReaderPosition } from "./types";
+
 export interface CachedGuideImage {
   mimeType: string;
   base64: string;
@@ -41,6 +44,7 @@ const DEFAULT_CONCURRENCY = 3;
 const DEFAULT_MAX_BLOB_BYTES = 64 * 1024 * 1024;
 const DEFAULT_MAX_BLOB_ENTRIES = 64;
 const DEFAULT_MAX_PENDING_URLS = 48;
+const MAX_PRELOAD_IMAGES = 3;
 const ALLOWED_IMAGE_MIME_TYPES = new Set([
   "image/gif",
   "image/jpeg",
@@ -81,6 +85,66 @@ function residentImageBytes(image: CachedGuideImage): number {
   return Math.max(decodedBase64Bytes(image.base64), decodedBytes);
 }
 
+function nearbyImageUrls(
+  guide: DownloadedGuide,
+  position: ReaderPosition | null,
+): string[] {
+  const savedSection = guide.sections.findIndex(
+    (section) => section.id === position?.sectionId,
+  );
+  // A legacy pixel-only bookmark cannot identify nearby images without laying out the article.
+  if (savedSection < 0 && position?.scrollTop) return [];
+  const start = Math.max(0, savedSection);
+  const urls = new Set<string>();
+  const template = document.createElement("template");
+  for (const index of [start, start + 1, start - 1]) {
+    const section = guide.sections[index];
+    if (!section) continue;
+    template.innerHTML = section.html;
+    let images = [
+      ...template.content.querySelectorAll<HTMLImageElement>(
+        "img[data-grip-image-url]",
+      ),
+    ];
+    if (index === start && position?.anchorText) {
+      const walker = document.createTreeWalker(
+        template.content,
+        NodeFilter.SHOW_TEXT,
+      );
+      let anchor: Node | null;
+      while ((anchor = walker.nextNode())) {
+        if (
+          normalizeAnchorText(anchor.textContent ?? "").startsWith(
+            position.anchorText,
+          )
+        ) {
+          const after = images.findIndex((image) =>
+            Boolean(
+              anchor!.compareDocumentPosition(image) &
+              Node.DOCUMENT_POSITION_FOLLOWING,
+            ),
+          );
+          images =
+            after < 0
+              ? images.slice(-1)
+              : [
+                  images[after],
+                  images[after - 1],
+                  ...images.slice(after + 1),
+                ].filter((image): image is HTMLImageElement => Boolean(image));
+          break;
+        }
+      }
+    }
+    for (const image of images) {
+      const url = image.dataset.gripImageUrl;
+      if (url) urls.add(url);
+      if (urls.size >= MAX_PRELOAD_IMAGES) return [...urls];
+    }
+  }
+  return [...urls];
+}
+
 /**
  * Resolves only caller-selected inert image nodes through the backend cache.
  * Requests and Blob URLs are shared per canonical URL, while a frontend LRU
@@ -99,6 +163,8 @@ export class ReaderImageHydrator {
   private generation = 0;
   private pinGeneration = 0;
   private pinningActive = false;
+  private preloadToken: object | null = null;
+  private preloadOperation: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly fetchImage: GuideImageFetcher,
@@ -120,6 +186,69 @@ export class ReaderImageHydrator {
         throw new TypeError(`${label} must be a positive integer`);
       }
     }
+  }
+
+  cancelPreload(): void {
+    this.preloadToken = null;
+  }
+
+  /** Warm only local images near the bookmark, sharing the reader's existing LRU and RPC slots. */
+  preloadGuide(
+    guide: DownloadedGuide,
+    position: ReaderPosition | null,
+    canContinue: () => boolean,
+  ): Promise<void> {
+    const token = {};
+    this.preloadToken = token;
+    const current = () =>
+      this.preloadToken === token && !this.pinningActive && canContinue();
+    const operation = this.preloadOperation.then(async () => {
+      if (!current() || this.active > 0) return;
+      const warmed = new Set<string>();
+      for (const url of nearbyImageUrls(guide, position)) {
+        if (!current()) return;
+        if (this.blobs.has(url)) {
+          warmed.add(url);
+          continue;
+        }
+        this.active += 1;
+        try {
+          const result = await this.fetchImage(url, false);
+          if (!current()) return;
+          if (!result) continue;
+          const bytes = residentImageBytes(result);
+          if (bytes > this.maxBlobBytes || !this.evictToFit(bytes, warmed))
+            continue;
+          const blob: BlobEntry = {
+            bytes,
+            images: new Set(),
+            objectUrl: this.makeObjectUrl(result),
+            width: result.width,
+            height: result.height,
+          };
+          this.blobs.set(url, blob);
+          this.blobBytes += bytes;
+          warmed.add(url);
+          const image = new Image();
+          image.src = blob.objectUrl;
+          try {
+            await image.decode();
+          } catch {
+            if (this.blobs.get(url) === blob) {
+              this.blobs.delete(url);
+              this.evictBlob(url, blob);
+            }
+          } finally {
+            image.removeAttribute("src");
+          }
+        } finally {
+          this.active -= 1;
+          this.pump();
+        }
+      }
+    });
+    this.preloadOperation = operation.catch(() => {});
+    return operation;
   }
 
   /** Pins the current near-viewport working set so LRU eviction cannot thrash it. */
@@ -145,7 +274,7 @@ export class ReaderImageHydrator {
     this.pruneUnpinnedQueue();
   }
 
-  hydrateImages(images: Iterable<HydratableImage>): void {
+  hydrateImages(images: Iterable<HydratableImage>, residentOnly = false): void {
     for (const image of images) {
       this.pendingOverflow.delete(image);
       const url = image.dataset.gripImageUrl;
@@ -166,6 +295,7 @@ export class ReaderImageHydrator {
         this.assignBlob(image, url, blob);
         continue;
       }
+      if (residentOnly) continue;
 
       const pending = this.pendingByUrl.get(url);
       if (pending) {
@@ -191,7 +321,7 @@ export class ReaderImageHydrator {
       image.dataset.gripImageState = "queued";
       this.queue.push(task);
     }
-    this.pump();
+    if (!residentOnly) this.pump();
   }
 
   retryImage(image: HydratableImage): void {
@@ -218,6 +348,7 @@ export class ReaderImageHydrator {
 
   /** Detach the old page while retaining the bounded warm image cache. */
   releaseImages(): void {
+    this.cancelPreload();
     this.generation += 1;
     this.queue.length = 0;
     for (const task of this.pendingByUrl.values()) {
@@ -372,13 +503,16 @@ export class ReaderImageHydrator {
     this.blobs.set(url, blob);
   }
 
-  private evictToFit(incomingBytes: number): boolean {
+  private evictToFit(
+    incomingBytes: number,
+    protectedUrls = this.pinnedUrls,
+  ): boolean {
     while (
       this.blobs.size >= this.maxBlobEntries ||
       this.blobBytes + incomingBytes > this.maxBlobBytes
     ) {
       const oldest = [...this.blobs.entries()].find(
-        ([url]) => !this.pinningActive || !this.pinnedUrls.has(url),
+        ([url]) => !protectedUrls.has(url),
       );
       if (!oldest) {
         return false;

@@ -1,9 +1,49 @@
-import { describe, expect, it, vi } from "vitest";
+// @vitest-environment happy-dom
+
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   ReaderImageHydrator,
   type CachedGuideImage,
+  type GuideImageFetcher,
 } from "../../src/reader/image-hydrator";
+import type { DownloadedGuide, ReaderPosition } from "../../src/reader/types";
+
+afterEach(() => vi.restoreAllMocks());
+
+const preloadGuide: DownloadedGuide = {
+  guideId: "1",
+  title: "Guide",
+  author: "",
+  sourceUrl: "",
+  fetchedAt: 1,
+  fromCache: true,
+  stale: false,
+  sections: [
+    {
+      id: "first",
+      title: "First",
+      html: '<img data-grip-image-url="https://a/first">',
+    },
+    {
+      id: "saved",
+      title: "Saved",
+      html: '<img data-grip-image-url="https://a/far"><img data-grip-image-url="https://a/before"><p>Saved text</p><img data-grip-image-url="https://a/after"><img data-grip-image-url="https://a/after"><img data-grip-image-url="https://a/next"><img data-grip-image-url="https://a/later">',
+    },
+    {
+      id: "last",
+      title: "Last",
+      html: '<img data-grip-image-url="https://a/last">',
+    },
+  ],
+};
+const preloadPosition: ReaderPosition = {
+  sectionId: "saved",
+  anchorText: "Saved text",
+  scrollTop: 1000,
+  anchorOffset: 10,
+  updatedAt: 1,
+};
 
 function image(url: string) {
   const candidate = {
@@ -30,6 +70,104 @@ const cached: CachedGuideImage = {
 };
 
 describe("reader image hydration", () => {
+  it("preloads and decodes only three local images near the saved text, ready for the first open", async () => {
+    const decode = vi
+      .spyOn(HTMLImageElement.prototype, "decode")
+      .mockResolvedValue();
+    const fetch = vi.fn(async () => cached);
+    let blob = 0;
+    const hydrator = new ReaderImageHydrator(
+      fetch,
+      3,
+      () => `blob:${++blob}`,
+      vi.fn(),
+    );
+    await hydrator.preloadGuide(preloadGuide, preloadPosition, () => true);
+    expect(fetch.mock.calls).toEqual([
+      ["https://a/after", false],
+      ["https://a/before", false],
+      ["https://a/next", false],
+    ]);
+    expect(decode).toHaveBeenCalledTimes(3);
+    hydrator.releaseImages();
+    const visible = image("https://a/after");
+    const far = image("https://a/far");
+    hydrator.hydrateImages([visible, far], true);
+    expect(visible.src).toBe("blob:1");
+    expect(far.src).toBe("");
+    expect(fetch).toHaveBeenCalledTimes(3);
+    hydrator.setPinnedImages([visible]);
+    hydrator.hydrateImages([visible]);
+    expect(visible.src).toBe("blob:1");
+    expect(fetch).toHaveBeenCalledTimes(3);
+    await hydrator.preloadGuide(preloadGuide, null, () => true);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    hydrator.clear();
+  });
+
+  it("keeps the same byte limit and protects the nearest preloaded image from later preloads", async () => {
+    vi.spyOn(HTMLImageElement.prototype, "decode").mockResolvedValue();
+    const fetch = vi.fn(async () => cached);
+    const revoke = vi.fn();
+    let blob = 0;
+    const hydrator = new ReaderImageHydrator(
+      fetch,
+      1,
+      () => `blob:${++blob}`,
+      revoke,
+      6,
+      1,
+    );
+    const old = image("https://a/old");
+    hydrator.hydrateImages([old]);
+    await vi.waitFor(() => expect(old.src).toBe("blob:1"));
+    hydrator.releaseImages();
+    await hydrator.preloadGuide(preloadGuide, preloadPosition, () => true);
+    expect(revoke).toHaveBeenCalledWith("blob:1");
+    expect(blob).toBe(2);
+    const visible = image("https://a/after");
+    hydrator.hydrateImages([visible]);
+    expect(visible.src).toBe("blob:2");
+    hydrator.clear();
+    expect(visible.src).toBe("");
+  });
+
+  it("discards late local preloads on cleanup and does not touch the network for missing images", async () => {
+    const makeBlob = vi.fn(() => "blob:late");
+    let release!: (value: CachedGuideImage | null) => void;
+    const fetch = vi.fn<GuideImageFetcher>(
+      () =>
+        new Promise<CachedGuideImage | null>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const hydrator = new ReaderImageHydrator(fetch, 3, makeBlob, vi.fn());
+    const pending = hydrator.preloadGuide(
+      preloadGuide,
+      preloadPosition,
+      () => true,
+    );
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    hydrator.clear();
+    release(cached);
+    await pending;
+    expect(makeBlob).not.toHaveBeenCalled();
+    fetch.mockResolvedValue(null);
+    await hydrator.preloadGuide(preloadGuide, preloadPosition, () => true);
+    expect(
+      fetch.mock.calls.every(([, allowDownload]) => allowDownload === false),
+    ).toBe(true);
+    expect(makeBlob).not.toHaveBeenCalled();
+    fetch.mockClear();
+    await hydrator.preloadGuide(preloadGuide, preloadPosition, () => false);
+    await hydrator.preloadGuide(
+      preloadGuide,
+      { ...preloadPosition, sectionId: null },
+      () => true,
+    );
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("reuses bounded warm blobs across page lifetimes without retaining old nodes", async () => {
     const fetchImage = vi.fn(async () => cached);
     const revoke = vi.fn();

@@ -887,84 +887,105 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(scroller.scrollTop).toBe(650);
   });
 
-  it("opens an image fullscreen, zooms and pans it, then returns to the untouched reading position", async () => {
-    const guide = guideFixture();
-    guide.sections = [
-      {
-        id: "1",
-        title: "地图",
-        html: '<p>地图位置</p><img alt="攻略地图" data-grip-image-url="https://images.steamusercontent.com/map.png">',
-      },
-    ];
-    const backend: ReaderSessionBackend = {
-      getCachedGuide: async () => guide,
-      getGuide: async () => guide,
-      getReaderPosition: async () => null,
-      saveReaderPosition: async (
-        _key,
-        scrollTop,
-        sectionId,
-        anchorText,
-        anchorOffset,
-      ) => ({ scrollTop, sectionId, anchorText, anchorOffset, updatedAt: 2 }),
-    };
-    const cache = new ReaderSessionCache(backend);
-    await cache.load(identity);
-    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:map");
-    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
-    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(800);
-    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(600);
-    const fetchImage = vi.fn(async () => ({
-      mimeType: "image/png",
-      base64: "AQID",
-      fromCache: true,
-      width: 2000,
-      height: 1000,
-    }));
-    const close = vi.fn();
-    const scroller = await mount(cache, fetchImage, 3000, { onClose: close });
-    await act(async () => vi.advanceTimersByTimeAsync(0));
-    const original = scroller.querySelector("img")!;
-    original.getBoundingClientRect = () =>
-      ({ top: 100, bottom: 400 }) as DOMRect;
-    await act(async () => {
-      scroller.scrollTop = 234;
-      scroller.dispatchEvent(new Event("scroll"));
-      original.click();
-    });
-    const viewer = container!.querySelector<HTMLElement>(
-      '[aria-label="图片全屏查看"]',
-    )!;
-    expect(viewer).not.toBeNull();
-    expect(scroller.parentElement?.inert).toBe(true);
-    const enlarged = viewer.querySelector("img")!;
-    expect(enlarged.src).toBe(original.src);
-    const width = parseFloat(enlarged.style.width);
-    await act(async () => buttonNamed("放大").click());
-    expect(parseFloat(enlarged.style.width)).toBeGreaterThan(width);
-    const view = viewer.querySelector<HTMLElement>(
-      '[aria-label="图片移动区域"]',
-    )!;
-    expect(view.scrollLeft).toBeCloseTo(
-      (parseFloat(enlarged.style.width) - 800) / 2,
-    );
-    const left = view.scrollLeft;
-    await act(async () => pressKey(view, "ArrowRight"));
-    expect(view.scrollLeft).toBeGreaterThan(left);
-    await act(async () => pressKey(view, "Escape"));
-    await flushFrame();
-    expect(container!.querySelector('[aria-label="图片全屏查看"]')).toBeNull();
-    expect(document.activeElement).toBe(scroller);
-    expect(scroller.scrollTop).toBe(234);
-    expect(scroller.querySelector("img")).toBe(original);
-    expect(close).not.toHaveBeenCalled();
-    expect(fetchImage).toHaveBeenCalledOnce();
-    expect(scroller.getAttribute("data-ok-action")).toBe("查看图片");
-    await act(async () => pressKey(scroller, "Enter"));
-    expect(
-      container!.querySelector('[aria-label="图片全屏查看"]'),
-    ).not.toBeNull();
-  });
+  it.each([1000, 6000])(
+    "opens a %i-pixel-high image at a readable width, zooms and pans, then returns to the untouched position",
+    async (height) => {
+      const guide = guideFixture();
+      guide.sections = [
+        {
+          id: "1",
+          title: "地图",
+          html: '<p>地图位置</p><img alt="攻略地图" data-grip-image-url="https://images.steamusercontent.com/map.png">',
+        },
+      ];
+      const backend: ReaderSessionBackend = {
+        getCachedGuide: async () => guide,
+        getGuide: async () => guide,
+        getReaderPosition: async () => null,
+        saveReaderPosition: async (
+          _key,
+          scrollTop,
+          sectionId,
+          anchorText,
+          anchorOffset,
+        ) => ({ scrollTop, sectionId, anchorText, anchorOffset, updatedAt: 2 }),
+      };
+      const cache = new ReaderSessionCache(backend);
+      await cache.load(identity);
+      vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:map");
+      vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+      vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(
+        800,
+      );
+      vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(
+        600,
+      );
+      const fetchImage = vi.fn(async () => ({
+        mimeType: "image/png",
+        base64: "AQID",
+        fromCache: true,
+        width: 2000,
+        height,
+      }));
+      const close = vi.fn();
+      const scroller = await mount(cache, fetchImage, 3000, { onClose: close });
+      await act(async () => vi.advanceTimersByTimeAsync(0));
+      const original = scroller.querySelector("img")!;
+      original.getBoundingClientRect = () =>
+        ({ top: 100, bottom: 400 }) as DOMRect;
+      await act(async () => {
+        scroller.scrollTop = 234;
+        scroller.dispatchEvent(new Event("scroll"));
+        original.click();
+      });
+      const viewer = container!.querySelector<HTMLElement>(
+        '[aria-label="图片全屏查看"]',
+      )!;
+      expect(viewer).not.toBeNull();
+      expect(scroller.parentElement?.inert).toBe(true);
+      const enlarged = viewer.querySelector("img")!;
+      expect(enlarged.src).toBe(original.src);
+      const width = parseFloat(enlarged.style.width);
+      expect(width).toBe(768);
+      expect(parseFloat(enlarged.style.height)).toBe((height * 768) / 2000);
+      if (height > 2000) {
+        await act(async () => buttonNamed("适应屏幕").click());
+        expect(parseFloat(enlarged.style.height)).toBeCloseTo(568);
+        // Reopening a long image starts at readable width again.
+        await act(async () => buttonNamed("返回正文").click());
+        await act(async () => original.click());
+      }
+      const activeImage = container!.querySelector<HTMLImageElement>(
+        '[aria-label="图片全屏查看"] img',
+      )!;
+      await act(async () => buttonNamed("放大").click());
+      expect(parseFloat(activeImage.style.width)).toBeGreaterThan(width);
+      const view = container!.querySelector<HTMLElement>(
+        '[aria-label="图片移动区域"]',
+      )!;
+      expect(view.scrollLeft).toBeCloseTo(
+        (parseFloat(activeImage.style.width) - 800) / 2,
+      );
+      const left = view.scrollLeft;
+      await act(async () => pressKey(view, "ArrowRight"));
+      expect(view.scrollLeft).toBeGreaterThan(left);
+      await act(async () => pressKey(view, "Escape"));
+      await flushFrame();
+      expect(
+        container!.querySelector('[aria-label="图片全屏查看"]'),
+      ).toBeNull();
+      expect(document.activeElement).toBe(scroller);
+      expect(scroller.scrollTop).toBe(234);
+      expect(scroller.querySelector("img")).toBe(original);
+      expect(close).not.toHaveBeenCalled();
+      expect(fetchImage).toHaveBeenCalledOnce();
+      expect(scroller.getAttribute("data-ok-action")).toBe("查看图片");
+      await act(async () => pressKey(scroller, "Enter"));
+      expect(
+        container!.querySelector('[aria-label="图片全屏查看"]'),
+      ).not.toBeNull();
+    },
+  );
 
   it("requires a named confirmation for single-guide deletion and preserves the active article", async () => {
     const guide = guideFixture();

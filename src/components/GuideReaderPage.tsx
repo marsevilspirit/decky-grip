@@ -977,6 +977,11 @@ export function GuideReaderPage({
       newlyMountedImages.push(...images);
     }
 
+    // Known dimensions must be applied before observing the inert placeholders,
+    // otherwise collapsed images below the viewport look visible on first open.
+    if (!imageCachePausedRef.current) {
+      imageHydrator.hydrateImages(newlyMountedImages, true);
+    }
     if (!observer) {
       for (const image of newlyMountedImages) {
         nearImagesRef.current.add(image);
@@ -988,7 +993,7 @@ export function GuideReaderPage({
       pendingObservedImagesRef.current.add(image);
       observer.observe(image);
     }
-  }, [hydrateNearImages, loaded?.guide, renderedSectionCount]);
+  }, [hydrateNearImages, imageHydrator, loaded?.guide, renderedSectionCount]);
 
   useLayoutEffect(() => {
     if (!identity || !loaded) {
