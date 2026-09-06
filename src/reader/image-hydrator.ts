@@ -216,19 +216,30 @@ export class ReaderImageHydrator {
     this.hydrateImages(images);
   }
 
-  clear(): void {
+  /** Detach the old page while retaining the bounded warm image cache. */
+  releaseImages(): void {
     this.generation += 1;
     this.queue.length = 0;
+    for (const task of this.pendingByUrl.values()) {
+      task.images.clear();
+    }
     this.pendingByUrl.clear();
     this.pendingOverflow.clear();
     this.pinnedUrls.clear();
     this.pinGeneration += 1;
     this.pinningActive = false;
+    for (const blob of this.blobs.values()) {
+      blob.images.clear();
+    }
+  }
+
+  clear(): void {
     for (const [url, blob] of this.blobs) {
       this.evictBlob(url, blob);
     }
     this.blobs.clear();
     this.blobBytes = 0;
+    this.releaseImages();
   }
 
   private pump(): void {

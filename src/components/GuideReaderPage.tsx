@@ -30,10 +30,7 @@ import {
   ReaderCheckpoint,
   readerRestoreCanSettle,
 } from "../reader/checkpoint";
-import {
-  ReaderImageHydrator,
-  type GuideImageFetcher,
-} from "../reader/image-hydrator";
+import type { ReaderImageHydrator } from "../reader/image-hydrator";
 import type { ReaderImageCacheControl } from "../reader/image-cache-control";
 import type { ReaderPerformanceTracker } from "../reader/performance";
 import {
@@ -159,7 +156,7 @@ function readIdentity(
 export interface GuideReaderPageProps {
   cache: ReaderSessionCache;
   downloads?: GuideDownloadTasks;
-  fetchImage: GuideImageFetcher;
+  imageHydrator: ReaderImageHydrator;
   imageCacheControl: ReaderImageCacheControl;
   loadGuideLibrary: (appId: string) => Promise<GuideLibraryEntry[]>;
   onClose: () => void;
@@ -179,7 +176,7 @@ const noDownloadSubscription = () => () => {};
 export function GuideReaderPage({
   cache,
   downloads,
-  fetchImage,
+  imageHydrator,
   imageCacheControl,
   loadGuideLibrary,
   onClose,
@@ -289,7 +286,6 @@ export function GuideReaderPage({
   > | null>(null);
   const guideSearchAlignmentStopRef = useRef<(() => void) | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [imageHydrator] = useState(() => new ReaderImageHydrator(fetchImage));
   const [checkpoint] = useState(() => new ReaderCheckpoint());
   const imageCachePausedRef = useRef(imageCacheControl.getSnapshot().paused);
   const imageObserverRef = useRef<IntersectionObserver | null>(null);
@@ -458,6 +454,7 @@ export function GuideReaderPage({
   }, [identity?.appId, identity?.guideId, performance]);
 
   const hydrateNearImages = useCallback(() => {
+    if (!contentRef.current) return;
     const connected = [...nearImagesRef.current].filter(
       (image) => image.isConnected,
     );
@@ -484,7 +481,6 @@ export function GuideReaderPage({
     return () => {
       unsubscribe();
       imageObserverRef.current?.disconnect();
-      imageHydrator.clear();
     };
   }, [hydrateNearImages, imageCacheControl, imageHydrator]);
 
@@ -913,13 +909,13 @@ export function GuideReaderPage({
     observedImageCountRef.current = 0;
     nearImagesRef.current.clear();
     pendingObservedImagesRef.current.clear();
-    imageHydrator.clear();
+    imageHydrator.releaseImages();
     if (!guide || !content || !scroller) {
       return;
     }
 
     if (typeof IntersectionObserver === "undefined") {
-      return;
+      return () => imageHydrator.releaseImages();
     }
     const observer = new IntersectionObserver(
       (entries) => {
@@ -947,7 +943,7 @@ export function GuideReaderPage({
       observedImageCountRef.current = 0;
       nearImagesRef.current.clear();
       pendingObservedImagesRef.current.clear();
-      imageHydrator.clear();
+      imageHydrator.releaseImages();
     };
   }, [hydrateNearImages, imageHydrator, loaded?.guide]);
 

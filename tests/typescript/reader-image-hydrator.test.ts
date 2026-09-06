@@ -30,6 +30,73 @@ const cached: CachedGuideImage = {
 };
 
 describe("reader image hydration", () => {
+  it("reuses bounded warm blobs across page lifetimes without retaining old nodes", async () => {
+    const fetchImage = vi.fn(async () => cached);
+    const revoke = vi.fn();
+    let nextBlob = 0;
+    const hydrator = new ReaderImageHydrator(
+      fetchImage,
+      1,
+      () => `blob:${++nextBlob}`,
+      revoke,
+      6,
+      1,
+    );
+    const first = image("https://a/warm");
+    hydrator.setPinnedImages([first]);
+    hydrator.hydrateImages([first]);
+    await vi.waitFor(() => expect(first.src).toBe("blob:1"));
+    for (let reopen = 0; reopen < 20; reopen += 1) {
+      hydrator.releaseImages();
+      const next = image("https://a/warm");
+      hydrator.setPinnedImages([next]);
+      hydrator.hydrateImages([next]);
+      expect(next.src).toBe("blob:1");
+    }
+    expect(fetchImage).toHaveBeenCalledOnce();
+    expect(revoke).not.toHaveBeenCalled();
+    hydrator.releaseImages();
+    const other = image("https://a/other");
+    hydrator.hydrateImages([other]);
+    await vi.waitFor(() => expect(other.src).toBe("blob:2"));
+    expect(revoke).toHaveBeenCalledWith("blob:1");
+    expect(first.src).toBe("blob:1");
+    hydrator.clear();
+    expect(other.src).toBe("");
+    expect(revoke).toHaveBeenCalledWith("blob:2");
+  });
+
+  it("drops a closed page's in-flight result without losing the next page's request", async () => {
+    let release!: (result: CachedGuideImage) => void;
+    const fetchImage = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<CachedGuideImage>((resolve) => {
+            release = resolve;
+          }),
+      )
+      .mockResolvedValue(cached);
+    const makeObjectUrl = vi.fn(() => "blob:new-page");
+    const hydrator = new ReaderImageHydrator(
+      fetchImage,
+      1,
+      makeObjectUrl,
+      vi.fn(),
+    );
+    const old = image("https://a/pending");
+    hydrator.hydrateImages([old]);
+    hydrator.releaseImages();
+    const next = image("https://a/pending");
+    hydrator.hydrateImages([next]);
+    expect(fetchImage).toHaveBeenCalledOnce();
+    release(cached);
+    await vi.waitFor(() => expect(next.src).toBe("blob:new-page"));
+    expect(fetchImage).toHaveBeenCalledTimes(2);
+    expect(makeObjectUrl).toHaveBeenCalledOnce();
+    expect(old.src).toBe("");
+  });
+
   it("retries only the failed URL, guards double presses and replaces failed decode blobs", async () => {
     const failed = image("https://a/failed");
     const healthy = image("https://a/healthy");

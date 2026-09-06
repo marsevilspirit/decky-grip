@@ -2,9 +2,10 @@
 
 ## Scope and build
 
-This run covers orphan-image reclamation, canceling a reader update, and
-reader latency/recovery. The tested working tree starts at `5841e64`; the
-changes are not committed. No new dependency was added.
+The initial run covers orphan-image reclamation, canceling a reader update, and
+reader latency/recovery. Its tested working tree started at `5841e64`; the
+changes were uncommitted at that time. No new dependency was added. The later
+warm-image follow-up is recorded separately below.
 
 `pnpm run check` passed: formatting, TypeScript, 197 frontend tests, the Python
 suite (one skipped test), the real Rust bridge integration check, 95 Rust tests,
@@ -127,3 +128,72 @@ the sections, decoding near-viewport images, and a 100 ms stable-layout check,
 not just the first text frame. Those safety checks were not weakened to make
 this measurement pass. Further work on the 300 ms full-restoration target remains
 a performance follow-up, not a claimed result of this acceptance run.
+
+## Warm-image follow-up — 17:41 Asia/Shanghai
+
+The follow-up starts at `e433da9` with an uncommitted frontend change. Closing
+the reader previously revoked every image Blob URL, forcing another image RPC,
+base64 conversion and new browser image resource on each reopen. The plugin now
+reuses its existing 64 MiB / 64-entry image LRU across reader lifetimes. Closing
+releases old DOM references and invalidates pending hydration; explicit image
+cleanup and plugin unload still revoke the retained URLs. No dependency or
+additional cache layer was added.
+
+`pnpm run check` passed again, now with 200 frontend tests and the same 95 Rust
+tests, Python/real-bridge checks, formatting, TypeScript, Clippy and build. New
+regressions cover warm reuse over 20 page lifetimes, capacity eviction, explicit
+cleanup, stale in-flight responses, and a real React reader unmount/remount.
+The current sidecar was rebuilt through the Holo toolchain before packaging.
+
+| Artifact                              | SHA-256                                                            |
+| ------------------------------------- | ------------------------------------------------------------------ |
+| `decky-grip-20260906-warm-images.zip` | `b455d2494c761cf73a66b5fd37561ffad178c14dd25f870a0da2421f53074b3b` |
+| Installed `dist/index.js`             | `b02ac374b94b5448c09d4e78d0850493560981ce0280e13403246b465f34fec7` |
+| Installed `bin/grip-sidecar`          | `bfff47b7a3f18069fa20d6329747d3662e36ca60e716056771f0ee449c0ebe01` |
+
+Local/uploaded ZIP integrity and hashes matched. Decky's native installer
+completed at 17:41. File watching caused an initial reload and a five-second
+stop-timeout warning; the final Python/sidecar pair (`120982` / `120983`) was
+healthy at both 17:41:17 and 17:42:05. No further errors appeared in the inspected
+Loader interval. RPC reported a running L4 listener, five cached guide files and
+105 image files. Both saved-position file hashes were unchanged across the
+installation, before subsequent reading tests.
+
+Rollback backup, containing plugin and settings:
+`/home/deck/.local/share/grip-deployment-backups/before-warm-images-mXt1aA.tar.gz`.
+
+### Controlled device comparison
+
+The same guide (`1113000:2142283577`) and normal reader actions were exercised
+before and after installation. The probe observed the existing
+`markPositionSettled` callback without altering it. Both runs retained section
+mounting, image completion and the original 100 ms stable-layout requirement.
+These remain software-action measurements inside the actual Deck renderer,
+not physical L4-to-screen samples.
+
+| Measurement                       | Before, 6 warm opens | After, 20 warm opens |
+| --------------------------------- | -------------------: | -------------------: |
+| First content frame range         |        83.7–102.5 ms |        57.7–109.7 ms |
+| Complete restoration range        |       456.2–648.3 ms |       191.9–282.3 ms |
+| Complete restoration P95          |             648.3 ms |             249.4 ms |
+| Distinct first-image Blob URLs    |                    6 |                    1 |
+| Restored position in every sample |    29.33333396911621 |    29.33333396911621 |
+
+Every sample reported `restored`; the first image was complete with natural
+width 2741. The final screenshot visibly contained the expected guide image.
+After 20 reopens the retained cache held three images, estimated at 52,946,556
+decoded bytes, below the unchanged 64 MiB limit.
+
+The 20 post-install restoration times were, in milliseconds:
+`225.4, 246.9, 245.2, 236.2, 244.8, 249.4, 231.6, 232.4, 247.4, 209.7,
+212.1, 217.4, 201.0, 212.9, 221.5, 216.4, 282.3, 202.9, 191.9, 194.2`.
+Raw local probe results and screenshots are under
+`/private/tmp/grip-warm-images.Y0qj79/` (`before.json`, `after.json`).
+
+The software-action P95 is below 300 ms, but the physical-input gate is still
+pending. Plugin reload naturally starts a new tracker window; the previous
+eight physical attempts and their failures remain documented above. The probe
+did not generate hardware events or change this new window: it showed zero
+physical attempts both before and after the software series. New-version
+in-game L4/Y acceptance has been requested from the user. This follow-up did
+not repeat the disruptive Wi-Fi-off or suspend checks from the initial run.

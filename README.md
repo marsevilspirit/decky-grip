@@ -194,7 +194,11 @@ images continue. Quota or device-space failures stop scheduling new images
 immediately; already in-flight requests finish, and the old body is not replaced.
 The reader still loads only images near the viewport
 and keeps at most 64 MiB / 64 entries of estimated decoded
-frontend image residency. Animated image payloads are rejected, and the reader
+frontend image residency. The reader reuses this bounded image cache across
+reader opens and guide switches. Closing
+the reader releases its page nodes and cancels pending hydration; explicit image
+cache cleanup and plugin unload also release the retained Blob URLs.
+Animated image payloads are rejected, and the reader
 observes at most 512 inert image nodes while staging no more than 48 distinct
 image URLs at once. Under **高级选项**, the panel shows cache usage and provides
 separate controls for clearing all guide bodies or images. To remove one guide,

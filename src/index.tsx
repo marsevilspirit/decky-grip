@@ -44,6 +44,7 @@ import {
   resolveGuideForReaderOpen,
 } from "./reader/recent-guide";
 import { ReaderImageCacheControl } from "./reader/image-cache-control";
+import { ReaderImageHydrator } from "./reader/image-hydrator";
 import {
   downloadOfflineGuide,
   GuideDownloadTasks,
@@ -100,6 +101,7 @@ export default definePlugin(() => {
   const status = new RuntimeStatusStore(currentRunningAppId() ?? null);
   const readerPerformance = new ReaderPerformanceTracker();
   const imageCacheControl = new ReaderImageCacheControl();
+  const imageHydrator = new ReaderImageHydrator(getGuideImage);
   let guideCacheMutationActive = false;
   let imageCacheMutationActive = false;
   let activeGuideDownloads = 0;
@@ -433,6 +435,7 @@ export default definePlugin(() => {
       throw new Error("指南正在下载，完成后才能清理图片");
     }
     const token = imageCacheControl.beginClear();
+    imageHydrator.clear();
     imageCacheMutationActive = true;
     try {
       const result = await clearImageCache();
@@ -471,7 +474,7 @@ export default definePlugin(() => {
       <GuideReaderPage
         cache={readerCache}
         downloads={downloads}
-        fetchImage={getGuideImage}
+        imageHydrator={imageHydrator}
         imageCacheControl={imageCacheControl}
         key={`${params.appId ?? ""}:${params.guideId ?? ""}`}
         loadGuideLibrary={getGuideLibrary}
@@ -611,6 +614,7 @@ export default definePlugin(() => {
       }
       controller.stop();
       routerHook.removeRoute(READER_ROUTE);
+      imageHydrator.clear();
       console.info("[GRIP] Unloaded");
     },
   };

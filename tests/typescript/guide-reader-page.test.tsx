@@ -17,7 +17,10 @@ import {
   GuideDownloadTasks,
   type GuideImageDownloadProgress,
 } from "../../src/reader/download";
-import type { GuideImageFetcher } from "../../src/reader/image-hydrator";
+import {
+  ReaderImageHydrator,
+  type GuideImageFetcher,
+} from "../../src/reader/image-hydrator";
 import { ReaderPerformanceTracker } from "../../src/reader/performance";
 import {
   ReaderSessionCache,
@@ -319,6 +322,7 @@ describe("GuideReaderPage position lifecycle", () => {
     fetchImage: GuideImageFetcher,
     scrollHeight: number,
     options: {
+      imageHydrator?: ReaderImageHydrator;
       downloads?: GuideDownloadTasks;
       loadGuideLibrary?: (appId: string) => Promise<GuideLibraryEntry[]>;
       onClose?: () => void;
@@ -338,7 +342,9 @@ describe("GuideReaderPage position lifecycle", () => {
           }
           cache={cache}
           downloads={options.downloads}
-          fetchImage={fetchImage}
+          imageHydrator={
+            options.imageHydrator ?? new ReaderImageHydrator(fetchImage)
+          }
           imageCacheControl={new ReaderImageCacheControl()}
           loadGuideLibrary={options.loadGuideLibrary ?? (async () => [])}
           onClose={options.onClose ?? (() => undefined)}
@@ -408,6 +414,49 @@ describe("GuideReaderPage position lifecycle", () => {
     element.dispatchEvent(event);
     return event;
   };
+
+  it("reuses image URLs when the reader closes and reopens with its shared hydrator", async () => {
+    const guide = {
+      ...guideFixture(),
+      sections: [guideFixture().sections[19]],
+    };
+    const cache = new ReaderSessionCache({
+      getCachedGuide: async () => guide,
+      getGuide: async () => guide,
+      getReaderPosition: async () => null,
+      saveReaderPosition: async () => savedPosition,
+    });
+    await cache.load(identity);
+    const fetchImage = vi.fn(async () => ({
+      mimeType: "image/png",
+      base64: "aW1hZ2U=",
+      fromCache: true,
+      width: 1,
+      height: 1,
+    }));
+    const revoke = vi.fn();
+    const imageHydrator = new ReaderImageHydrator(
+      fetchImage,
+      1,
+      () => "blob:warm",
+      revoke,
+    );
+    const first = await mount(cache, fetchImage, 3000, { imageHydrator });
+    await flushMicrotasks();
+    const oldImage = first.querySelector("img")!;
+    expect(oldImage.src).toBe("blob:warm");
+    await unmount();
+    expect(oldImage.isConnected).toBe(false);
+    expect(revoke).not.toHaveBeenCalled();
+    const next = await mount(cache, fetchImage, 3000, { imageHydrator });
+    await flushFrame();
+    expect(next.querySelector("img")).not.toBe(oldImage);
+    expect(next.querySelector("img")?.src).toBe("blob:warm");
+    expect(fetchImage).toHaveBeenCalledOnce();
+    imageHydrator.clear();
+    expect(next.querySelector("img")?.getAttribute("src")).toBeNull();
+    expect(revoke).toHaveBeenCalledOnce();
+  });
 
   it("never persists top while a warm restore waits for progressive layout and survives reopen", async () => {
     const guide = guideFixture();
