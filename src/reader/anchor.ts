@@ -318,6 +318,10 @@ export function restoreReaderPosition(
     return scroller.scrollTop;
   }
 
-  scroller.scrollTop = Math.max(0, Math.min(anchoredScrollTop, maxScrollTop));
+  const target = Math.max(0, Math.min(anchoredScrollTop, maxScrollTop));
+  // Steam's fractional UI scale can round a tiny correction down by a device pixel on every reopen.
+  if (Math.abs(scroller.scrollTop - target) > 1) {
+    scroller.scrollTop = target;
+  }
   return scroller.scrollTop;
 }

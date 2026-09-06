@@ -276,7 +276,7 @@ fn dispatch_general(
                 .ok_or(StoreError::Validation("force_refresh must be a boolean"))?;
             if method == "guides.prepare" {
                 guides
-                    .prepare(guide_id, force_refresh)
+                    .prepare(guide_id, force_refresh, images)
                     .map_err(RequestError::Guide)
             } else {
                 guides
@@ -301,7 +301,7 @@ fn dispatch_general(
                     .map_err(RequestError::Guide)
             } else {
                 guides
-                    .discard(guide_id, token)
+                    .discard(guide_id, token, images)
                     .map(Value::Bool)
                     .map_err(RequestError::Guide)
             }
@@ -904,7 +904,7 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(query("1")["state"], "partial"); // Body-only cache is not an explicit download.
-        let candidate = guides.prepare("1", false).unwrap();
+        let candidate = guides.prepare("1", false, &images).unwrap();
         guides
             .commit("1", candidate["token"].as_str().unwrap(), &images)
             .unwrap();
@@ -929,7 +929,7 @@ mod tests {
         assert_eq!(image_calls.load(Ordering::SeqCst), 2);
         guides.get("2", false).unwrap();
         assert_eq!(query("2")["state"], "partial");
-        let candidate = guides.prepare("2", false).unwrap();
+        let candidate = guides.prepare("2", false, &images).unwrap();
         guides
             .commit("2", candidate["token"].as_str().unwrap(), &images)
             .unwrap();

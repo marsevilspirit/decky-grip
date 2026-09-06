@@ -67,7 +67,7 @@ export async function downloadOfflineGuide(
     onProgress?.({ ...progress, publishing: true });
     return await backend.commitGuide(guideId, candidate.token);
   } finally {
-    // Commit consumes the token. Failed/canceled jobs release only the staged body, not saved images.
+    // Commit consumes the token. Cancellation releases staging and makes unused images evictable retry cache.
     await backend
       .discardGuide(guideId, candidate.token)
       .catch((error: unknown) =>
@@ -132,7 +132,7 @@ export async function downloadGuideImages(
   signal?.throwIfAborted();
   if (completed !== urls.size) {
     throw new Error(
-      `图片仅保存 ${completed}/${urls.size}，尚未完整离线。${errorMessage}；重试会保留已下载的图片。`,
+      `图片仅保存 ${completed}/${urls.size}，尚未完整离线。${errorMessage}；重试会复用仍在缓存的图片。`,
     );
   }
 }

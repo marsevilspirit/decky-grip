@@ -3,6 +3,7 @@ use crate::guide_html::{
     localize_guide_images, localized_image_urls, parse_guide_html, sanitize_fragment_with_stats,
     source_url as guide_source_url, valid_guide_id,
 };
+use crate::guide_images::{GuideImageCache, OrphanImages};
 use crate::{
     AtomicReplaceError, FileSignature, KeyLockPool, ReadError, atomic_replace, lock,
     read_bounded_regular_file, signature, sync_directory,
@@ -278,7 +279,12 @@ impl GuideReader {
     }
 
     /// Fetch a candidate without exposing it to readers or replacing the last offline version.
-    pub fn prepare(&self, guide_id: &str, force_refresh: bool) -> Result<Value, GuideError> {
+    pub fn prepare(
+        &self,
+        guide_id: &str,
+        force_refresh: bool,
+        images: &GuideImageCache,
+    ) -> Result<Value, GuideError> {
         validate_guide_id(guide_id)?;
         let guide_lock = self.guide_locks.retain(guide_id);
         let result = {
@@ -333,6 +339,7 @@ impl GuideReader {
                         bytes,
                     },
                 );
+                self.reclaim_images_locked(images, &prepared, OrphanImages::RetryCache);
                 Ok(json!({"token": token, "guide": guide}))
             })()
         };
@@ -359,18 +366,7 @@ impl GuideReader {
                         candidate.token == token && candidate.generation == *lock(&self.generation)
                     })
                     .ok_or_else(|| GuideError::cache("下载任务已失效，未替换原指南，请重试"))?;
-                let mut urls = HashSet::new();
-                for section in candidate.document["sections"]
-                    .as_array()
-                    .expect("validated sections")
-                {
-                    urls.extend(
-                        localized_image_urls(&localize_guide_images(
-                            section["html"].as_str().unwrap(),
-                        ))
-                        .map_err(|_| GuideError::cache("无法确认图片完整性，未替换原指南"))?,
-                    );
-                }
+                let urls = document_image_urls(&candidate.document)?;
                 let _images = images
                     .downloaded_guard(&urls)
                     .map_err(|error| GuideError::cache(error.message()))?;
@@ -378,6 +374,8 @@ impl GuideReader {
                 document["offline"] = json!(true);
                 self.write_cache_unlocked(&document)?;
                 prepared.remove(guide_id);
+                drop(_images);
+                self.reclaim_images_locked(images, &prepared, OrphanImages::OfflineOnly);
                 Ok(with_cache_status(&document, true, false))
             })()
         };
@@ -385,17 +383,77 @@ impl GuideReader {
         result
     }
 
-    pub fn discard(&self, guide_id: &str, token: &str) -> Result<bool, GuideError> {
+    pub fn discard(
+        &self,
+        guide_id: &str,
+        token: &str,
+        images: &GuideImageCache,
+    ) -> Result<bool, GuideError> {
         validate_guide_id(guide_id)?;
+        let _disk = lock(&self.disk_lock);
         let mut prepared = lock(&self.prepared);
         if prepared
             .get(guide_id)
             .is_some_and(|candidate| candidate.token == token)
         {
             prepared.remove(guide_id);
+            self.reclaim_images_locked(images, &prepared, OrphanImages::RetryCache);
             return Ok(true);
         }
         Ok(false)
+    }
+
+    fn referenced_image_urls_locked(
+        &self,
+        prepared: &HashMap<String, PreparedGuide>,
+        excluding: Option<&str>,
+    ) -> Result<HashSet<String>, GuideError> {
+        let mut urls = HashSet::new();
+        if let Some(entries) = read_cache_directory(&self.cache_directory)? {
+            for entry in entries {
+                let entry = entry.map_err(|_| GuideError::cache("无法确认共享图片，未清理图片"))?;
+                let name = entry.file_name();
+                let Some(id) = name
+                    .to_str()
+                    .and_then(|name| name.strip_suffix(".json"))
+                    .filter(|id| valid_guide_id(id))
+                else {
+                    continue;
+                };
+                if Some(id) == excluding {
+                    continue;
+                }
+                // Fail closed for corrupt, unreadable, or symlinked bodies, not just regular entries.
+                let document = self
+                    .read_cache_without_memoizing(id)?
+                    .ok_or_else(|| GuideError::cache("指南缓存已变化，未清理图片"))?;
+                urls.extend(document_image_urls(&document)?);
+            }
+        }
+        for candidate in prepared.values() {
+            urls.extend(document_image_urls(&candidate.document)?);
+        }
+        Ok(urls)
+    }
+
+    fn reclaim_images_locked(
+        &self,
+        images: &GuideImageCache,
+        prepared: &HashMap<String, PreparedGuide>,
+        policy: OrphanImages,
+    ) {
+        // ponytail: scan validated bodies on download lifecycle changes, never on the reader-open path.
+        let result = self
+            .referenced_image_urls_locked(prepared, None)
+            .and_then(|urls| {
+                images
+                    .reclaim_unreferenced(&urls, policy)
+                    .map_err(|error| GuideError::cache(error.message()))
+            });
+        if let Err(error) = result {
+            // Cleanup must not report a successfully published guide as a failed update.
+            eprintln!("grip-sidecar: skipped unused image cleanup: {error}");
+        }
     }
 
     pub fn cached_summary(
@@ -487,37 +545,6 @@ impl GuideReader {
             let _guide = lock(&guide_lock);
             (|| {
                 let _disk = lock(&self.disk_lock);
-                lock(&self.prepared).remove(guide_id);
-                let mut removed_images = json!({"filesRemoved": 0, "bytesRemoved": 0});
-                if let Some(images) = images {
-                    let mut urls = HashSet::new();
-                    let mut shared = HashSet::new();
-                    // Hold the body-cache lock until deletion finishes, so a refresh cannot
-                    // add a new shared reference between inspection and image removal.
-                    for entry in self.managed_entries_locked()? {
-                        let document = self
-                            .read_cache_without_memoizing(&entry.guide_id)?
-                            .ok_or_else(|| GuideError::cache("指南缓存已变化，请重试删除"))?;
-                        for section in document["sections"].as_array().expect("validated sections")
-                        {
-                            let localized = localize_guide_images(
-                                section["html"].as_str().expect("validated HTML"),
-                            );
-                            let references = localized_image_urls(&localized).map_err(|_| {
-                                GuideError::cache("无法确认共享图片，未删除离线内容")
-                            })?;
-                            if entry.guide_id == guide_id {
-                                urls.extend(references);
-                            } else {
-                                shared.extend(references);
-                            }
-                        }
-                    }
-                    urls.retain(|url| !shared.contains(url));
-                    removed_images = images
-                        .remove_urls(&urls)
-                        .map_err(|error| GuideError::cache(error.message()))?;
-                }
                 let path = self.cache_path(guide_id);
                 let metadata = match fs::symlink_metadata(&path) {
                     Ok(metadata) if metadata.is_file() => Some(metadata),
@@ -528,6 +555,15 @@ impl GuideReader {
                         ));
                     }
                 };
+                let mut prepared = lock(&self.prepared);
+                prepared.remove(guide_id);
+                let mut removed_images = json!({"filesRemoved": 0, "bytesRemoved": 0});
+                if let Some(images) = images {
+                    let urls = self.referenced_image_urls_locked(&prepared, Some(guide_id))?;
+                    removed_images = images
+                        .reclaim_unreferenced(&urls, OrphanImages::All)
+                        .map_err(|error| GuideError::cache(error.message()))?;
+                }
                 let (files_removed, bytes_removed) = if let Some(metadata) = metadata {
                     fs::remove_file(path)
                         .map_err(|_| GuideError::cache("cached guide could not be removed"))?;
@@ -1057,6 +1093,17 @@ struct GuideDiskEntry {
     size: u64,
     modified_seconds: i64,
     modified_nanoseconds: i64,
+}
+
+fn document_image_urls(document: &Value) -> Result<HashSet<String>, GuideError> {
+    let mut urls = HashSet::new();
+    for section in document["sections"].as_array().expect("validated sections") {
+        urls.extend(
+            localized_image_urls(&localize_guide_images(section["html"].as_str().unwrap()))
+                .map_err(|_| GuideError::cache("无法确认图片引用，未清理图片"))?,
+        );
+    }
+    Ok(urls)
 }
 
 fn validate_guide_id(guide_id: &str) -> Result<(), GuideError> {

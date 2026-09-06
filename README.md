@@ -117,7 +117,11 @@ guide only when its validated local cache already exists, and keeps that documen
 and reader position in memory for the lifetime of the plugin.
 Background preloading never starts a network request. A cache older than six
 hours still opens immediately; use **更新** when you want to fetch the newest
-version. Large guides mount one bounded section first and append bounded batches
+version. While downloading, that same button becomes **取消更新**, including
+after you close and reopen the reader. Cancellation stops new image requests,
+waits for the in-flight saves, and keeps the old article and reading position.
+The short final publication step shows **保存中** and cannot be canceled.
+Large guides mount one bounded section first and append bounded batches
 on later frames; each section has its own parser budget, and text anchors are
 indexed incrementally rather than rescanning the whole article on every save or
 restore.
@@ -166,8 +170,13 @@ Downloads and reader updates first stage a candidate body (up to 32 MiB of
 pending bodies in the backend), then save and verify all referenced images.
 Only the final commit atomically replaces the live body and its offline flag.
 A failed or canceled download leaves the previous version readable; saved
-images remain available for retries. Abandoned staging is released on cancel,
+images remain available for retries as ordinary, evictable cache when no live
+or pending guide references them. Abandoned staging is released on cancel,
 failure, or backend restart. A short final publication step cannot be canceled.
+Successful updates reclaim obsolete offline images; other guides and active
+downloads protect their shared images. Before a new download, orphaned pins from
+older versions or a stopped backend become ordinary retry cache as well. These
+checks run on download lifecycle changes, not when opening the reader.
 
 Images live under the guide cache's `images/` directory. Each image is limited
 to 8 MiB and a validated 8192-pixel / 16-megapixel canvas, and the Rust memory
@@ -190,7 +199,8 @@ observes at most 512 inert image nodes while staging no more than 48 distinct
 image URLs at once. Under **高级选项**, the panel shows cache usage and provides
 separate controls for clearing all guide bodies or images. To remove one guide,
 open the reader's **Y** switcher and choose **删除当前指南离线副本**, then confirm.
-This removes its body and images not referenced by other cached guides; if
+This removes its body and all unreferenced images, including leftovers from
+older updates, while preserving other cached guides and active downloads. If
 another guide cannot be inspected safely, deletion stops. The current in-memory
 article remains readable. Cache deletion is unavailable during an active
 download. Clearing images also invalidates in-flight frontend work, and none

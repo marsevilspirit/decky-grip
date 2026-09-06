@@ -2,7 +2,7 @@ use crate::{FileSignature, KeyLockPool, atomic_replace, lock, read_bounded_regul
 use base64::Engine as _;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File, FileTimes, OpenOptions};
@@ -171,6 +171,12 @@ pub struct GuideImageCache {
     validation_reads: AtomicU64,
 }
 
+pub(crate) enum OrphanImages {
+    RetryCache,
+    OfflineOnly,
+    All,
+}
+
 impl GuideImageCache {
     pub fn new(cache_directory: impl Into<PathBuf>) -> Self {
         Self::build(
@@ -323,48 +329,70 @@ impl GuideImageCache {
         Ok(self.stats())
     }
 
-    /// The caller holds the guide cache lock and excludes URLs used by other guides.
-    pub fn remove_urls(
+    /// The caller holds the body/staging locks and includes every live and pending guide.
+    pub(crate) fn reclaim_unreferenced(
         &self,
-        urls: &std::collections::HashSet<String>,
+        retained: &HashSet<String>,
+        policy: OrphanImages,
     ) -> Result<Value, ImageError> {
-        let paths = urls
+        let retained = retained
             .iter()
             .map(|url| canonical_image_url(url))
             .collect::<Result<Vec<_>, _>>()?
             .iter()
             .flat_map(|url| self.candidate_paths(url))
             .map(|(_, path)| path)
-            .collect::<Vec<_>>();
+            .collect::<HashSet<_>>();
         let _disk = lock(&self.disk_lock);
         let mut files = 0;
         let mut bytes = 0;
         if !safe_directory(&self.cache_directory) && self.cache_directory.exists() {
             return Err(ImageError::download("图片目录异常，未删除离线内容"));
         }
-        {
+        if safe_directory(&self.cache_directory) {
+            for entry in self.managed_entries_locked() {
+                if retained.contains(&entry.path)
+                    || (!offline_path(&entry.path) && !matches!(policy, OrphanImages::All))
+                {
+                    continue;
+                }
+                if matches!(policy, OrphanImages::RetryCache) {
+                    // Keep canceled work reusable, but no longer permanently reserve offline quota.
+                    let name = entry.path.file_name().unwrap().to_str().unwrap();
+                    fs::rename(
+                        &entry.path,
+                        self.cache_directory.join(&name["offline-".len()..]),
+                    )
+                    .map_err(|_| ImageError::download("未能释放未完成下载的离线额度"))?;
+                } else {
+                    fs::remove_file(&entry.path)
+                        .map_err(|_| ImageError::download("图片删除失败，请检查目录权限"))?;
+                    files += 1;
+                    bytes += entry.size;
+                }
+                lock(&self.validated).remove(&entry.path);
+            }
             let mut state = lock(&self.state);
-            state.generation = state.generation.wrapping_add(1);
-            for url in urls {
-                if let Some(value) = state.entries.remove(url) {
+            let removed = state
+                .entries
+                .keys()
+                .filter(|url| {
+                    !self
+                        .candidate_paths(url)
+                        .iter()
+                        .any(|(_, path)| retained.contains(path))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            for url in removed {
+                if let Some(value) = state.entries.remove(&url) {
                     state.bytes -= value.body.len();
                 }
-                state.order.retain(|entry| entry != url);
+                state.order.retain(|entry| entry != &url);
             }
-        }
-        if safe_directory(&self.cache_directory) {
-            for path in paths {
-                let metadata = match fs::symlink_metadata(&path) {
-                    Ok(metadata) if metadata.is_file() => metadata,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                    _ => return Err(ImageError::download("图片文件异常，未能安全删除")),
-                };
-                fs::remove_file(&path)
-                    .map_err(|_| ImageError::download("图片删除失败，请检查目录权限"))?;
-                lock(&self.validated).remove(&path);
-                files += 1;
-                bytes += metadata.len();
-            }
+            drop(state);
+            // Do not bump the global generation: unrelated pending downloads remain valid.
+            self.prune_to_quota_locked();
             sync_directory(&self.cache_directory)
                 .map_err(|_| ImageError::download("图片已删除，但目录同步失败"))?;
         }

@@ -138,6 +138,30 @@ describe("GRIP Reader helpers", () => {
     expect(dom.scroller.scrollTop).toBe(380);
   });
 
+  it("does not accumulate device-pixel drift from fractional anchor rounding on reopen", () => {
+    const dom = makeAnchorDom();
+    dom.addSection("1", [{ bottom: 80, text: "同一段落", top: 55.1875 }]);
+    let scrollTop = Math.fround(47 / 1.5);
+    Object.defineProperty(dom.scroller, "scrollTop", {
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.fround(Math.floor(value * 1.5) / 1.5);
+      },
+    });
+    const original = scrollTop;
+    for (let reopen = 0; reopen < 40; reopen++) {
+      const captured = captureReaderPosition(dom.scroller, dom.content);
+      dom.scroller.scrollTop = 0;
+      restoreReaderPosition(dom.scroller, dom.content, {
+        ...captured,
+        // DOM rects and scrollTop have slightly different floating-point precision in CEF.
+        anchorOffset: captured.anchorOffset + 0.000001,
+        updatedAt: 1,
+      });
+      expect(dom.scroller.scrollTop).toBe(original);
+    }
+  });
+
   it("indexes each mounted section once across repeated saves and restores", () => {
     const dom = makeAnchorDom();
     dom.addSection("10", [

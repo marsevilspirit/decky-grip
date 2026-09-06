@@ -551,7 +551,8 @@ describe("GuideReaderPage position lifecycle", () => {
       "1 张图片失败，其余继续下载",
     );
     expect(container?.textContent).toContain("旧版仍可阅读");
-    expect(buttonNamed("2/5").disabled).toBe(true);
+    expect(buttonNamed("取消更新").disabled).toBe(false);
+    expect(buttonNamed("取消更新").getAttribute("aria-label")).toContain("2/5");
     expect(cache.peek(identity)?.guide).toBe(guide);
 
     await act(async () => {
@@ -576,6 +577,84 @@ describe("GuideReaderPage position lifecycle", () => {
 
     expect(saves[saves.length - 1]).toBe(4_600);
     expect(persistedPosition.scrollTop).toBe(4_600);
+  });
+
+  it("cancels an update from the existing button without changing the old body or reading position", async () => {
+    const guide = guideFixture();
+    let saved = savedPosition;
+    let finish!: () => void;
+    let signal!: AbortSignal;
+    const downloads = new GuideDownloadTasks(
+      async (_identity, progress, abort) => {
+        signal = abort;
+        progress({ completed: 2, total: 5 });
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        abort.throwIfAborted();
+      },
+    );
+    const cache = new ReaderSessionCache({
+      getCachedGuide: async () => guide,
+      getGuide: async (_identity, force) => {
+        if (force) {
+          await downloads.start(identity, true);
+          if (downloads.getSnapshot(identity.guideId)?.phase !== "complete")
+            throw new Error("canceled");
+        }
+        return guide;
+      },
+      getReaderPosition: async () => saved,
+      saveReaderPosition: async (
+        _key,
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+      ) => {
+        saved = {
+          scrollTop,
+          sectionId,
+          anchorText,
+          anchorOffset,
+          updatedAt: 2,
+        };
+        return saved;
+      },
+    });
+    await cache.load(identity);
+    const scroller = await mount(cache, async () => null, 12_000, {
+      downloads,
+    });
+    for (let frame = 0; frame < 8; frame++) await flushFrame();
+    await flushMicrotasks();
+    notifyResize();
+    await act(async () => vi.advanceTimersByTime(101));
+    const body = container?.querySelector('[data-guide-section-id="40"]');
+    await act(async () => buttonNamed("更新").click());
+    await flushMicrotasks();
+    await act(async () => {
+      scroller.dispatchEvent(new Event("wheel", { bubbles: true }));
+      scroller.scrollTop = 4600;
+      scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+      buttonNamed("取消更新").click();
+    });
+    expect(signal.aborted).toBe(true);
+    expect(buttonNamed("取消中").disabled).toBe(true);
+    expect(container?.textContent).toContain("等待正在保存的图片完成");
+    expect(scroller.style.overflowY).toBe("auto");
+    await act(async () => finish());
+    await flushMicrotasks();
+    for (let frame = 0; frame < 3; frame++) await flushFrame();
+    expect(buttonNamed("更新").disabled).toBe(false);
+    expect(container?.textContent).toContain("更新已取消，继续阅读原指南");
+    expect(container?.textContent).not.toContain("更新失败");
+    expect(cache.peek(identity)?.guide).toBe(guide);
+    expect(container?.querySelector('[data-guide-section-id="40"]')).toBe(body);
+    expect(scroller.scrollTop).toBe(4600);
+    await act(async () => vi.advanceTimersByTime(400));
+    await unmount();
+    expect(saved.scrollTop).toBe(4600);
   });
 
   it("adopts a background update after reopening without replacing the old body early or losing scroll", async () => {
@@ -612,7 +691,9 @@ describe("GuideReaderPage position lifecycle", () => {
         html: section.html.replace("正文", "新版正文"),
       })),
     };
-    const downloads = new GuideDownloadTasks(async () => {
+    let report!: (progress: GuideImageDownloadProgress) => void;
+    const downloads = new GuideDownloadTasks(async (_identity, progress) => {
+      report = progress;
       await new Promise<void>((resolve) => {
         finish = resolve;
       });
@@ -630,11 +711,16 @@ describe("GuideReaderPage position lifecycle", () => {
     notifyResize();
     await act(async () => vi.advanceTimersByTime(101));
     expect(cache.peek(identity)?.guide).toBe(guide);
+    expect(buttonNamed("取消更新").disabled).toBe(false);
     await act(async () => {
       scroller.dispatchEvent(new Event("wheel", { bubbles: true }));
       scroller.scrollTop = 4600;
       scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
     });
+    await act(async () => report({ completed: 3, total: 3, publishing: true }));
+    expect(buttonNamed("保存中").disabled).toBe(true);
+    await act(async () => buttonNamed("保存中").click());
+    expect(downloads.getSnapshot(identity.guideId)?.phase).toBe("downloading");
     await act(async () => {
       finish();
       await work;

@@ -64,6 +64,14 @@ fn deleting_one_offline_guide_preserves_shared_images_and_positions() {
     fs::write(&sibling, b"corrupt").unwrap();
     assert!(guides.remove_offline_guide("1", &images).is_err());
     assert!(images.is_downloaded(&urls[1]).unwrap());
+    fs::remove_file(&sibling).unwrap();
+    let outside = directory.0.join("outside.json");
+    fs::write(&outside, &body).unwrap();
+    symlink(&outside, &sibling).unwrap();
+    assert!(guides.remove_offline_guide("1", &images).is_err());
+    assert!(images.is_downloaded(&urls[1]).unwrap());
+    assert_eq!(fs::read(&outside).unwrap(), body);
+    fs::remove_file(&sibling).unwrap();
     fs::write(sibling, body).unwrap();
     assert_eq!(
         guides.remove_offline_guide("1", &images).unwrap()["filesRemoved"],
@@ -80,6 +88,119 @@ fn deleting_one_offline_guide_preserves_shared_images_and_positions() {
         guides.remove_offline_guide("2", &images).unwrap()["filesRemoved"],
         3
     );
+}
+
+#[test]
+fn reclaiming_old_images_preserves_shared_and_pending_downloads_and_reuses_canceled_work() {
+    use grip_sidecar::guide_images::{GuideImageCache, ImageError, ImageLimits};
+    let directory = TestDirectory::new();
+    let updated = Arc::new(AtomicBool::new(false));
+    let version = Arc::clone(&updated);
+    let guides = GuideReader::with_fetcher(
+        directory.0.join("guides"),
+        move |url, _, _| {
+            let names = if url.contains("?id=3&") {
+                vec!["pending", "pending2", "shared"]
+            } else if url.contains("?id=1&") && version.load(Ordering::SeqCst) {
+                vec!["new", "shared"]
+            } else {
+                vec!["old", "shared"]
+            };
+            let html = names
+                .iter()
+                .map(|name| {
+                    format!(r#"<img src="https://images.steamusercontent.com/{name}.png">"#)
+                })
+                .collect::<String>();
+            Ok(format!(r#"<div class="workshopItemTitle">Guide</div><div class="guideAuthors">Author</div><div class="subSection" id="1"><div class="subSectionTitle">Chapter</div><div class="subSectionDesc">{html}</div></div>"#).into_bytes())
+        },
+        || NOW_MS,
+    );
+    let (started, ready) = mpsc::channel();
+    let (release, proceed) = mpsc::channel();
+    let proceed = Mutex::new(proceed);
+    let fetches = Arc::new(AtomicU64::new(0));
+    let counted = Arc::clone(&fetches);
+    let images = Arc::new(
+        GuideImageCache::with_fetcher(
+            directory.0.join("images"),
+            move |url, _, _| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                if url.ends_with("/pending2.png") {
+                    started.send(()).unwrap();
+                    proceed
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|_| ImageError::download("test download timed out"))?;
+                }
+                Ok((
+                    "image/png".into(),
+                    b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0test".to_vec(),
+                ))
+            },
+            ImageLimits::default(),
+        )
+        .unwrap(),
+    );
+    let url = |name: &str| format!("https://images.steamusercontent.com/{name}.png");
+    for id in ["1", "2"] {
+        let prepared = guides.prepare(id, false, &images).unwrap();
+        for name in ["old", "shared"] {
+            images.download(&url(name)).unwrap();
+        }
+        guides
+            .commit(id, prepared["token"].as_str().unwrap(), &images)
+            .unwrap();
+    }
+    let pending = guides.prepare("3", false, &images).unwrap();
+    images.download(&url("pending")).unwrap();
+    let downloading = Arc::clone(&images);
+    let in_flight = thread::spawn(move || {
+        downloading.download("https://images.steamusercontent.com/pending2.png")
+    });
+    ready.recv_timeout(Duration::from_secs(2)).unwrap();
+
+    updated.store(true, Ordering::SeqCst);
+    let prepared = guides.prepare("1", true, &images).unwrap();
+    images.download(&url("new")).unwrap();
+    guides
+        .commit("1", prepared["token"].as_str().unwrap(), &images)
+        .unwrap();
+    assert!(images.is_downloaded(&url("old")).unwrap()); // Still referenced by guide 2.
+    guides.remove_offline_guide("2", &images).unwrap();
+    assert!(images.get(&url("old"), false).unwrap().is_none());
+    for name in ["new", "shared", "pending"] {
+        assert!(images.is_downloaded(&url(name)).unwrap());
+    }
+    release.send(()).unwrap();
+    assert!(in_flight.join().unwrap().unwrap()); // Cleanup did not invalidate another download.
+    assert!(images.is_downloaded(&url("pending2")).unwrap());
+
+    guides
+        .discard("3", pending["token"].as_str().unwrap(), &images)
+        .unwrap();
+    let before_retry = fetches.load(Ordering::SeqCst);
+    for name in ["pending", "pending2"] {
+        assert!(!images.is_downloaded(&url(name)).unwrap());
+        assert!(images.get(&url(name), false).unwrap().is_some());
+    }
+    let retry = guides.prepare("3", false, &images).unwrap();
+    for name in ["pending", "pending2"] {
+        images.download(&url(name)).unwrap();
+    }
+    assert_eq!(fetches.load(Ordering::SeqCst), before_retry);
+    guides
+        .discard("3", retry["token"].as_str().unwrap(), &images)
+        .unwrap();
+    assert!(images.is_downloaded(&url("shared")).unwrap());
+
+    // Previously abandoned pins have no manifest or current body; deletion still reclaims them.
+    images.download(&url("legacy-orphan")).unwrap();
+    guides.remove_offline_guide("1", &images).unwrap();
+    assert_eq!(images.stats()["files"], 0);
+    assert_eq!(images.stats()["offlineBytes"], 0);
+    assert_eq!(images.stats()["diskBytes"], 0);
 }
 
 enum FetchPlan {
@@ -177,7 +298,7 @@ fn offline_updates_publish_only_after_all_images_and_preserve_the_old_version_on
     .unwrap();
     let old_url = "https://images.steamusercontent.com/ugc/example/image.png";
     let new_url = "https://images.steamusercontent.com/ugc/example/new.png";
-    let candidate = harness.reader.prepare(GUIDE_ID, false).unwrap();
+    let candidate = harness.reader.prepare(GUIDE_ID, false, &images).unwrap();
     let token = candidate["token"].as_str().unwrap();
     assert!(harness.reader.get_cached(GUIDE_ID).unwrap().is_none());
     assert!(harness.reader.commit(GUIDE_ID, token, &images).is_err());
@@ -192,7 +313,7 @@ fn offline_updates_publish_only_after_all_images_and_preserve_the_old_version_on
     assert!(harness.reader.get(GUIDE_ID, true).is_err()); // No bypass that drops the offline pin.
 
     harness.set_error("network unavailable");
-    assert!(harness.reader.prepare(GUIDE_ID, true).is_err());
+    assert!(harness.reader.prepare(GUIDE_ID, true, &images).is_err());
     assert_eq!(fs::read(&path).unwrap(), original);
     *harness.plan.lock().unwrap() = FetchPlan::Body(
         String::from_utf8(guide_fixture("新版指南"))
@@ -200,13 +321,18 @@ fn offline_updates_publish_only_after_all_images_and_preserve_the_old_version_on
             .replace(old_url, new_url)
             .into_bytes(),
     );
-    let candidate = harness.reader.prepare(GUIDE_ID, true).unwrap();
+    let candidate = harness.reader.prepare(GUIDE_ID, true, &images).unwrap();
     let token = candidate["token"].as_str().unwrap();
     assert_eq!(
         harness.reader.get_cached(GUIDE_ID).unwrap().unwrap()["title"],
         "初始指南"
     );
-    assert!(!harness.reader.discard(GUIDE_ID, "stale-token").unwrap());
+    assert!(
+        !harness
+            .reader
+            .discard(GUIDE_ID, "stale-token", &images)
+            .unwrap()
+    );
     assert!(
         harness
             .reader
@@ -232,7 +358,9 @@ fn offline_updates_publish_only_after_all_images_and_preserve_the_old_version_on
     let committed = harness.reader.commit(GUIDE_ID, token, &images).unwrap();
     assert_eq!(committed["title"], "新版指南");
     assert_eq!(committed["offline"], true);
-    assert!(!harness.reader.discard(GUIDE_ID, token).unwrap());
+    assert!(!harness.reader.discard(GUIDE_ID, token, &images).unwrap());
+    assert!(!images.is_downloaded(old_url).unwrap());
+    assert!(images.get(old_url, false).unwrap().is_none());
     assert_eq!(fs::read_dir(&harness.cache_directory).unwrap().count(), 1); // No routine backup litter.
     let offline = GuideReader::with_fetcher(
         &harness.cache_directory,
@@ -241,7 +369,7 @@ fn offline_updates_publish_only_after_all_images_and_preserve_the_old_version_on
     );
     assert_eq!(offline.get(GUIDE_ID, false).unwrap()["title"], "新版指南");
 
-    let pending = harness.reader.prepare(GUIDE_ID, true).unwrap();
+    let pending = harness.reader.prepare(GUIDE_ID, true, &images).unwrap();
     let committed_bytes = fs::read(&path).unwrap();
     images.clear();
     assert!(
@@ -260,7 +388,7 @@ fn offline_updates_publish_only_after_all_images_and_preserve_the_old_version_on
             .is_err()
     );
     assert!(!path.exists());
-    let pending = harness.reader.prepare(GUIDE_ID, true).unwrap();
+    let pending = harness.reader.prepare(GUIDE_ID, true, &images).unwrap();
     harness.reader.clear_guide_cache().unwrap();
     assert!(
         harness
@@ -292,7 +420,7 @@ fn downloaded_and_legacy_bodies_survive_lru_and_restart_until_manual_deletion() 
     images
         .download("https://images.steamusercontent.com/ugc/example/image.png")
         .unwrap();
-    let candidate = harness.reader.prepare(GUIDE_ID, false).unwrap();
+    let candidate = harness.reader.prepare(GUIDE_ID, false, &images).unwrap();
     harness
         .reader
         .commit(GUIDE_ID, candidate["token"].as_str().unwrap(), &images)

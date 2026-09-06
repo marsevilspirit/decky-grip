@@ -196,6 +196,11 @@ export function GuideReaderPage({
       identity ? (downloads?.getSnapshot(identity.guideId) ?? null) : null,
   );
   const downloadProgress = downloadTask?.progress;
+  const downloadActive =
+    downloadTask?.phase === "downloading" ||
+    downloadTask?.phase === "canceling";
+  const canCancelUpdate =
+    downloadTask?.phase === "downloading" && !downloadProgress?.publishing;
   const initialSnapshot = identity ? cache.peek(identity) : null;
   const [loaded, setLoaded] = useState<ReaderSessionSnapshot | null>(
     initialSnapshot,
@@ -653,7 +658,9 @@ export function GuideReaderPage({
           } else {
             setLoaded(fallback);
             setLoadWarning(
-              `更新失败，继续使用本地缓存：${errorMessage(reason)}`,
+              downloads?.getSnapshot(identity.guideId)?.phase === "canceled"
+                ? "更新已取消，继续阅读原指南。"
+                : `更新失败，继续使用本地缓存：${errorMessage(reason)}`,
             );
           }
         }
@@ -671,6 +678,7 @@ export function GuideReaderPage({
     };
   }, [
     cache,
+    downloads,
     identity?.appId,
     identity?.guideId,
     performance,
@@ -1424,7 +1432,7 @@ export function GuideReaderPage({
   };
 
   const refreshGuide = async () => {
-    if (refreshPending || loading) {
+    if (refreshPending || loading || downloadActive) {
       return;
     }
     stopGuideSearchAlignment();
@@ -1782,7 +1790,11 @@ export function GuideReaderPage({
       ? `${downloadProgress.stopped ? "空间不足，已停止后续下载" : `${downloadProgress.failed} 张图片失败，其余继续下载`}：${downloadProgress.error}。旧版仍可阅读。`
       : downloadTask?.phase === "failed" && downloadTask.error
         ? `下载未完成：${downloadTask.error}`
-        : null) ??
+        : downloadTask?.phase === "canceling"
+          ? "正在取消更新，等待正在保存的图片完成；原指南仍可阅读。"
+          : downloadTask?.phase === "canceled"
+            ? "更新已取消，继续阅读原指南。"
+            : null) ??
     restoreWarning ??
     loadWarning ??
     loaded?.positionWarning ??
@@ -2366,9 +2378,23 @@ export function GuideReaderPage({
                   搜索
                 </Button>
                 <Button
-                  aria-label="更新指南"
-                  disabled={loading || refreshPending}
-                  onClick={() => void refreshGuide()}
+                  aria-label={
+                    (canCancelUpdate ? "取消更新" : "更新指南") +
+                    (downloadActive && downloadProgress
+                      ? `，已保存 ${downloadProgress.completed}/${downloadProgress.total} 张图片`
+                      : "")
+                  }
+                  disabled={
+                    loading ||
+                    (downloadActive ? !canCancelUpdate : refreshPending)
+                  }
+                  onClick={() => {
+                    if (canCancelUpdate && identity) {
+                      downloads?.cancel(identity.guideId);
+                    } else {
+                      void refreshGuide();
+                    }
+                  }}
                   style={{
                     boxSizing: "border-box",
                     fontSize: 16,
@@ -2381,7 +2407,15 @@ export function GuideReaderPage({
                     width: "100%",
                   }}
                 >
-                  {refreshPending ? (
+                  {downloadActive ? (
+                    canCancelUpdate ? (
+                      "取消更新"
+                    ) : (
+                      <BusyLabel>
+                        {downloadProgress?.publishing ? "保存中" : "取消中"}
+                      </BusyLabel>
+                    )
+                  ) : refreshPending ? (
                     <BusyLabel>
                       {downloadProgress?.stopped
                         ? "已暂停"
