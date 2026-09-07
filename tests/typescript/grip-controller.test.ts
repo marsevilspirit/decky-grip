@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   GripController,
   LIFECYCLE_POLL_MS,
+  RESTORE_TIMEOUT_MS,
   SAVE_DEBOUNCE_MS,
   ZERO_SCROLL_CONFIRM_MS,
   type GripBackend,
@@ -423,6 +424,70 @@ describe("GRIP controller", () => {
     await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS + 50);
 
     expect(harness.backend.savePosition).not.toHaveBeenCalled();
+    harness.controller.stop();
+  });
+
+  it("keeps a timed-out bookmark protected from polling and close snapshots", async () => {
+    const harness = makeHarness({
+      [GUIDE_KEY]: { scrollTop: 6_000, updatedAt: 900_000 },
+    });
+    harness.runtime.scrollHeight = 900;
+    harness.runtime.scrollTop = 100;
+    await harness.controller.start();
+    harness.runtime.selectGuide(GUIDE_ID);
+
+    await vi.advanceTimersByTimeAsync(RESTORE_TIMEOUT_MS + 2_000);
+    expect(harness.backend.savePosition).not.toHaveBeenCalled();
+    expect(harness.status.getSnapshot().message).toContain("restore timed out");
+    harness.runtime.emitFocus(false);
+    harness.runtime.selectGuide(null);
+    await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS);
+    harness.controller.stop();
+    expect(harness.backend.savePosition).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["layout", "focus"] as const)(
+    "retries the protected target after a timeout on %s",
+    async (event) => {
+      const harness = makeHarness({
+        [GUIDE_KEY]: { scrollTop: 6_000, updatedAt: 900_000 },
+      });
+      harness.runtime.scrollHeight = 900;
+      harness.runtime.scrollTop = 100;
+      await harness.controller.start();
+      harness.runtime.selectGuide(GUIDE_ID);
+      await vi.advanceTimersByTimeAsync(RESTORE_TIMEOUT_MS + 2_000);
+
+      harness.runtime.scrollHeight = 10_000;
+      if (event === "layout") harness.runtime.emitLayout();
+      else harness.runtime.emitFocus(true);
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(harness.runtime.scrollTop).toBe(6_000);
+      expect(harness.backend.savePosition).not.toHaveBeenCalled();
+      harness.controller.stop();
+    },
+  );
+
+  it("allows deliberate scrolling to replace a timed-out bookmark", async () => {
+    const harness = makeHarness({
+      [GUIDE_KEY]: { scrollTop: 6_000, updatedAt: 900_000 },
+    });
+    harness.runtime.scrollHeight = 900;
+    harness.runtime.scrollTop = 100;
+    await harness.controller.start();
+    harness.runtime.selectGuide(GUIDE_ID);
+    await vi.advanceTimersByTimeAsync(RESTORE_TIMEOUT_MS + 2_000);
+    expect(harness.backend.savePosition).not.toHaveBeenCalled();
+
+    harness.runtime.emitInteraction();
+    harness.runtime.scrollTop = 200;
+    harness.runtime.emitScroll();
+    await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS);
+    expect(harness.backend.savePosition).toHaveBeenCalledExactlyOnceWith(
+      GUIDE_KEY,
+      200,
+    );
     harness.controller.stop();
   });
 

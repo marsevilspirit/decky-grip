@@ -5,6 +5,7 @@ use common::TestDirectory;
 use grip_sidecar::guide_images::{
     GuideImageCache, ImageError, ImageErrorKind, ImageLimits, canonical_image_url,
 };
+use image::{ExtendedColorType, ImageEncoder};
 use serde_json::json;
 use std::collections::BTreeSet;
 use std::ffi::CString;
@@ -20,25 +21,42 @@ use std::time::{Duration, SystemTime};
 const IMAGE_URL: &str = "https://images.steamusercontent.com/ugc/example/image.png";
 const IMAGE_DIGEST: &str = "8440b380c871e5f183b586ca0a652b6d7b17e155fe2c05990b9b4aaa1829b874";
 fn png(marker: u8, width: u32, height: u32) -> Vec<u8> {
-    let mut body = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
-    body.extend_from_slice(&width.to_be_bytes());
-    body.extend_from_slice(&height.to_be_bytes());
-    body.extend_from_slice(b"\x08\x06\0\0\0");
-    body.extend_from_slice(&[marker; 4]);
+    let mut body = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut body)
+        .write_image(
+            &vec![marker; (width * height * 3) as usize],
+            width,
+            height,
+            ExtendedColorType::Rgb8,
+        )
+        .unwrap();
     body
 }
 
 fn gif(frames: usize) -> Vec<u8> {
-    let mut body = b"GIF89a\x01\0\x01\0\0\0\0".to_vec();
-    let frame = b",\0\0\0\0\x01\0\x01\0\0\x02\x02D\x01\0";
-    for _ in 0..frames {
-        body.extend_from_slice(frame);
+    let mut body = Vec::new();
+    let mut encoder = image::codecs::gif::GifEncoder::new(&mut body);
+    for frame in 0..frames {
+        encoder
+            .encode_frame(image::Frame::new(image::RgbaImage::from_pixel(
+                1,
+                1,
+                image::Rgba([frame as u8, 0, 0, 255]),
+            )))
+            .unwrap();
     }
-    body.push(b';');
+    drop(encoder);
     body
 }
 
 fn webp(animated: bool) -> Vec<u8> {
+    if !animated {
+        let mut body = Vec::new();
+        image::codecs::webp::WebPEncoder::new_lossless(&mut body)
+            .write_image(&[255, 0, 0], 1, 1, ExtendedColorType::Rgb8)
+            .unwrap();
+        return body;
+    }
     let mut payload = vec![if animated { 0x02 } else { 0x00 }];
     payload.extend_from_slice(&[0; 9]);
     let mut chunk = b"VP8X".to_vec();
@@ -53,9 +71,15 @@ fn webp(animated: bool) -> Vec<u8> {
 }
 
 fn jpeg(width: u16, height: u16) -> Vec<u8> {
-    let mut body = b"\xff\xd8\xff\xc0\0\x07\x08".to_vec();
-    body.extend_from_slice(&height.to_be_bytes());
-    body.extend_from_slice(&width.to_be_bytes());
+    let mut body = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut body)
+        .write_image(
+            &vec![1; usize::from(width) * usize::from(height) * 3],
+            u32::from(width),
+            u32::from(height),
+            ExtendedColorType::Rgb8,
+        )
+        .unwrap();
     body
 }
 
@@ -70,6 +94,190 @@ fn limits(image: usize, disk: usize, memory: usize) -> ImageLimits {
 fn make_fifo(path: &Path) {
     let path = CString::new(path.as_os_str().as_bytes()).unwrap();
     assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+}
+
+#[test]
+fn static_metadata_keywords_do_not_count_as_animation() {
+    let directory = TestDirectory::new();
+    for (name, mime, body) in [
+        (
+            "png",
+            "image/png",
+            include!("fixtures/png_metadata.rs").to_vec(),
+        ),
+        (
+            "webp",
+            "image/webp",
+            include!("fixtures/webp_metadata.rs").to_vec(),
+        ),
+    ] {
+        let cache = GuideImageCache::with_fetcher(
+            directory.0.join(name),
+            move |_, _, _| Ok((mime.into(), body.clone())),
+            ImageLimits::default(),
+        )
+        .unwrap();
+        assert!(cache.download(IMAGE_URL).unwrap(), "{name}");
+        assert!(cache.is_downloaded(IMAGE_URL).unwrap());
+        let value = cache.get(IMAGE_URL, false).unwrap().unwrap();
+        assert_eq!(
+            (value["width"].as_u64(), value["height"].as_u64()),
+            (Some(1), Some(1))
+        );
+    }
+}
+
+#[test]
+fn incomplete_payloads_never_become_offline_downloads() {
+    let directory = TestDirectory::new();
+    for (name, mime, body) in [
+        (
+            "png",
+            "image/png",
+            include!("fixtures/static_png.rs").to_vec(),
+        ),
+        ("jpeg", "image/jpeg", jpeg(2, 3)),
+        ("gif", "image/gif", gif(1)),
+        ("webp", "image/webp", webp(false)),
+    ] {
+        for cut in 0..body.len() {
+            let truncated = body[..cut].to_vec();
+            let cache = GuideImageCache::with_fetcher(
+                directory.0.join(format!("{name}-{cut}")),
+                move |_, _, _| Ok((mime.into(), truncated.clone())),
+                ImageLimits::default(),
+            )
+            .unwrap();
+            assert!(
+                cache.download(IMAGE_URL).is_err(),
+                "accepted {name} truncated at {cut}/{}",
+                body.len()
+            );
+            assert!(!cache.is_downloaded(IMAGE_URL).unwrap());
+        }
+    }
+    // These retain a complete container ending: checking IEND alone is not enough.
+    let png = include!("fixtures/static_png.rs");
+    let missing_pixels = [&png[..33], &png[png.len() - 12..]].concat();
+    let mut corrupt_pixels = png.to_vec();
+    corrupt_pixels[45] ^= 0xff;
+    for (index, body) in [missing_pixels, corrupt_pixels].into_iter().enumerate() {
+        let cache = GuideImageCache::with_fetcher(
+            directory.0.join(format!("invalid-payload-{index}")),
+            move |_, _, _| Ok(("image/png".into(), body.clone())),
+            ImageLimits::default(),
+        )
+        .unwrap();
+        assert!(cache.download(IMAGE_URL).is_err());
+        assert_eq!(cache.stats()["offlineBytes"], 0);
+    }
+}
+
+#[test]
+fn complete_images_allow_non_image_trailing_data() {
+    let directory = TestDirectory::new();
+    for (name, mime, mut body) in [
+        (
+            "png",
+            "image/png",
+            include!("fixtures/static_png.rs").to_vec(),
+        ),
+        ("jpeg", "image/jpeg", jpeg(2, 3)),
+        ("gif", "image/gif", gif(1)),
+        ("webp", "image/webp", webp(false)),
+    ] {
+        body.extend_from_slice(b"\0\r\ntrailing metadata acTL ANIM");
+        let cache = GuideImageCache::with_fetcher(
+            directory.0.join(name),
+            move |_, _, _| Ok((mime.into(), body.clone())),
+            ImageLimits::default(),
+        )
+        .unwrap();
+        assert!(cache.download(IMAGE_URL).unwrap(), "{name}");
+    }
+    // An EOI-looking pair inside an APP comment must not legitimize a truncated JPEG.
+    let mut truncated = jpeg(2, 3);
+    truncated.truncate(truncated.len() - 2);
+    truncated.splice(2..2, [0xff, 0xe1, 0, 4, 0xff, 0xd9]);
+    let cache = GuideImageCache::with_fetcher(
+        directory.0.join("fake-eoi"),
+        move |_, _, _| Ok(("image/jpeg".into(), truncated.clone())),
+        ImageLimits::default(),
+    )
+    .unwrap();
+    assert!(cache.download(IMAGE_URL).is_err());
+}
+
+#[test]
+fn decoder_pixel_budget_is_checked_before_allocating_the_output() {
+    let directory = TestDirectory::new();
+    let mut body = jpeg(2, 3);
+    let sof = body
+        .windows(2)
+        .position(|pair| pair == [0xff, 0xc0])
+        .unwrap();
+    body[sof + 5..sof + 7].copy_from_slice(&5000u16.to_be_bytes());
+    body[sof + 7..sof + 9].copy_from_slice(&5000u16.to_be_bytes());
+    let cache = GuideImageCache::with_fetcher(
+        directory.0.join("over-pixel-limit"),
+        move |_, _, _| Ok(("image/jpeg".into(), body.clone())),
+        ImageLimits::default(),
+    )
+    .unwrap();
+    assert!(
+        cache
+            .download(IMAGE_URL)
+            .unwrap_err()
+            .message()
+            .contains("pixel limit")
+    );
+    assert_eq!(cache.stats()["files"], 0);
+}
+
+#[test]
+fn legacy_corrupt_disk_image_blocks_commit_and_retry_replaces_it() {
+    use grip_sidecar::guides::GuideReader;
+    let directory = TestDirectory::new();
+    let image_dir = directory.0.join("images");
+    fs::create_dir(&image_dir).unwrap();
+    let image_path = image_dir.join(format!("offline-{IMAGE_DIGEST}.png"));
+    let png = include!("fixtures/static_png.rs");
+    fs::write(&image_path, &png[..33]).unwrap(); // A previously accepted legacy header-only file.
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let fetched = fetches.clone();
+    let images = GuideImageCache::with_fetcher(
+        &image_dir,
+        move |_, _, _| {
+            fetched.fetch_add(1, Ordering::Relaxed);
+            Ok(("image/png".into(), png.to_vec()))
+        },
+        ImageLimits::default(),
+    )
+    .unwrap();
+    assert!(!images.is_downloaded(IMAGE_URL).unwrap());
+    let guides = GuideReader::with_fetcher(
+        directory.0.join("guides"),
+        |_, _, _| {
+            Ok(format!(r#"<div class="workshopItemTitle">Guide</div><div class="guideAuthors">Author</div><div class="subSection" id="1"><div class="subSectionTitle">Chapter</div><div class="subSectionDesc"><img src="{IMAGE_URL}"></div></div>"#).into_bytes())
+        },
+        || 1,
+    );
+    let candidate = guides.prepare("1", false, &images).unwrap();
+    let token = candidate["token"].as_str().unwrap();
+    assert!(guides.commit("1", token, &images).is_err());
+    assert!(guides.get_cached("1").unwrap().is_none());
+    assert!(images.download(IMAGE_URL).unwrap());
+    assert_eq!(fetches.load(Ordering::Relaxed), 1);
+    assert_eq!(fs::read(&image_path).unwrap(), png);
+    assert_eq!(guides.commit("1", token, &images).unwrap()["offline"], true);
+    let restarted = GuideImageCache::with_fetcher(
+        image_dir,
+        |_, _, _| panic!("repaired image must stay offline"),
+        ImageLimits::default(),
+    )
+    .unwrap();
+    assert!(restarted.is_downloaded(IMAGE_URL).unwrap());
+    assert!(restarted.download(IMAGE_URL).unwrap());
 }
 
 #[test]
@@ -155,6 +363,7 @@ fn download_result_requires_matching_static_bounded_raster() {
         ("image/gif", gif(1), true),
         ("image/webp", webp(false), true),
         ("image/jpeg", jpeg(2, 3), true),
+        ("image/jpeg", png(b'p', 1, 1), false),
         ("application/octet-stream", jpeg(2, 3), true),
         ("application/octet-stream", png(b'p', 1, 1), true),
         (
@@ -188,11 +397,7 @@ fn download_result_requires_matching_static_bounded_raster() {
         }
     }
 
-    let apng = {
-        let mut body = png(b'a', 1, 1);
-        body.extend_from_slice(b"\0\0\0\x08acTL\0\0\0\x02\0\0\0\0crc!");
-        body
-    };
+    let apng = include!("fixtures/animated_png.rs").to_vec();
     let cache = GuideImageCache::with_fetcher(
         directory.0.join("apng"),
         move |_, _, _| Ok(("image/png".to_owned(), apng.clone())),

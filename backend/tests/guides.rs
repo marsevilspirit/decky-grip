@@ -5,6 +5,7 @@ use grip_sidecar::guides::{GuideError, GuideLimits, GuideReader};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::ffi::CString;
+use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -42,7 +43,7 @@ fn deleting_one_offline_guide_preserves_shared_images_and_positions() {
         |_, _, _| {
             Ok((
                 "image/png".into(),
-                b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0test".to_vec(),
+                include!("fixtures/static_png.rs").to_vec(),
             ))
         },
         ImageLimits::default(),
@@ -106,12 +107,14 @@ fn reclaiming_old_images_preserves_shared_and_pending_downloads_and_reuses_cance
             } else {
                 vec!["old", "shared"]
             };
-            let html = names
-                .iter()
-                .map(|name| {
-                    format!(r#"<img src="https://images.steamusercontent.com/{name}.png">"#)
-                })
-                .collect::<String>();
+            let mut html = String::new();
+            for name in names {
+                write!(
+                    html,
+                    r#"<img src="https://images.steamusercontent.com/{name}.png">"#
+                )
+                .unwrap();
+            }
             Ok(format!(r#"<div class="workshopItemTitle">Guide</div><div class="guideAuthors">Author</div><div class="subSection" id="1"><div class="subSectionTitle">Chapter</div><div class="subSectionDesc">{html}</div></div>"#).into_bytes())
         },
         || NOW_MS,
@@ -136,7 +139,7 @@ fn reclaiming_old_images_preserves_shared_and_pending_downloads_and_reuses_cance
                 }
                 Ok((
                     "image/png".into(),
-                    b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0test".to_vec(),
+                    include!("fixtures/static_png.rs").to_vec(),
                 ))
             },
             ImageLimits::default(),
@@ -286,7 +289,7 @@ fn guide_fixture(title: &str) -> Vec<u8> {
 fn offline_updates_publish_only_after_all_images_and_preserve_the_old_version_on_failure() {
     use grip_sidecar::guide_images::{GuideImageCache, ImageErrorKind, ImageLimits};
     let harness = Harness::new();
-    let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0test";
+    let png = include!("fixtures/static_png.rs");
     let images = GuideImageCache::with_fetcher(
         harness._directory.0.join("images"),
         move |_, _, _| Ok(("image/png".into(), png.to_vec())),
@@ -411,7 +414,7 @@ fn downloaded_and_legacy_bodies_survive_lru_and_restart_until_manual_deletion() 
         |_, _, _| {
             Ok((
                 "image/png".into(),
-                b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0test".to_vec(),
+                include!("fixtures/static_png.rs").to_vec(),
             ))
         },
         ImageLimits::default(),

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
+import select
 import subprocess
 import threading
+import time
 from concurrent.futures import Future, TimeoutError as FutureTimeoutError
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -51,6 +54,7 @@ class RustSidecar:
         )
         assert self._process.stdin is not None
         assert self._process.stdout is not None
+        os.set_blocking(self._process.stdin.fileno(), False)
         self._reader_thread = threading.Thread(
             target=self._read_stdout,
             name="grip-rust-sidecar-reader",
@@ -103,7 +107,9 @@ class RustSidecar:
             self._closed = True
             self._fail_transport(terminate=False)
             process = self._process
-            with self._write_lock:
+            # Writers own duplicate descriptors, so closing stdin cannot race
+            # their fd use or wait behind pipe backpressure.
+            with self._state_lock:
                 if process.stdin is not None and not process.stdin.closed:
                     try:
                         process.stdin.close()
@@ -227,6 +233,42 @@ class RustSidecar:
             raise ValueError(error["message"])
         raise RustSidecarError(error["message"], error["kind"])
 
+    def _write_request(self, payload: bytes, deadline: float) -> None:
+        if not self._write_lock.acquire(timeout=max(0, deadline - time.monotonic())):
+            raise FutureTimeoutError
+        descriptor: Optional[int] = None
+        written = 0
+        try:
+            with self._state_lock:
+                if self._failed:
+                    raise self._unavailable_error()
+                assert self._process.stdin is not None
+                descriptor = os.dup(self._process.stdin.fileno())
+            while written < len(payload):
+                if self._failed:
+                    raise self._unavailable_error()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise FutureTimeoutError
+                try:
+                    count = os.write(descriptor, memoryview(payload)[written:])
+                except BlockingIOError:
+                    select.select([], [descriptor], [], remaining)
+                    continue
+                if not count:
+                    raise BrokenPipeError
+                written += count
+        except FutureTimeoutError:
+            # Once part of a JSON line was sent, continuing would concatenate
+            # the next request onto a truncated frame.
+            if written:
+                self._fail_transport()
+            raise
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            self._write_lock.release()
+
     def request(
         self,
         method: str,
@@ -234,6 +276,9 @@ class RustSidecar:
         *,
         timeout: Optional[float] = None,
     ) -> Any:
+        deadline = time.monotonic() + (
+            self.RESPONSE_TIMEOUT_SECONDS if timeout is None else timeout
+        )
         with self._state_lock:
             if self._failed:
                 raise self._unavailable_error()
@@ -264,22 +309,13 @@ class RustSidecar:
             raise
 
         try:
-            with self._write_lock:
-                assert self._process.stdin is not None
-                written = 0
-                while written < len(payload):
-                    count = self._process.stdin.write(payload[written:])
-                    if not count:
-                        raise BrokenPipeError
-                    written += count
-                self._process.stdin.flush()
-        except (BrokenPipeError, OSError, ValueError):
-            self._fail_transport()
-
-        try:
-            response = pending.result(
-                timeout=self.RESPONSE_TIMEOUT_SECONDS if timeout is None else timeout
-            )
+            try:
+                self._write_request(payload, deadline)
+            except FutureTimeoutError:
+                raise
+            except (OSError, ValueError):
+                self._fail_transport()
+            response = pending.result(timeout=max(0, deadline - time.monotonic()))
         except FutureTimeoutError:
             with self._state_lock:
                 abandoned = self._pending.pop(request_id, None) is pending

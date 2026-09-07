@@ -11,6 +11,7 @@ export interface InstrumentedHotkeyPress {
   version: 1;
   button: "L4";
   sequence: number;
+  // Userspace HID read time, not the unobservable physical button-down time.
   detectedAtUnixMs: number;
 }
 

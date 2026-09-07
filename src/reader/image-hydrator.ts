@@ -158,6 +158,8 @@ export class ReaderImageHydrator {
   private readonly capacityDeferredAt = new WeakMap<object, number>();
   private readonly pendingOverflow = new Set<HydratableImage>();
   private readonly pinnedUrls = new Set<string>();
+  private readonly nearbyUrls = new Set<string>();
+  private priorityUrl: string | null = null;
   private active = 0;
   private blobBytes = 0;
   private generation = 0;
@@ -251,8 +253,11 @@ export class ReaderImageHydrator {
     return operation;
   }
 
-  /** Pins the current near-viewport working set so LRU eviction cannot thrash it. */
-  setPinnedImages(images: Iterable<HydratableImage>): void {
+  /** Protect actual visible images; nearby preloads must remain evictable. */
+  setPinnedImages(
+    images: Iterable<HydratableImage>,
+    nearbyImages?: Iterable<HydratableImage>,
+  ): void {
     this.pinningActive = true;
     const nextPinnedUrls = new Set<string>();
     for (const image of images) {
@@ -271,7 +276,20 @@ export class ReaderImageHydrator {
         this.pinnedUrls.add(url);
       }
     }
+    this.nearbyUrls.clear();
+    for (const image of nearbyImages ?? []) {
+      if (image.isConnected && image.dataset.gripImageUrl)
+        this.nearbyUrls.add(image.dataset.gripImageUrl);
+    }
+    for (const url of this.pinnedUrls) this.nearbyUrls.add(url);
+    if (this.priorityUrl && !this.pinnedUrls.has(this.priorityUrl))
+      this.priorityUrl = null;
     this.pruneUnpinnedQueue();
+    this.queue.sort(
+      (left, right) =>
+        Number(this.pinnedUrls.has(right.url)) -
+        Number(this.pinnedUrls.has(left.url)),
+    );
   }
 
   hydrateImages(images: Iterable<HydratableImage>, residentOnly = false): void {
@@ -285,14 +303,13 @@ export class ReaderImageHydrator {
       if (image.dataset.gripImageState === "unavailable") {
         continue;
       }
-      if (this.capacityDeferredAt.get(image) === this.pinGeneration) {
-        continue;
-      }
-
       const blob = this.blobs.get(url);
       if (blob) {
         this.touchBlob(url, blob);
         this.assignBlob(image, url, blob);
+        continue;
+      }
+      if (this.capacityDeferredAt.get(image) === this.pinGeneration) {
         continue;
       }
       if (residentOnly) continue;
@@ -305,6 +322,19 @@ export class ReaderImageHydrator {
         continue;
       }
 
+      if (
+        this.pendingByUrl.size >= this.maxPendingUrls &&
+        this.pinnedUrls.has(url)
+      ) {
+        const index = this.queue.findIndex(
+          (task) => !this.pinnedUrls.has(task.url),
+        );
+        if (index >= 0) {
+          const [displaced] = this.queue.splice(index, 1);
+          this.pendingByUrl.delete(displaced.url);
+          this.markDeferred(displaced);
+        }
+      }
       if (this.pendingByUrl.size >= this.maxPendingUrls) {
         image.dataset.gripImageState = "deferred";
         this.pendingOverflow.add(image);
@@ -319,7 +349,16 @@ export class ReaderImageHydrator {
       this.pendingByUrl.set(url, task);
       this.imageUrls.set(image, url);
       image.dataset.gripImageState = "queued";
-      this.queue.push(task);
+      if (this.pinnedUrls.has(url)) {
+        const firstPreload = this.queue.findIndex(
+          (pending) => !this.pinnedUrls.has(pending.url),
+        );
+        this.queue.splice(
+          firstPreload < 0 ? this.queue.length : firstPreload,
+          0,
+          task,
+        );
+      } else this.queue.push(task);
     }
     if (!residentOnly) this.pump();
   }
@@ -329,9 +368,11 @@ export class ReaderImageHydrator {
     if (
       !url ||
       !image.isConnected ||
-      image.dataset.gripImageState !== "unavailable"
+      (image.dataset.gripImageState !== "unavailable" &&
+        image.dataset.gripImageState !== "capacity")
     )
       return;
+    if (image.dataset.gripImageState === "capacity") this.priorityUrl = url;
     const blob = this.blobs.get(url);
     const images = new Set([image, ...(blob?.images ?? [])]);
     if (blob) {
@@ -357,6 +398,8 @@ export class ReaderImageHydrator {
     this.pendingByUrl.clear();
     this.pendingOverflow.clear();
     this.pinnedUrls.clear();
+    this.nearbyUrls.clear();
+    this.priorityUrl = null;
     this.pinGeneration += 1;
     this.pinningActive = false;
     for (const blob of this.blobs.values()) {
@@ -404,7 +447,7 @@ export class ReaderImageHydrator {
         this.markUnavailable(task);
         return;
       }
-      if (this.pinningActive && !this.pinnedUrls.has(task.url)) {
+      if (this.pinningActive && !this.nearbyUrls.has(task.url)) {
         this.markDeferred(task);
         return;
       }
@@ -421,7 +464,12 @@ export class ReaderImageHydrator {
         image.width = result.width;
         image.height = result.height;
       }
-      if (!this.evictToFit(bytes)) {
+      if (
+        !this.evictToFit(
+          bytes,
+          task.url === this.priorityUrl ? new Set([task.url]) : this.pinnedUrls,
+        )
+      ) {
         this.markCapacityDeferred(task);
         return;
       }
@@ -466,7 +514,8 @@ export class ReaderImageHydrator {
     if (image.src !== blob.objectUrl) {
       image.src = blob.objectUrl;
     }
-    image.dataset.gripImageState = "ready";
+    if (image.dataset.gripImageState !== "ready")
+      image.dataset.gripImageState = "ready";
   }
 
   private markUnavailable(task: PendingImageUrl): void {
@@ -481,7 +530,9 @@ export class ReaderImageHydrator {
   private markCapacityDeferred(task: PendingImageUrl): void {
     for (const image of task.images) {
       if (image.isConnected && this.imageUrls.get(image) === task.url) {
-        image.dataset.gripImageState = "deferred";
+        image.dataset.gripImageState = this.pinnedUrls.has(task.url)
+          ? "capacity"
+          : "deferred";
         this.capacityDeferredAt.set(image, this.pinGeneration);
         this.imageUrls.delete(image);
       }
@@ -518,7 +569,7 @@ export class ReaderImageHydrator {
         return false;
       }
       this.blobs.delete(oldest[0]);
-      this.evictBlob(oldest[0], oldest[1]);
+      this.evictBlob(oldest[0], oldest[1], this.pinnedUrls.has(oldest[0]));
     }
     return true;
   }
@@ -526,7 +577,7 @@ export class ReaderImageHydrator {
   private pruneUnpinnedQueue(): void {
     for (let index = this.queue.length - 1; index >= 0; index -= 1) {
       const task = this.queue[index];
-      if (this.pinnedUrls.has(task.url)) {
+      if (this.nearbyUrls.has(task.url)) {
         continue;
       }
       this.queue.splice(index, 1);
@@ -537,7 +588,7 @@ export class ReaderImageHydrator {
     }
     for (const image of this.pendingOverflow) {
       const url = image.dataset.gripImageUrl;
-      if (!image.isConnected || !url || !this.pinnedUrls.has(url)) {
+      if (!image.isConnected || !url || !this.nearbyUrls.has(url)) {
         this.pendingOverflow.delete(image);
       }
     }
@@ -552,13 +603,17 @@ export class ReaderImageHydrator {
       return;
     }
     const candidates: HydratableImage[] = [];
-    for (const image of this.pendingOverflow) {
+    for (const image of [...this.pendingOverflow].sort(
+      (left, right) =>
+        Number(this.pinnedUrls.has(right.dataset.gripImageUrl ?? "")) -
+        Number(this.pinnedUrls.has(left.dataset.gripImageUrl ?? "")),
+    )) {
       this.pendingOverflow.delete(image);
       const url = image.dataset.gripImageUrl;
       if (
         image.isConnected &&
         url &&
-        (!this.pinningActive || this.pinnedUrls.has(url))
+        (!this.pinningActive || this.nearbyUrls.has(url))
       ) {
         candidates.push(image);
       }
@@ -569,7 +624,7 @@ export class ReaderImageHydrator {
     this.hydrateImages(candidates);
   }
 
-  private evictBlob(url: string, blob: BlobEntry): void {
+  private evictBlob(url: string, blob: BlobEntry, capacity = false): void {
     this.revokeObjectUrl(blob.objectUrl);
     this.blobBytes = Math.max(0, this.blobBytes - blob.bytes);
     for (const image of blob.images) {
@@ -577,7 +632,9 @@ export class ReaderImageHydrator {
         continue;
       }
       image.removeAttribute("src");
-      image.dataset.gripImageState = "evicted";
+      image.dataset.gripImageState = capacity ? "capacity" : "evicted";
+      if (this.pinningActive)
+        this.capacityDeferredAt.set(image, this.pinGeneration);
       this.imageUrls.delete(image);
     }
   }

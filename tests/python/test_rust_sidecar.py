@@ -5,6 +5,7 @@ import stat
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -146,6 +147,19 @@ for line in sys.stdin:
         print("x" * 1024, flush=True)
 """
 
+BACKPRESSURE_SIDECAR = r"""#!/usr/bin/env python3
+import json
+import sys
+import time
+
+request = json.loads(sys.stdin.readline())
+print(json.dumps({"id": request["id"], "ok": True, "result": {
+    "version": 2,
+    "capabilities": ["positions", "reader_positions", "guides", "images", "hotkey", "multiplex"],
+}}), flush=True)
+time.sleep(30)
+"""
+
 
 class RustSidecarTests(unittest.TestCase):
     def setUp(self):
@@ -274,6 +288,93 @@ for line in sys.stdin:
 
         client.RESPONSE_TIMEOUT_SECONDS = 1
         self.assertEqual(client.request("test.next", {}), "next")
+
+    def test_write_lock_and_response_share_one_deadline(self):
+        self.write_sidecar(LATE_RESPONSE_SIDECAR)
+        client = self.start()
+        client._write_lock.acquire()
+        release = threading.Timer(0.1, client._write_lock.release)
+        release.start()
+        started = time.monotonic()
+        try:
+            with self.assertRaisesRegex(RustSidecarError, "timed out"):
+                client.request("test.slow", {}, timeout=0.2)
+            self.assertLess(time.monotonic() - started, 0.3)
+        finally:
+            release.join()
+        self.assertFalse(client._pending)
+        self.assertEqual(client.request("test.next", {}, timeout=1), "next")
+
+    def test_write_lock_timeout_does_not_send_or_stop_the_sidecar(self):
+        client = self.start()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            client._write_lock.acquire()
+            started = time.monotonic()
+            try:
+                request = executor.submit(client.request, "positions.snapshot", {}, timeout=0.05)
+                with self.assertRaisesRegex(RustSidecarError, "timed out"):
+                    request.result(timeout=1)
+                self.assertLess(time.monotonic() - started, 0.5)
+            finally:
+                client._write_lock.release()
+        self.assertFalse(client._pending)
+        self.assertEqual(client.request("positions.snapshot", {}), {})
+
+    def test_pipe_backpressure_times_out_and_close_interrupts_writes(self):
+        for close_while_writing in (False, True):
+            with self.subTest(close_while_writing=close_while_writing):
+                self.write_sidecar(BACKPRESSURE_SIDECAR)
+                client = self.start()
+                executor = ThreadPoolExecutor(max_workers=2)
+                writes = []
+                original_write = os.write
+
+                def observe_write(descriptor, payload):
+                    count = original_write(descriptor, payload)
+                    writes.append((count, len(payload)))
+                    return count
+
+                write_patch = mock.patch("rust_sidecar.os.write", side_effect=observe_write)
+                write_spy = write_patch.start()
+                self.addCleanup(write_patch.stop)
+                # A large JSON frame guarantees a partial write even on hosts
+                # with larger pipe buffers. The peer deliberately never reads.
+                try:
+                    request = executor.submit(
+                        client.request, "test.backpressure", {"body": "x" * (2 * 1024 * 1024)},
+                        timeout=30 if close_while_writing else 0.2,
+                    )
+                    deadline = time.monotonic() + 1
+                    while not client._write_lock.locked() and time.monotonic() < deadline:
+                        time.sleep(0.005)
+                    self.assertTrue(client._write_lock.locked())
+                    queued = executor.submit(client.request, "positions.snapshot", {}, timeout=30)
+                    if close_while_writing:
+                        closing = threading.Thread(target=client.close, daemon=True)
+                        closing.start()
+                        closing.join(timeout=3)
+                        self.assertFalse(closing.is_alive(), "close waited behind a blocked writer")
+                    with self.assertRaises(RustSidecarError):
+                        request.result(timeout=2)
+                    with self.assertRaises(RustSidecarError):
+                        queued.result(timeout=2)
+                    self.assertFalse(client._pending)
+                    self.assertTrue(client._failed)
+                    if not close_while_writing:
+                        self.assertTrue(writes, "the request must have sent part of its JSON frame")
+                        self.assertGreater(sum(count for count, _ in writes), 0)
+                        self.assertLess(sum(count for count, _ in writes), writes[0][1])
+                    write_calls = write_spy.call_count
+                    with self.assertRaisesRegex(RustSidecarError, "unavailable"):
+                        client.request("positions.snapshot", {}, timeout=0.1)
+                    self.assertEqual(write_spy.call_count, write_calls)
+                finally:
+                    if client._process.poll() is None:
+                        client._process.kill()
+                    client._process.wait(timeout=2)
+                    executor.shutdown(wait=True)
+                    client.close()
+                    write_patch.stop()
 
     def test_eof_wakes_every_pending_request(self):
         self.write_sidecar(EOF_SIDECAR)

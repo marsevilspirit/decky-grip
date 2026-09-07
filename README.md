@@ -137,6 +137,11 @@ then evaluates a 20-attempt warm-cache gate: first-screen P95 must be at most
 300 ms with no spinner, position failure, canceled open, or load timeout. Failed
 physical opens remain in the same rolling 50-attempt window instead of
 disappearing from the measurement.
+These timings start when the backend reads the L4 report, not at the physical
+button edge; they exclude device/report delivery latency. The HID listener waits
+for descriptor readability rather than sleeping after an empty read, so incoming
+reports wake it immediately. Actual button-to-screen acceptance remains a
+separate device measurement.
 
 ## Storage
 
@@ -203,9 +208,11 @@ frontend image residency. The reader reuses this bounded image cache across
 reader opens and guide switches. Closing
 the reader releases its page nodes and cancels pending hydration; explicit image
 cache cleanup and plugin unload also release the retained Blob URLs.
-Animated image payloads are rejected, and the reader
-observes at most 512 inert image nodes while staging no more than 48 distinct
-image URLs at once. Under **高级选项**, the panel shows cache usage and provides
+Animated image payloads are rejected. The browser observes all image nodes within
+the validated guide's existing size/node limits; the reader chooses at most 512
+active hydration candidates with visible images first, while staging no more than
+48 distinct image URLs at once. This budget never permanently excludes images
+later in a long guide. Under **高级选项**, the panel shows cache usage and provides
 separate controls for clearing all guide bodies or images. To remove one guide,
 open the reader's **Y** switcher and choose **删除当前指南离线副本**, then confirm.
 This removes its body and all unreferenced images, including leftovers from
@@ -215,10 +222,22 @@ article remains readable. Cache deletion is unavailable during an active
 download. Clearing images also invalidates in-flight frontend work, and none
 of these controls deletes saved reading positions.
 
+Image completeness includes a bounded full pixel decode on download or the first
+read of a changed disk file, not just a valid-looking header. Invalid cached images
+do not count as downloaded and can be fetched again. Animation detection respects
+format structure, so ordinary metadata containing animation keywords is accepted.
+The decoder enables only the four supported raster formats. Warm reads reuse
+validation by file signature and do not repeat the decode. Nearby preloads can be
+evicted for actually visible images; if several visible images exceed the decoded
+budget, **图片内存已满，优先显示此图** lets you choose one without raising that budget.
+
 `positions.json` has exactly one owner: the Rust sidecar. Backend RPC calls are
 serialized before entering the file store, so their arrival order is not
 reordered by the executor thread pool. A running sidecar failure is surfaced;
 the bridge never switches writers.
+Its request deadline includes waiting for the write lock, pipe writes, and the
+response. Pipe backpressure cannot block plugin shutdown; a partially written
+timed-out JSON frame fails the transport instead of corrupting the next request.
 
 ## Publishing
 

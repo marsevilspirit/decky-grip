@@ -49,6 +49,9 @@ it("shares an in-flight download across pages, cancels later requests and resume
   const firstListener = vi.fn();
   const unsubscribe = tasks.subscribe(firstListener);
   const first = tasks.start({ appId: "10", guideId: "1" });
+  // Cache maintenance uses this flag even before the download's first microtask.
+  expect(tasks.hasActive()).toBe(true);
+  expect(fetch).not.toHaveBeenCalled();
   await tick();
   expect(fetch).toHaveBeenCalledTimes(3);
   unsubscribe(); // Native page went away. Another AppID still shares the same content job.

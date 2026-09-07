@@ -275,7 +275,7 @@ describe("GripPanel", () => {
     expect(panelText()).not.toContain("清除指南正文缓存");
     expect(panelText()).not.toContain("更新离线指南");
     expect(panelText()).not.toContain("移除此指南的正文缓存");
-    expect(panelText()).not.toContain("物理 L4 首屏门禁");
+    expect(panelText()).not.toContain("L4 检测后首屏门禁");
 
     await act(async () => {
       button("高级选项").click();
@@ -284,7 +284,8 @@ describe("GripPanel", () => {
     expect(panelText()).toContain("清除指南正文缓存");
     expect(panelText()).not.toContain("更新离线指南");
     expect(panelText()).not.toContain("移除此指南的正文缓存");
-    expect(panelText()).toContain("物理 L4 首屏门禁");
+    expect(panelText()).toContain("L4 检测后首屏门禁");
+    expect(panelText()).toContain("从后端读到 L4 开始计时");
   });
 
   it("keeps reader opening feedback and allows retry after a failed open", async () => {

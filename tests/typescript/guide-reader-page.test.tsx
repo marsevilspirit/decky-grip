@@ -328,6 +328,7 @@ describe("GuideReaderPage position lifecycle", () => {
       onClose?: () => void;
       onSwitchGuide?: (identity: GuideIdentity) => Promise<void>;
       onRemoveOffline?: (guideId: string) => Promise<CacheClearResult>;
+      performance?: ReaderPerformanceTracker;
     } = {},
   ): Promise<HTMLElement> => {
     container = document.createElement("div");
@@ -350,7 +351,7 @@ describe("GuideReaderPage position lifecycle", () => {
           onClose={options.onClose ?? (() => undefined)}
           onRepairPositions={async () => ""}
           onSwitchGuide={options.onSwitchGuide ?? (async () => undefined)}
-          performance={new ReaderPerformanceTracker()}
+          performance={options.performance ?? new ReaderPerformanceTracker()}
         />,
       );
       await Promise.resolve();
@@ -780,6 +781,410 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(scroller.scrollTop).toBe(4600);
     await act(async () => vi.advanceTimersByTime(400));
     expect(saved.scrollTop).toBe(4600);
+  });
+
+  it("keeps the saved bookmark when a background update completes before the old layout has restored", async () => {
+    const guide = guideFixture();
+    let saved = savedPosition;
+    const cache = new ReaderSessionCache({
+      getCachedGuide: async () => guide,
+      getGuide: async () => guide,
+      getReaderPosition: async () => saved,
+      saveReaderPosition: async (
+        _key,
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+      ) => {
+        saved = {
+          scrollTop,
+          sectionId,
+          anchorText,
+          anchorOffset,
+          updatedAt: 2,
+        };
+        return saved;
+      },
+    });
+    await cache.load(identity);
+    let finish!: () => void;
+    const updated = {
+      ...guide,
+      fetchedAt: 2,
+      sections: guide.sections.map((section) => ({
+        ...section,
+        html: section.html.replace("正文", "新版正文"),
+      })),
+    };
+    const downloads = new GuideDownloadTasks(async () => {
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      cache.acceptOfflineGuide(updated);
+    });
+    const work = downloads.start(identity, true);
+    await Promise.resolve();
+    const scroller = await mount(cache, async () => null, 1000, { downloads });
+    expect(document.querySelectorAll("[data-guide-section-id]")).toHaveLength(
+      1,
+    );
+    expect(scroller.scrollTop).toBe(0);
+    await act(async () => {
+      finish();
+      await work;
+    });
+    expect(saved.scrollTop).toBe(8800);
+    Object.defineProperty(scroller, "scrollHeight", {
+      configurable: true,
+      value: 12000,
+    });
+    for (let frame = 0; frame < 8; frame++) await flushFrame();
+    notifyResize();
+    await act(async () => vi.advanceTimersByTime(101));
+    expect(scroller.scrollTop).toBe(8800);
+    await unmount();
+    expect(saved.scrollTop).toBe(8800);
+    expect(cache.peek(identity)?.position?.scrollTop).toBe(8800);
+  });
+
+  it.each([false, true])(
+    "loads image 513 and later chapters with bounded active work (same viewport: %s)",
+    async (sameViewport) => {
+      const observed: HTMLImageElement[] = [];
+      let intersect!: IntersectionObserverCallback;
+      vi.stubGlobal(
+        "IntersectionObserver",
+        class {
+          constructor(callback: IntersectionObserverCallback) {
+            intersect = callback;
+          }
+          observe(image: HTMLImageElement) {
+            observed.push(image);
+          }
+          disconnect() {}
+        },
+      );
+      const repeatedUrl = "https://images.steamusercontent.com/shared.png";
+      const lastUrl = "https://images.steamusercontent.com/last.png";
+      const guide = guideFixture();
+      guide.sections = [
+        {
+          id: "1",
+          title: "第一章",
+          html: Array.from(
+            { length: 513 },
+            (_, index) =>
+              `<img alt="${index + 1}" data-grip-image-url="${repeatedUrl}">`,
+          ).join(""),
+        },
+        {
+          id: "2",
+          title: "第二章",
+          html: `<img alt="514" data-grip-image-url="${lastUrl}">`,
+        },
+      ];
+      const cache = new ReaderSessionCache({
+        getCachedGuide: async () => guide,
+        getGuide: async () => guide,
+        getReaderPosition: async () => null,
+        saveReaderPosition: async (
+          _key,
+          scrollTop,
+          sectionId,
+          anchorText,
+          anchorOffset,
+        ) => ({ scrollTop, sectionId, anchorText, anchorOffset, updatedAt: 2 }),
+      });
+      await cache.load(identity);
+      const fetchImage = vi.fn(async () => ({
+        mimeType: "image/png",
+        base64: "AQID",
+        fromCache: true,
+        width: 1,
+        height: 1,
+      }));
+      let blob = 0;
+      const imageHydrator = new ReaderImageHydrator(
+        fetchImage,
+        3,
+        () => `blob:${++blob}`,
+        () => {},
+      );
+      const hydrate = vi.spyOn(imageHydrator, "hydrateImages");
+      const scroller = await mount(cache, fetchImage, 30000, { imageHydrator });
+      for (let frame = 0; frame < 3; frame++) await flushFrame();
+      expect(observed).toHaveLength(514);
+      observed.forEach((image, index) => {
+        image.getBoundingClientRect = () =>
+          ({
+            top: sameViewport ? 100 : index * 50 - scroller.scrollTop,
+            bottom: sameViewport ? 140 : index * 50 + 40 - scroller.scrollTop,
+          }) as DOMRect;
+      });
+      await act(async () => {
+        intersect(
+          observed.map((target) => ({
+            target,
+            isIntersecting: true,
+          })) as unknown as IntersectionObserverEntry[],
+          {} as IntersectionObserver,
+        );
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(observed[0].src).toBe("blob:1");
+      expect(observed[512].getAttribute("src")).toBeNull();
+      await act(async () => {
+        if (sameViewport) observed[0].dispatchEvent(new Event("load"));
+        else {
+          scroller.dispatchEvent(new Event("wheel"));
+          scroller.scrollTop = 25500;
+          scroller.dispatchEvent(new Event("scroll"));
+        }
+      });
+      await flushFrame();
+      await act(async () => vi.advanceTimersByTimeAsync(0));
+      expect(observed[512].src).toBe("blob:1");
+      expect(observed[513].src).toBe("blob:2");
+      expect(fetchImage.mock.calls).toEqual([
+        [repeatedUrl, true],
+        [lastUrl, true],
+      ]);
+      for (const [candidates, residentOnly] of hydrate.mock.calls) {
+        if (!residentOnly)
+          expect([...candidates].length).toBeLessThanOrEqual(512);
+      }
+    },
+  );
+
+  it("reports visible image capacity failure honestly and allows choosing an image with its button or A", async () => {
+    let intersect!: IntersectionObserverCallback;
+    const observed: HTMLImageElement[] = [];
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        constructor(callback: IntersectionObserverCallback) {
+          intersect = callback;
+        }
+        observe(image: HTMLImageElement) {
+          observed.push(image);
+        }
+        disconnect() {}
+      },
+    );
+    const guide = guideFixture();
+    guide.sections = [
+      {
+        id: "1",
+        title: "大图",
+        html: '<p>正文</p><img alt="一" data-grip-image-url="https://a/1"><img alt="二" data-grip-image-url="https://a/2">',
+      },
+    ];
+    const cache = new ReaderSessionCache({
+      getCachedGuide: async () => guide,
+      getGuide: async () => guide,
+      getReaderPosition: async () => null,
+      saveReaderPosition: async (
+        _key,
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+      ) => ({ scrollTop, sectionId, anchorText, anchorOffset, updatedAt: 2 }),
+    });
+    await cache.load(identity);
+    const performance = new ReaderPerformanceTracker();
+    const trace = performance.begin({
+      version: 1,
+      button: "L4",
+      sequence: 1,
+      detectedAtUnixMs: Date.now(),
+    });
+    performance.bind(trace, identity);
+    performance.markRouteRequested(trace);
+    const fetchImage = vi.fn(async () => ({
+      mimeType: "image/png",
+      base64: "AQID",
+      fromCache: true,
+      width: 4096,
+      height: 4096,
+    }));
+    let blob = 0;
+    const imageHydrator = new ReaderImageHydrator(
+      fetchImage,
+      3,
+      () => `blob:${++blob}`,
+      () => {},
+    );
+    const scroller = await mount(cache, fetchImage, 3000, {
+      performance,
+      imageHydrator,
+    });
+    observed.forEach((image) => {
+      image.getBoundingClientRect = () =>
+        ({ top: 100, bottom: 300 }) as DOMRect;
+      Object.defineProperty(image, "complete", {
+        configurable: true,
+        value: true,
+      });
+    });
+    await act(async () => {
+      intersect(
+        observed.map((target) => ({
+          target,
+          isIntersecting: true,
+        })) as unknown as IntersectionObserverEntry[],
+        {} as IntersectionObserver,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    for (let frame = 0; frame < 3; frame++) await flushFrame();
+    notifyResize();
+    await act(async () => vi.advanceTimersByTimeAsync(101));
+    expect(observed[0].dataset.gripImageState).toBe("ready");
+    expect(observed[1].dataset.gripImageState).toBe("capacity");
+    expect(performance.getSnapshot().latest?.positionOutcome).toBe(
+      "unavailable",
+    );
+    expect(performance.getSnapshot().warmPositionFailureCount).toBe(1);
+    expect(performance.getSnapshot().warmSpinnerCount).toBe(0);
+    expect(scroller.getAttribute("data-ok-action")).toBe("优先显示此图");
+    await act(async () => {
+      buttonNamed("图片内存已满，优先显示此图").click();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(observed[1].dataset.gripImageState).toBe("ready");
+    expect(observed[0].dataset.gripImageState).toBe("capacity");
+    await act(async () => {
+      pressKey(scroller, "Enter");
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(observed[0].dataset.gripImageState).toBe("ready");
+    expect(observed[1].dataset.gripImageState).toBe("capacity");
+    expect(fetchImage).toHaveBeenCalledTimes(4);
+    await unmount();
+    imageHydrator.clear();
+  });
+
+  it("does not count a deferred visible image as a restored first screen", async () => {
+    let intersect!: IntersectionObserverCallback;
+    const observed: HTMLImageElement[] = [];
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        constructor(callback: IntersectionObserverCallback) {
+          intersect = callback;
+        }
+        observe(image: HTMLImageElement) {
+          observed.push(image);
+        }
+        disconnect() {}
+      },
+    );
+    const guide = guideFixture();
+    guide.sections = [
+      {
+        id: "1",
+        title: "图文",
+        html: '<p>正文</p><img data-grip-image-url="https://a/1"><img data-grip-image-url="https://a/2">',
+      },
+    ];
+    const cache = new ReaderSessionCache({
+      getCachedGuide: async () => guide,
+      getGuide: async () => guide,
+      getReaderPosition: async () => null,
+      saveReaderPosition: async (
+        _key,
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+      ) => ({ scrollTop, sectionId, anchorText, anchorOffset, updatedAt: 2 }),
+    });
+    await cache.load(identity);
+    let release!: (value: null) => void;
+    const fetchImage = vi.fn(
+      () =>
+        new Promise<null>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const imageHydrator = new ReaderImageHydrator(
+      fetchImage,
+      1,
+      () => "blob:unused",
+      () => {},
+      64 * 1024 * 1024,
+      64,
+      1,
+    );
+    const performance = new ReaderPerformanceTracker();
+    const trace = performance.begin({
+      version: 1,
+      button: "L4",
+      sequence: 1,
+      detectedAtUnixMs: Date.now(),
+    });
+    performance.bind(trace, identity);
+    performance.markRouteRequested(trace);
+    await mount(cache, fetchImage, 3000, { performance, imageHydrator });
+    observed.forEach((image) => {
+      image.getBoundingClientRect = () =>
+        ({ top: 100, bottom: 300 }) as DOMRect;
+    });
+    await act(async () =>
+      intersect(
+        observed.map((target) => ({
+          target,
+          isIntersecting: true,
+        })) as unknown as IntersectionObserverEntry[],
+        {} as IntersectionObserver,
+      ),
+    );
+    for (let frame = 0; frame < 3; frame++) await flushFrame();
+    expect(observed[1].dataset.gripImageState).toBe("deferred");
+    await act(async () => vi.advanceTimersByTime(301));
+    expect(performance.getSnapshot().latest).toBeNull();
+    await act(async () => vi.advanceTimersByTime(10000));
+    expect(performance.getSnapshot().latest?.positionOutcome).toBe(
+      "unavailable",
+    );
+    await unmount();
+    imageHydrator.clear();
+    release(null);
+    await flushMicrotasks();
+  });
+
+  it("does not add a 100 ms stabilization delay to a new text-only first screen", async () => {
+    const guide = guideFixture();
+    guide.sections = [guide.sections[0]];
+    const cache = new ReaderSessionCache({
+      getCachedGuide: async () => guide,
+      getGuide: async () => guide,
+      getReaderPosition: async () => null,
+      saveReaderPosition: async (
+        _key,
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+      ) => ({ scrollTop, sectionId, anchorText, anchorOffset, updatedAt: 2 }),
+    });
+    await cache.load(identity);
+    const performance = new ReaderPerformanceTracker();
+    const trace = performance.begin({
+      version: 1,
+      button: "L4",
+      sequence: 1,
+      detectedAtUnixMs: Date.now(),
+    });
+    performance.bind(trace, identity);
+    performance.markRouteRequested(trace);
+    await mount(cache, async () => null, 1000, { performance });
+    for (let frame = 0; frame < 3; frame++) await flushFrame();
+    await act(async () => vi.advanceTimersByTime(0));
+    expect(performance.getSnapshot().latest?.positionOutcome).toBe("skipped");
+    expect(performance.getSnapshot().latest?.positionSettledMs).toBe(0);
   });
 
   it("fits both Steam and HTML tables with wrapping cells and bounded images", async () => {
@@ -1675,7 +2080,7 @@ describe("GuideReaderPage position lifecycle", () => {
       vi.advanceTimersByTime(1_800);
     });
     expect(selectedRange.current).toBeNull();
-    expect(resizeCallbacks).toHaveLength(2);
+    expect(resizeCallbacks).toHaveLength(3);
 
     searchLayoutShift = 500;
     notifyResize();
@@ -1694,23 +2099,23 @@ describe("GuideReaderPage position lifecycle", () => {
     await act(async () => {
       vi.advanceTimersByTime(8_200);
     });
-    expect(resizeCallbacks).toHaveLength(1);
+    expect(resizeCallbacks).toHaveLength(2);
     searchLayoutShift = 900;
     notifyResize();
     expect(scroller.scrollTop).toBe(4_652);
 
     vi.mocked(window.getSelection).mockReturnValue(null);
     await act(async () => results[1]?.click());
-    expect(resizeCallbacks).toHaveLength(2);
+    expect(resizeCallbacks).toHaveLength(3);
     await act(async () => {
       vi.advanceTimersByTime(10_000);
     });
-    expect(resizeCallbacks).toHaveLength(1);
+    expect(resizeCallbacks).toHaveLength(2);
 
     await act(async () => results[0]?.click());
-    expect(resizeCallbacks).toHaveLength(2);
+    expect(resizeCallbacks).toHaveLength(3);
     await act(async () => scroller.dispatchEvent(new Event("wheel")));
-    expect(resizeCallbacks).toHaveLength(1);
+    expect(resizeCallbacks).toHaveLength(2);
 
     await act(async () => {
       const setValue = Object.getOwnPropertyDescriptor(

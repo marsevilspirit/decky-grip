@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -674,10 +674,27 @@ fn broken_stdout_terminates_even_while_stdin_stays_open() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    drop(child.stdout.take());
     let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    // Bound startup separately so the shutdown deadline measures a running sidecar.
+    let (ready, started) = mpsc::sync_channel(1);
+    let startup = thread::spawn(move || {
+        send_and_expect_ok(&mut input, &mut output, &json!({"id": 1, "method": "ping"}));
+        let _ = ready.send((input, output));
+    });
+    let (mut input, output) = match started.recv_timeout(Duration::from_secs(5)) {
+        Ok(streams) => streams,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = startup.join();
+            panic!("sidecar startup ping failed: {error}");
+        }
+    };
+    startup.join().unwrap();
+    drop(output);
     input
-        .write_all(b"{\"id\":1,\"method\":\"ping\"}\n")
+        .write_all(b"{\"id\":2,\"method\":\"ping\"}\n")
         .unwrap();
     input.flush().unwrap();
 

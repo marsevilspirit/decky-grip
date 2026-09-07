@@ -56,7 +56,9 @@ const STEAM_TOP_BAR_HEIGHT = 40;
 const RESTORE_STABLE_MS = 100;
 const RESTORE_TIMEOUT_MS = 10_000;
 const LOADING_INDICATOR_DELAY_MS = 180;
-const MAX_OBSERVED_GUIDE_IMAGES = 512;
+const MAX_ACTIVE_GUIDE_IMAGES = 512;
+const RETRY_IMAGE_SELECTOR =
+  'img[data-grip-image-state="unavailable"], img[data-grip-image-state="capacity"]';
 const SECTION_RENDER_BATCH = 8;
 const SEARCH_HIGHLIGHT_MS = 1_800;
 const SEARCH_ALIGNMENT_TIMEOUT_MS = RESTORE_TIMEOUT_MS;
@@ -72,7 +74,7 @@ const READER_CSS = `
 .grip-reader-content ::selection { background: #f3c64b; color: #101820; }
 .grip-reader-content img { display: block; max-width: 100%; height: auto; margin: 14px auto; border-radius: 4px; }
 .grip-reader-content img[data-grip-image-url]:not([src]) { background: #17212b; min-height: 48px; opacity: 0.55; }
-.grip-reader-content img[data-grip-image-state="unavailable"] { border: 1px dashed #6b747d; }
+.grip-reader-content img[data-grip-image-state="unavailable"], .grip-reader-content img[data-grip-image-state="capacity"] { border: 1px dashed #6b747d; }
 .grip-reader-content img[data-grip-image-state="ready"] { cursor: zoom-in; }
 .grip-reader-toc [aria-current="location"] { box-shadow: inset 3px 0 #67c1f5; font-weight: 700; }
 .grip-reader-content .grip-reader-section { margin: 0 auto 34px; max-width: 920px; }
@@ -290,8 +292,8 @@ export function GuideReaderPage({
   const imageCachePausedRef = useRef(imageCacheControl.getSnapshot().paused);
   const imageObserverRef = useRef<IntersectionObserver | null>(null);
   const observedImageSectionsRef = useRef<WeakSet<Element>>(new WeakSet());
-  const observedImageCountRef = useRef(0);
   const nearImagesRef = useRef<Set<HTMLImageElement>>(new Set());
+  const visibleImagesRef = useRef<Set<HTMLImageElement>>(new Set());
   const pendingObservedImagesRef = useRef<Set<HTMLImageElement>>(new Set());
   const imageViewportChangeRef = useRef<() => void>(() => undefined);
   const loadedRef = useRef(loaded);
@@ -454,16 +456,78 @@ export function GuideReaderPage({
   }, [identity?.appId, identity?.guideId, performance]);
 
   const hydrateNearImages = useCallback(() => {
-    if (!contentRef.current) return;
+    const scroller = scrollerRef.current;
+    if (!contentRef.current || !scroller) return;
     const connected = [...nearImagesRef.current].filter(
       (image) => image.isConnected,
     );
     nearImagesRef.current = new Set(connected);
-    imageHydrator.setPinnedImages(connected);
+    const viewport = scroller.getBoundingClientRect();
+    const measured = connected.map((image) => {
+      const rect = image.getBoundingClientRect();
+      return {
+        image,
+        visible: rect.bottom > viewport.top && rect.top < viewport.bottom,
+        distance: Math.max(
+          viewport.top - rect.bottom,
+          rect.top - viewport.bottom,
+          0,
+        ),
+      };
+    });
+    visibleImagesRef.current = new Set(
+      measured.filter(({ visible }) => visible).map(({ image }) => image),
+    );
     if (!imageCachePausedRef.current) {
-      imageHydrator.hydrateImages(connected);
+      // Reusing an existing Blob needs no RPC/decoded budget, including repeated table icons beyond the active limit.
+      imageHydrator.hydrateImages(connected, true);
+    }
+    const active = measured
+      .filter(
+        ({ image }) =>
+          image.dataset.gripImageState !== "ready" &&
+          image.dataset.gripImageState !== "unavailable",
+      )
+      .sort(
+        (left, right) =>
+          Number(right.visible) - Number(left.visible) ||
+          Number(left.image.dataset.gripImageState === "capacity") -
+            Number(right.image.dataset.gripImageState === "capacity") ||
+          left.distance - right.distance,
+      )
+      .slice(0, MAX_ACTIVE_GUIDE_IMAGES);
+    const candidates = active.map(({ image }) => image);
+    imageHydrator.setPinnedImages(visibleImagesRef.current, candidates);
+    if (!imageCachePausedRef.current) {
+      imageHydrator.hydrateImages(candidates);
     }
   }, [imageHydrator]);
+
+  useEffect(() => {
+    const scroller = scrollerRef.current;
+    const content = contentRef.current;
+    if (!scroller || !content) return;
+    let frame: number | null = null;
+    const schedule = () => {
+      if (frame !== null) return;
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        hydrateNearImages();
+        imageViewportChangeRef.current();
+      });
+    };
+    const resize = new ResizeObserver(schedule);
+    resize.observe(scroller);
+    resize.observe(content);
+    scroller.addEventListener("scroll", schedule);
+    content.addEventListener("load", schedule, true);
+    return () => {
+      scroller.removeEventListener("scroll", schedule);
+      content.removeEventListener("load", schedule, true);
+      resize.disconnect();
+      if (frame !== null) cancelAnimationFrame(frame);
+    };
+  }, [hydrateNearImages, loaded?.guide]);
 
   useEffect(() => {
     const synchronize = () => {
@@ -748,9 +812,7 @@ export function GuideReaderPage({
     if (!scroller || !content) return;
     const viewport = scroller.getBoundingClientRect();
     const image = [
-      ...content.querySelectorAll<HTMLImageElement>(
-        'img[data-grip-image-state="unavailable"]',
-      ),
+      ...content.querySelectorAll<HTMLImageElement>(RETRY_IMAGE_SELECTOR),
     ].find((image) => {
       const rect = image.getBoundingClientRect();
       return rect.bottom > viewport.top && rect.top < viewport.bottom;
@@ -832,7 +894,7 @@ export function GuideReaderPage({
     let nextKey = 0;
     const synchronize = () => {
       for (const image of content.querySelectorAll<HTMLImageElement>(
-        'img[data-grip-image-state="unavailable"]',
+        RETRY_IMAGE_SELECTOR,
       )) {
         if (controls.has(image)) continue;
         const host = image.ownerDocument.createElement("span");
@@ -845,7 +907,10 @@ export function GuideReaderPage({
         const state = image.dataset.gripImageState;
         const busy =
           state === "queued" || state === "loading" || state === "deferred";
-        if (!image.isConnected || (!busy && state !== "unavailable")) {
+        if (
+          !image.isConnected ||
+          (!busy && state !== "unavailable" && state !== "capacity")
+        ) {
           if (control.host.contains(control.host.ownerDocument.activeElement)) {
             focusWithoutScrolling(scrollerRef.current);
           }
@@ -906,8 +971,8 @@ export function GuideReaderPage({
     imageObserverRef.current?.disconnect();
     imageObserverRef.current = null;
     observedImageSectionsRef.current = new WeakSet();
-    observedImageCountRef.current = 0;
     nearImagesRef.current.clear();
+    visibleImagesRef.current.clear();
     pendingObservedImagesRef.current.clear();
     imageHydrator.releaseImages();
     if (!guide || !content || !scroller) {
@@ -940,8 +1005,8 @@ export function GuideReaderPage({
         imageObserverRef.current = null;
       }
       observedImageSectionsRef.current = new WeakSet();
-      observedImageCountRef.current = 0;
       nearImagesRef.current.clear();
+      visibleImagesRef.current.clear();
       pendingObservedImagesRef.current.clear();
       imageHydrator.releaseImages();
     };
@@ -963,17 +1028,11 @@ export function GuideReaderPage({
         continue;
       }
       observedImageSectionsRef.current.add(section);
-      const remaining =
-        MAX_OBSERVED_GUIDE_IMAGES - observedImageCountRef.current;
-      if (remaining <= 0) {
-        break;
-      }
       const images = [
         ...section.querySelectorAll<HTMLImageElement>(
           "img[data-grip-image-url]",
         ),
-      ].slice(0, remaining);
-      observedImageCountRef.current += images.length;
+      ];
       newlyMountedImages.push(...images);
     }
 
@@ -1071,7 +1130,7 @@ export function GuideReaderPage({
     const next = cache.peek(identity);
     if (!next || next.guide === loadedRef.current?.guide) return;
     const captured =
-      scrollerRef.current && contentRef.current
+      checkpoint.canPersist && scrollerRef.current && contentRef.current
         ? captureReaderPosition(
             scrollerRef.current,
             contentRef.current,
@@ -1125,31 +1184,23 @@ export function GuideReaderPage({
   useLayoutEffect(() => {
     const scroller = scrollerRef.current;
     const content = contentRef.current;
-    const position = loaded?.position;
+    const savedPosition = loaded?.position;
     if (!scroller || !content || !loaded) {
       restoringRef.current = false;
       checkpoint.block();
       return;
     }
-    if (!position) {
-      restoringRef.current = false;
-      if (loaded.positionWarning === null) {
-        checkpoint.settle();
-      } else {
-        checkpoint.block();
-      }
-      if (identity) {
-        performance.markPositionSettled(
-          identity,
-          loaded?.positionWarning ? "unavailable" : "skipped",
-        );
-      }
-      focusWithoutScrolling(scroller);
-      return;
-    }
+    const position = savedPosition ?? {
+      scrollTop: 0,
+      sectionId: null,
+      anchorText: null,
+      anchorOffset: 0,
+      updatedAt: 0,
+    };
 
     cancelRestore();
     checkpoint.block();
+    if (!savedPosition && loaded.positionWarning === null) checkpoint.settle();
     restoringRef.current = true;
     let stopped = false;
     let cleaned = false;
@@ -1165,6 +1216,11 @@ export function GuideReaderPage({
       }
     };
     const positionIsReady = () => {
+      if (!savedPosition)
+        return (
+          renderedSectionCountRef.current >= loaded.guide.sections.length ||
+          scroller.scrollHeight >= scroller.clientHeight
+        );
       const index = anchorIndexRef.current;
       const anchorReady =
         !position.anchorText ||
@@ -1189,25 +1245,27 @@ export function GuideReaderPage({
       if (pendingObservedImagesRef.current.size > 0) {
         return false;
       }
-      const images = [...nearImagesRef.current].filter(
+      const images = [...visibleImagesRef.current].filter(
         (image) => image.isConnected,
       );
       return images.every((image) => {
         const state = image.dataset.gripImageState;
         return (
           state === "unavailable" ||
-          state === "deferred" ||
+          state === "capacity" ||
           (state === "ready" && image.complete)
         );
       });
     };
     const applyRestore = () => {
-      const restored = restoreReaderPosition(
-        scroller,
-        content,
-        position,
-        anchorIndexRef.current ?? undefined,
-      );
+      const restored = savedPosition
+        ? restoreReaderPosition(
+            scroller,
+            content,
+            position,
+            anchorIndexRef.current ?? undefined,
+          )
+        : scroller.scrollTop;
       hydrateNearImages();
       return restored;
     };
@@ -1246,31 +1304,48 @@ export function GuideReaderPage({
         clearStableTimer();
       }
       if (stableTimer === null) {
-        stableTimer = setTimeout(() => {
-          stableTimer = null;
-          if (stopped) {
-            return;
-          }
-          const confirmed = applyRestore();
-          const shifted =
-            lastAppliedScrollTop !== null &&
-            Math.abs(confirmed - lastAppliedScrollTop) > 1;
-          lastAppliedScrollTop = confirmed;
-          if (shifted || !positionIsReady() || !visibleImagesAreReady()) {
-            finishIfStable();
-            return;
-          }
-          if (!performanceTimedOut && identity) {
-            performance.markPositionSettled(identity, "restored");
-          }
-          setRestoreWarning(null);
-          stop();
-          checkpoint.settle();
-          restoringRef.current = false;
-          if (stopRestoreRef.current === stop) {
-            stopRestoreRef.current = null;
-          }
-        }, RESTORE_STABLE_MS);
+        stableTimer = setTimeout(
+          () => {
+            stableTimer = null;
+            if (stopped) {
+              return;
+            }
+            const confirmed = applyRestore();
+            const shifted =
+              lastAppliedScrollTop !== null &&
+              Math.abs(confirmed - lastAppliedScrollTop) > 1;
+            lastAppliedScrollTop = confirmed;
+            if (shifted || !positionIsReady() || !visibleImagesAreReady()) {
+              finishIfStable();
+              return;
+            }
+            if (!performanceTimedOut && identity) {
+              performance.markPositionSettled(
+                identity,
+                loaded.positionWarning ||
+                  [...visibleImagesRef.current].some(
+                    (image) =>
+                      image.isConnected &&
+                      image.dataset.gripImageState !== "ready",
+                  )
+                  ? "unavailable"
+                  : savedPosition
+                    ? "restored"
+                    : "skipped",
+              );
+            }
+            setRestoreWarning(null);
+            stop();
+            if (loaded.positionWarning === null) checkpoint.settle();
+            restoringRef.current = false;
+            if (stopRestoreRef.current === stop) {
+              stopRestoreRef.current = null;
+            }
+          },
+          savedPosition || visibleImagesRef.current.size > 0
+            ? RESTORE_STABLE_MS
+            : 0,
+        );
       }
     };
     imageViewportChangeRef.current = finishIfStable;
@@ -2120,7 +2195,9 @@ export function GuideReaderPage({
             }}
             onOKActionDescription={
               visibleRetryImage
-                ? "重试图片"
+                ? visibleRetryImage.dataset.gripImageState === "capacity"
+                  ? "优先显示此图"
+                  : "重试图片"
                 : visiblePreviewImage
                   ? "查看图片"
                   : undefined
@@ -2191,7 +2268,10 @@ export function GuideReaderPage({
                   {busy ? (
                     <BusyLabel>正在重试图片…</BusyLabel>
                   ) : (
-                    (imageRetryError ?? "图片读取失败，重试此图")
+                    (imageRetryError ??
+                    (image.dataset.gripImageState === "capacity"
+                      ? "图片内存已满，优先显示此图"
+                      : "图片读取失败，重试此图"))
                   )}
                 </Button>,
                 host,

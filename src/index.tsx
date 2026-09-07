@@ -104,7 +104,6 @@ export default definePlugin(() => {
   const imageHydrator = new ReaderImageHydrator(getGuideImage);
   let guideCacheMutationActive = false;
   let imageCacheMutationActive = false;
-  let activeGuideDownloads = 0;
   const readerCache = new ReaderSessionCache(
     {
       getCachedGuide,
@@ -134,7 +133,7 @@ export default definePlugin(() => {
   const mutateGuideCache = async <Result,>(
     action: () => Promise<Result>,
   ): Promise<Result> => {
-    if (activeGuideDownloads > 0 || downloads.hasActive()) {
+    if (downloads.hasActive()) {
       throw new Error("指南正在下载，完成后才能清理缓存");
     }
     if (guideCacheMutationActive) {
@@ -419,7 +418,6 @@ export default definePlugin(() => {
     if (guideCacheMutationActive || imageCacheMutationActive) {
       throw new Error("缓存正在清理，请稍后再下载");
     }
-    activeGuideDownloads += 1;
     try {
       const handoff = controller.captureReaderHandoff(identity);
       const guide = await downloadOfflineGuide(
@@ -451,7 +449,6 @@ export default definePlugin(() => {
         toaster.toast({ title: "GRIP：下载未完成", body: errorMessage(error) });
       throw error;
     } finally {
-      activeGuideDownloads -= 1;
       status.refreshGuideLibrary();
       status.refreshDownloads();
     }
@@ -462,7 +459,7 @@ export default definePlugin(() => {
     mutateGuideCache(() => removeOfflineGuide(guideId));
 
   const clearImages = async () => {
-    if (activeGuideDownloads > 0 || downloads.hasActive()) {
+    if (downloads.hasActive()) {
       throw new Error("指南正在下载，完成后才能清理图片");
     }
     const token = imageCacheControl.beginClear();

@@ -8,6 +8,8 @@ publish = false
 [dependencies]
 base64 = "0.22"
 html-escape = "0.2"
+# 0.25.10 raises MSRV; enable only the formats accepted by the offline cache.
+image = { version = "=0.25.9", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 libc = "0.2"
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 sha2 = "0.10"

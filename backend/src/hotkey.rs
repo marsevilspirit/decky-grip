@@ -2,6 +2,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -14,7 +15,7 @@ const REPORT_HEADER: [u8; 4] = [0x01, 0x00, 0x09, 0x40];
 const L4_MASK: u32 = 0x0000_0200;
 const DEBOUNCE: Duration = Duration::from_millis(350);
 const PEER_CHECK_INTERVAL: Duration = Duration::from_secs(1);
-const READ_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const STOP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const STEAM_DECK_HID_ID: &str = "0003:000028DE:00001205";
 
@@ -354,8 +355,13 @@ fn run_monitor(
                 queue_report(&mut reports, &report[..size], Instant::now(), &events);
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                if wait_for_stop(&stop, READ_POLL_INTERVAL) {
-                    break;
+                match wait_for_report(
+                    &connection.as_ref().expect("connection was checked").file,
+                    &stop,
+                ) {
+                    Ok(false) => break,
+                    Ok(true) => {}
+                    Err(_) => disconnect(&mut connection, &shared, &mut reports),
                 }
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
@@ -409,6 +415,26 @@ fn wait_for_stop(stop: &Receiver<()>, timeout: Duration) -> bool {
     )
 }
 
+fn wait_for_report(file: &File, stop: &Receiver<()>) -> io::Result<bool> {
+    if wait_for_stop(stop, Duration::ZERO) {
+        return Ok(false);
+    }
+    let mut descriptor = libc::pollfd {
+        fd: file.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // Data wakes poll immediately; the timeout only bounds stop/peer checks.
+    let result = unsafe { libc::poll(&mut descriptor, 1, STOP_POLL_INTERVAL.as_millis() as i32) };
+    if result < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+    Ok(!wait_for_stop(stop, Duration::ZERO))
+}
+
 fn unix_time_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -419,8 +445,10 @@ fn unix_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::symlink;
+    use std::os::unix::net::UnixStream;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -678,5 +706,40 @@ mod tests {
                 running: false,
             }
         );
+    }
+
+    #[test]
+    fn readable_reports_and_disconnect_wake_without_a_polling_delay() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        let reader = File::from(std::os::fd::OwnedFd::from(reader));
+        let (_sender, stop) = mpsc::channel();
+        writer.write_all(&report(false)).unwrap();
+        let started = Instant::now();
+        assert!(wait_for_report(&reader, &stop).unwrap());
+        assert!(started.elapsed() < STOP_POLL_INTERVAL / 2);
+        let mut bytes = [0; REPORT_SIZE];
+        (&reader).read_exact(&mut bytes).unwrap();
+        assert_eq!(bytes, report(false));
+
+        drop(writer);
+        let started = Instant::now();
+        assert!(wait_for_report(&reader, &stop).unwrap());
+        assert!(started.elapsed() < STOP_POLL_INTERVAL / 2);
+        assert_eq!((&reader).read(&mut bytes).unwrap(), 0);
+    }
+
+    #[test]
+    fn report_wait_observes_stop_even_without_input() {
+        let (reader, _writer) = UnixStream::pair().unwrap();
+        let reader = File::from(std::os::fd::OwnedFd::from(reader));
+        let (sender, stop) = mpsc::channel();
+        drop(sender);
+        assert!(!wait_for_report(&reader, &stop).unwrap());
+        let (sender, stop) = mpsc::channel();
+        thread::scope(|scope| {
+            let waiting = scope.spawn(move || wait_for_report(&reader, &stop));
+            sender.send(()).unwrap();
+            assert!(!waiting.join().unwrap().unwrap());
+        });
     }
 }

@@ -1,12 +1,15 @@
-use crate::{FileSignature, KeyLockPool, atomic_replace, lock, read_bounded_regular_file};
+use crate::{
+    FileSignature, KeyLockPool, atomic_replace, lock, read_bounded_regular_file, signature,
+};
 use base64::Engine as _;
+use image::{ImageDecoder, ImageFormat, ImageReader, Limits};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File, FileTimes, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Cursor, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
@@ -20,6 +23,7 @@ pub const MAX_DISK_BYTES: usize = 128 * 1024 * 1024;
 pub const MAX_MEMORY_BYTES: usize = 24 * 1024 * 1024;
 pub const MAX_IMAGE_DIMENSION: u32 = 8_192;
 pub const MAX_IMAGE_PIXELS: u64 = 16_777_216;
+const MAX_DECODE_BYTES: u64 = MAX_IMAGE_PIXELS * 8; // RGBA16, allocated only while validating.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 
 const MAX_URL_BYTES: usize = 4_096;
@@ -105,6 +109,13 @@ struct ImageData {
     height: u32,
 }
 
+#[derive(Clone, Copy)]
+struct ValidatedImage {
+    signature: FileSignature,
+    width: u32,
+    height: u32,
+}
+
 #[derive(Default)]
 struct MemoryState {
     entries: HashMap<String, ImageData>,
@@ -165,10 +176,12 @@ pub struct GuideImageCache {
     key_locks: KeyLockPool,
     disk_lock: Mutex<()>,
     state: Mutex<MemoryState>,
-    validated: Mutex<HashMap<PathBuf, FileSignature>>,
+    validated: Mutex<HashMap<PathBuf, ValidatedImage>>,
     disk_limit: AtomicU64,
     #[cfg(test)]
     validation_reads: AtomicU64,
+    #[cfg(test)]
+    validation_decodes: AtomicU64,
 }
 
 pub(crate) enum OrphanImages {
@@ -224,6 +237,8 @@ impl GuideImageCache {
             disk_limit: AtomicU64::new(disk_limit),
             #[cfg(test)]
             validation_reads: AtomicU64::new(0),
+            #[cfg(test)]
+            validation_decodes: AtomicU64::new(0),
         };
         {
             let _disk = lock(&cache.disk_lock);
@@ -271,30 +286,48 @@ impl GuideImageCache {
                 continue;
             }
             let known = lock(&self.validated).get(&path).copied();
-            if let Ok((body, signature)) =
-                read_bounded_regular_file(&path, self.limits.max_image_bytes as u64, known)
-            {
+            if let Ok((body, signature)) = read_bounded_regular_file(
+                &path,
+                self.limits.max_image_bytes as u64,
+                known.map(|value| value.signature),
+            ) {
                 #[cfg(test)]
                 if body.is_some() {
                     self.validation_reads.fetch_add(1, Ordering::Relaxed);
                 }
-                if body.is_none()
-                    || body.is_some_and(|body| {
-                        validate_image(mime, body, self.limits.max_image_bytes).is_ok()
-                    })
-                {
-                    let mut validated = lock(&self.validated);
-                    // ponytail: bounded metadata memo; replace with LRU only if 4096 entries thrash.
-                    if validated.len() >= 4096 {
-                        validated.clear();
-                    }
-                    validated.insert(path, signature);
+                if body.is_none() {
+                    return true;
+                }
+                if let Ok(value) = self.validate(mime, body.unwrap()) {
+                    self.remember_validation(path, signature, &value);
                     return true;
                 }
             }
             lock(&self.validated).remove(&path);
         }
         false
+    }
+
+    fn remember_validation(&self, path: PathBuf, signature: FileSignature, value: &ImageData) {
+        let mut validated = lock(&self.validated);
+        // ponytail: bounded metadata memo; replace with LRU only if 4096 entries thrash.
+        if validated.len() >= 4096 {
+            validated.clear();
+        }
+        validated.insert(
+            path,
+            ValidatedImage {
+                signature,
+                width: value.width,
+                height: value.height,
+            },
+        );
+    }
+
+    fn validate(&self, mime: &str, body: Vec<u8>) -> Result<ImageData, ImageError> {
+        #[cfg(test)]
+        self.validation_decodes.fetch_add(1, Ordering::Relaxed);
+        validate_image(mime, body, self.limits.max_image_bytes)
     }
 
     pub fn set_disk_limit(&self, bytes: u64) -> Result<Value, ImageError> {
@@ -432,7 +465,7 @@ impl GuideImageCache {
             Some(value) => value,
             None if !allow_download => return Ok(None),
             None => match (self.fetcher)(url, REQUEST_TIMEOUT, self.limits.max_image_bytes)
-                .and_then(|(mime, body)| validate_image(&mime, body, self.limits.max_image_bytes))
+                .and_then(|(mime, body)| self.validate(&mime, body))
             {
                 Ok(value) => value,
                 Err(error) if offline => return Err(error),
@@ -553,34 +586,40 @@ impl GuideImageCache {
 
     fn read_candidate_locked(&self, path: &Path, mime_type: &str) -> Option<ImageData> {
         let result = (|| -> io::Result<ImageData> {
-            let mut file = OpenOptions::new()
+            let (body, read_signature) =
+                read_bounded_regular_file(path, self.limits.max_image_bytes as u64, None)
+                    .map_err(|_| io::Error::other("invalid cached image file"))?;
+            let body = body.expect("reading without a known signature returns bytes");
+            let known = lock(&self.validated).get(path).copied();
+            let value = if let Some(known) = known.filter(|value| value.signature == read_signature)
+            {
+                ImageData {
+                    mime_type: mime_type.to_owned(),
+                    body,
+                    width: known.width,
+                    height: known.height,
+                }
+            } else {
+                self.validate(mime_type, body)
+                    .map_err(|_| io::Error::other("invalid cached image content"))?
+            };
+            let file = OpenOptions::new()
                 .read(true)
                 .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
                 .open(path)?;
             let metadata = file.metadata()?;
-            let size: usize = metadata
-                .len()
-                .try_into()
-                .map_err(|_| io::Error::other("cached image is too large"))?;
-            if !metadata.is_file() || size == 0 || size > self.limits.max_image_bytes {
-                return Err(io::Error::other("invalid cached image file"));
+            if !metadata.is_file() || signature(&metadata) != read_signature {
+                return Err(io::Error::other("cached image changed while being read"));
             }
-            let mut body = Vec::with_capacity(size);
-            Read::by_ref(&mut file)
-                .take(self.limits.max_image_bytes as u64 + 1)
-                .read_to_end(&mut body)?;
-            if body.len() != size {
-                return Err(io::Error::other("invalid cached image content"));
-            }
-            let value = validate_image(mime_type, body, self.limits.max_image_bytes)
-                .map_err(|_| io::Error::other("invalid cached image content"))?;
             let now = SystemTime::now();
             let _ = file.set_times(FileTimes::new().set_accessed(now).set_modified(now));
+            self.remember_validation(path.to_owned(), signature(&file.metadata()?), &value);
             Ok(value)
         })();
         match result {
             Ok(value) => Some(value),
             Err(_) => {
+                lock(&self.validated).remove(path);
                 let _ = fs::remove_file(path);
                 None
             }
@@ -678,6 +717,11 @@ impl GuideImageCache {
                 }
             }
             sync_directory(&self.cache_directory)?;
+            self.remember_validation(
+                target.clone(),
+                signature(&fs::symlink_metadata(&target)?),
+                value,
+            );
             Ok(())
         })();
         drop(temporary);
@@ -900,17 +944,39 @@ fn validate_image(
         ));
     }
     reject_animated_image(&mime_type, &body)?;
-    let (width, height) = image_dimensions(&mime_type, &body)?;
-    if width == 0
-        || height == 0
-        || width > MAX_IMAGE_DIMENSION
-        || height > MAX_IMAGE_DIMENSION
-        || u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS
-    {
+    let format = ImageFormat::from_mime_type(&mime_type).expect("validated MIME type");
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
+    limits.max_image_height = Some(MAX_IMAGE_DIMENSION);
+    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    let mut reader = ImageReader::with_format(Cursor::new(&body), format);
+    reader.limits(limits.clone());
+    let mut decoder = reader
+        .into_decoder()
+        .map_err(|_| ImageError::download("Steam returned an invalid image"))?;
+    let (width, height) = decoder.dimensions();
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
         return Err(ImageError::download(
             "Steam image exceeds the decoded pixel limit",
         ));
     }
+    let bytes = usize::try_from(decoder.total_bytes())
+        .ok()
+        .filter(|bytes| *bytes as u64 <= MAX_DECODE_BYTES)
+        .ok_or_else(|| ImageError::download("Steam image exceeds the decode memory limit"))?;
+    // Account for our output buffer before allowing the decoder its remaining working budget.
+    limits
+        .reserve(bytes as u64)
+        .and_then(|()| decoder.set_limits(limits))
+        .map_err(|_| ImageError::download("Steam image exceeds the decode memory limit"))?;
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(bytes)
+        .map_err(|_| ImageError::download("Not enough memory to validate the Steam image"))?;
+    pixels.resize(bytes, 0);
+    decoder
+        .read_image(&mut pixels)
+        .map_err(|_| ImageError::download("Steam returned an incomplete or corrupt image"))?;
     Ok(ImageData {
         mime_type,
         body,
@@ -930,17 +996,59 @@ fn image_type_matches(mime_type: &str, body: &[u8]) -> bool {
 }
 
 fn reject_animated_image(mime_type: &str, body: &[u8]) -> Result<(), ImageError> {
+    let invalid = || ImageError::download("Steam returned an incomplete image container");
     let animated = match mime_type {
         "image/gif" => gif_frame_count(body)? > 1,
-        "image/png" => [b"acTL".as_slice(), b"fcTL".as_slice(), b"fdAT".as_slice()]
-            .iter()
-            .any(|marker| contains_bytes(&body[8..], marker)),
-        "image/webp" => {
-            (body.len() >= 21 && &body[12..16] == b"VP8X" && body[20] & 0x02 != 0)
-                || [b"ANIM".as_slice(), b"ANMF".as_slice()]
-                    .iter()
-                    .any(|marker| contains_bytes(&body[12..], marker))
+        "image/png" | "image/webp" => {
+            let png = mime_type == "image/png";
+            let body = if png {
+                body
+            } else {
+                let length =
+                    u32::from_le_bytes(body.get(4..8).ok_or_else(invalid)?.try_into().unwrap())
+                        as usize;
+                body.get(..length.checked_add(8).ok_or_else(invalid)?)
+                    .filter(|body| body.len() >= 12)
+                    .ok_or_else(invalid)?
+            };
+            let mut cursor = if png { 8 } else { 12 };
+            let mut animated = false;
+            let mut ended = !png;
+            while cursor < body.len() {
+                let header = body.get(cursor..cursor + 8).ok_or_else(invalid)?;
+                let (kind, length) = if png {
+                    (
+                        &header[4..8],
+                        u32::from_be_bytes(header[..4].try_into().unwrap()) as usize,
+                    )
+                } else {
+                    (
+                        &header[..4],
+                        u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize,
+                    )
+                };
+                let size = length
+                    .checked_add(if png { 12 } else { 8 + length % 2 })
+                    .ok_or_else(invalid)?;
+                let chunk = body
+                    .get(cursor..cursor.checked_add(size).ok_or_else(invalid)?)
+                    .ok_or_else(invalid)?;
+                animated |= matches!(kind, b"acTL" | b"fcTL" | b"fdAT") && png
+                    || !png
+                        && (matches!(kind, b"ANIM" | b"ANMF")
+                            || kind == b"VP8X" && length > 0 && chunk[8] & 0x02 != 0);
+                cursor += size;
+                if png && kind == b"IEND" {
+                    ended = length == 0;
+                    break;
+                }
+            }
+            if !ended {
+                return Err(invalid());
+            }
+            animated
         }
+        "image/jpeg" if !jpeg_has_end(body) => return Err(invalid()),
         _ => false,
     };
     if animated {
@@ -950,6 +1058,40 @@ fn reject_animated_image(mime_type: &str, body: &[u8]) -> Result<(), ImageError>
     } else {
         Ok(())
     }
+}
+
+fn jpeg_has_end(body: &[u8]) -> bool {
+    // image's JPEG decoder tolerates missing EOI. Require a real marker, not bytes inside EXIF,
+    // while allowing trailing data after EOI just like browsers and the other supported formats.
+    let mut cursor = 2;
+    while cursor < body.len() {
+        if body[cursor] != 0xff {
+            cursor += 1; // Entropy-coded data following SOS.
+            continue;
+        }
+        while body.get(cursor) == Some(&0xff) {
+            cursor += 1;
+        }
+        let Some(&marker) = body.get(cursor) else {
+            return false;
+        };
+        cursor += 1;
+        match marker {
+            0xd9 => return true,
+            0x00 | 0x01 | 0xd0..=0xd7 => continue, // Stuffed bytes, TEM, restart markers.
+            _ => {
+                let Some(length) = body.get(cursor..cursor + 2) else {
+                    return false;
+                };
+                let length = u16::from_be_bytes(length.try_into().unwrap()) as usize;
+                if length < 2 || cursor + length > body.len() {
+                    return false;
+                }
+                cursor += length;
+            }
+        }
+    }
+    false
 }
 
 fn gif_frame_count(body: &[u8]) -> Result<usize, ImageError> {
@@ -1032,96 +1174,6 @@ fn skip_gif_sub_blocks(body: &[u8], mut offset: usize) -> Result<usize, ImageErr
                 "Steam returned an invalid GIF structure",
             ));
         }
-    }
-}
-
-fn image_dimensions(mime_type: &str, body: &[u8]) -> Result<(u32, u32), ImageError> {
-    match mime_type {
-        "image/png" => {
-            if body.len() < 33 || &body[8..12] != b"\0\0\0\r" || &body[12..16] != b"IHDR" {
-                return Err(ImageError::download("Steam returned an invalid PNG header"));
-            }
-            Ok((be_u32(&body[16..20]), be_u32(&body[20..24])))
-        }
-        "image/gif" => {
-            if body.len() < 10 {
-                return Err(ImageError::download("Steam returned an invalid GIF header"));
-            }
-            Ok((
-                u16::from_le_bytes([body[6], body[7]]) as u32,
-                u16::from_le_bytes([body[8], body[9]]) as u32,
-            ))
-        }
-        "image/jpeg" => jpeg_dimensions(body),
-        "image/webp" => webp_dimensions(body),
-        _ => Err(ImageError::download(
-            "Steam returned an unsupported image type",
-        )),
-    }
-}
-
-fn jpeg_dimensions(body: &[u8]) -> Result<(u32, u32), ImageError> {
-    const START_OF_FRAME: [u8; 13] = [
-        0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf,
-    ];
-    let mut cursor = 2;
-    while cursor < body.len() {
-        while cursor < body.len() && body[cursor] != 0xff {
-            cursor += 1;
-        }
-        while cursor < body.len() && body[cursor] == 0xff {
-            cursor += 1;
-        }
-        if cursor >= body.len() {
-            break;
-        }
-        let marker = body[cursor];
-        cursor += 1;
-        if marker == 0x00 || marker == 0x01 || (0xd0..=0xd9).contains(&marker) {
-            continue;
-        }
-        if cursor + 2 > body.len() {
-            break;
-        }
-        let segment_length = u16::from_be_bytes([body[cursor], body[cursor + 1]]) as usize;
-        if segment_length < 2 || cursor.saturating_add(segment_length) > body.len() {
-            break;
-        }
-        if START_OF_FRAME.contains(&marker) {
-            if segment_length < 7 {
-                break;
-            }
-            return Ok((
-                u16::from_be_bytes([body[cursor + 5], body[cursor + 6]]) as u32,
-                u16::from_be_bytes([body[cursor + 3], body[cursor + 4]]) as u32,
-            ));
-        }
-        cursor += segment_length;
-    }
-    Err(ImageError::download(
-        "Steam returned a JPEG without dimensions",
-    ))
-}
-
-fn webp_dimensions(body: &[u8]) -> Result<(u32, u32), ImageError> {
-    if body.len() < 20 {
-        return Err(ImageError::download(
-            "Steam returned an invalid WebP header",
-        ));
-    }
-    match &body[12..16] {
-        b"VP8X" if body.len() >= 30 => Ok((le_u24(&body[24..27]) + 1, le_u24(&body[27..30]) + 1)),
-        b"VP8L" if body.len() >= 25 && body[20] == 0x2f => {
-            let dimensions = u32::from_le_bytes([body[21], body[22], body[23], body[24]]);
-            Ok(((dimensions & 0x3fff) + 1, ((dimensions >> 14) & 0x3fff) + 1))
-        }
-        b"VP8 " if body.len() >= 30 && &body[23..26] == b"\x9d\x01\x2a" => Ok((
-            u16::from_le_bytes([body[26], body[27]]) as u32 & 0x3fff,
-            u16::from_le_bytes([body[28], body[29]]) as u32 & 0x3fff,
-        )),
-        _ => Err(ImageError::download(
-            "Steam returned a WebP without dimensions",
-        )),
     }
 }
 
@@ -1220,8 +1272,8 @@ fn download(
                 };
                 ImageError::download(message)
             })?;
-        let image = validate_image(&mime_type, body, max_bytes)?;
-        return Ok((image.mime_type, image.body));
+        // The common fetcher boundary validates once, including injected/offline test fetchers.
+        return Ok((mime_type, body));
     }
     unreachable!("redirect loop always returns or continues")
 }
@@ -1354,20 +1406,6 @@ fn sync_directory(path: &Path) -> io::Result<()> {
         .sync_all()
 }
 
-fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|candidate| candidate == needle)
-}
-
-fn be_u32(bytes: &[u8]) -> u32 {
-    u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
-}
-
-fn le_u24(bytes: &[u8]) -> u32 {
-    u32::from(bytes[0]) | (u32::from(bytes[1]) << 8) | (u32::from(bytes[2]) << 16)
-}
-
 #[cfg(test)]
 mod offline_tests {
     use super::*;
@@ -1375,25 +1413,31 @@ mod offline_tests {
     #[test]
     fn status_memo_skips_unchanged_bytes_and_revalidates_replaced_or_unsafe_files() {
         let directory = crate::test_support::TestDirectory::new("unused");
-        let body = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0test".to_vec();
+        let body = include!("../tests/fixtures/static_png.rs").to_vec();
         let cache = GuideImageCache::with_fetcher(
             directory.0.join("images"),
             {
                 let body = body.clone();
                 move |_, _, _| Ok(("image/png".into(), body.clone()))
             },
-            ImageLimits::default(),
+            ImageLimits {
+                max_memory_bytes: 0,
+                ..ImageLimits::default()
+            },
         )
         .unwrap();
         let url = "https://images.steamusercontent.com/test.png";
         cache.download(url).unwrap();
         assert!(cache.is_downloaded(url).unwrap());
         let reads = cache.validation_reads.load(Ordering::Relaxed);
-        assert_eq!(reads, 1);
+        assert_eq!(reads, 0); // The successful write already memoized a full decode.
+        assert_eq!(cache.validation_decodes.load(Ordering::Relaxed), 1);
         for _ in 0..20 {
+            assert!(cache.get(url, false).unwrap().is_some()); // Disk reads reuse the verified signature too.
             assert!(cache.is_downloaded(url).unwrap());
         }
         assert_eq!(cache.validation_reads.load(Ordering::Relaxed), reads);
+        assert_eq!(cache.validation_decodes.load(Ordering::Relaxed), 1);
         let path = cache
             .cache_directory
             .join(format!("offline-{}.png", cache_digest(url)));

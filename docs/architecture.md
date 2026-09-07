@@ -73,6 +73,9 @@ zero that would replace a nonzero bookmark as provisional: it must originate
 from the real scroll panel after user scroll intent, and the same connected
 panel must remain at the top for 400 ms. History, blur, and teardown snapshots
 cannot authorize that destructive update on their own.
+If restoration times out, its target still protects the bookmark from passive
+polling, blur, and close snapshots. A layout change or focus return retries the
+same target; deliberate scrolling releases the protection.
 
 All Steam-specific assumptions must stay under `src/steam/`. Persistence and
 the Decky panel must not depend on React Fiber shapes or minified module names.
@@ -117,33 +120,46 @@ stable file snapshot without taking the foreground lock; network and write I/O
 is serialized per guide id, so one slow Steam request cannot block another guide.
 Remote image URLs are removed from returned HTML. Only trusted Steam HTTPS
 static PNG/JPEG/GIF/WebP content with bounded encoded bytes and decoded
-dimensions can enter the bounded Rust cache. The frontend assigns only local
-Blob URLs to a capped IntersectionObserver working set, deduplicates URLs,
-stages at most 48 distinct requests, pins near-viewport blobs, and applies its
-own decoded-residency LRU. Clearing the image cache synchronously acquires a
+dimensions can enter the bounded Rust cache. The image decoder validates actual
+pixels before a download or changed disk file counts as complete; unchanged
+validated signatures reuse the result. Animation checks inspect format structure,
+not arbitrary bytes inside metadata or compressed content. The frontend observes
+all images within the bounded guide, selects at most 512 active hydration
+candidates, deduplicates URLs, stages at most 48 distinct requests, and pins
+actually visible blobs. Nearby preloads remain evictable under the existing
+decoded-residency LRU. If visible images themselves exceed that budget, a capacity
+control lets the user prioritize one without growing the budget. Clearing the
+image cache synchronously acquires a
 token that pauses and invalidates active reader work before the backend deletes
 memory and disk entries. The reader mounts one
 budgeted section first, incrementally indexes new text nodes, first applies the
 pixel fallback, and then aligns the saved text anchor after relevant layout or
 image-size changes.
+An arriving background update may capture a new DOM bookmark only after the
+reader checkpoint is safe; otherwise it retains the existing restoration target.
 
-The physical L4 event carries the HID-edge Unix timestamp and sequence number.
+The physical L4 event carries the userspace HID-read Unix timestamp and sequence
+number. A readable-descriptor wait wakes on incoming data; its bounded timeout
+only checks for shutdown and is not an intentional input delay. The timestamp
+does not measure the preceding physical-button/device/report-delivery latency.
 The frontend records route request/mount, cache readiness, first content frame,
 spinner visibility, and a stable position outcome. Physical opens that fail,
 time out, are superseded, or are canceled terminate as failures in the same
 rolling attempt window. Once 20 warm attempts are retained, successful
 memory/disk samples contribute latency values to the P95 ≤ 300 ms calculation,
 while any retained warm failure fails that gate.
+Visible queued or deferred images cannot complete the gate. Failed or
+capacity-limited visible images allow the article to remain usable but report an
+unavailable position outcome, not a passing complete-screen sample.
 
 Guide and position reads fail independently: an unavailable or corrupt reader
 position does not block cached body rendering, and a failed refresh keeps the
 old body visible with an explicit warning. Store repair is user-triggered and
 backs up the invalid bytes before atomically writing an empty validated store.
-The panel's guide library is a cache-only Rust query over the 20 newest
+The reader's Y switcher is a cache-only Rust query over the 20 newest
 `reader_positions.json` entries. It joins only validated title, author, section,
 and staleness metadata from the existing guide cache; it never downloads in the
 background, and removing one cached body leaves its reader position intact.
-Frontend filtering runs only over this bounded response.
 
 For a first-time handoff, the controller uses its native pixel bookmark only to
 probe the still-mounted native Steam DOM and capture the corresponding visible

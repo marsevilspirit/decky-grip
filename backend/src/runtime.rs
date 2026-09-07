@@ -858,8 +858,7 @@ mod tests {
                     calls.fetch_add(1, Ordering::SeqCst);
                     Ok((
                         "image/png".to_owned(),
-                        b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x06\0\0\0test"
-                            .to_vec(),
+                        include!("../tests/fixtures/static_png.rs").to_vec(),
                     ))
                 },
                 crate::guide_images::ImageLimits::default(),

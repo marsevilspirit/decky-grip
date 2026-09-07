@@ -442,7 +442,7 @@ describe("reader image hydration", () => {
     expect(other.height).toBe(4_096);
   });
 
-  it("defers a pinned image until another pin leaves the viewport", async () => {
+  it("offers a capacity fallback until another visible image leaves the viewport", async () => {
     const first = image("https://a/first");
     const second = image("https://a/second");
     const revoke = vi.fn();
@@ -459,13 +459,13 @@ describe("reader image hydration", () => {
     hydrator.setPinnedImages([first, second]);
     hydrator.hydrateImages([first, second]);
     await vi.waitFor(() =>
-      expect(second.dataset.gripImageState).toBe("deferred"),
+      expect(second.dataset.gripImageState).toBe("capacity"),
     );
 
     expect(first.src).toBe("blob:1");
     expect(first.dataset.gripImageState).toBe("ready");
     expect(second.src).toBe("");
-    expect(second.dataset.gripImageState).toBe("deferred");
+    expect(second.dataset.gripImageState).toBe("capacity");
     expect(revoke).not.toHaveBeenCalled();
 
     hydrator.setPinnedImages([second]);
@@ -516,6 +516,144 @@ describe("reader image hydration", () => {
 
     expect(fetchImage).toHaveBeenCalledTimes(3);
     expect(images[2].dataset.gripImageState).toBe("ready");
+  });
+
+  it("evicts a nearby preload for a visible image without refetching it on unchanged viewport updates", async () => {
+    const nearby = image("https://a/nearby");
+    const visible = image("https://a/visible");
+    const fetchImage = vi.fn(async () => ({
+      ...cached,
+      width: 4096,
+      height: 4096,
+    }));
+    const live = new Set<string>();
+    let sequence = 0;
+    const hydrator = new ReaderImageHydrator(
+      fetchImage,
+      3,
+      () => {
+        const url = `blob:${++sequence}`;
+        live.add(url);
+        return url;
+      },
+      (url) => live.delete(url),
+    );
+    hydrator.setPinnedImages([], [nearby]);
+    hydrator.hydrateImages([nearby]);
+    await vi.waitFor(() => expect(nearby.src).toBe("blob:1"));
+    hydrator.setPinnedImages([visible], [nearby, visible]);
+    hydrator.hydrateImages([visible, nearby]);
+    await vi.waitFor(() => expect(visible.src).toBe("blob:2"));
+    expect(nearby.src).toBe("");
+    expect(live.size).toBe(1); // One 4096² image already consumes the entire 64 MiB budget.
+    for (let count = 0; count < 3; count++) {
+      hydrator.setPinnedImages([visible], [nearby, visible]);
+      hydrator.hydrateImages([visible, nearby]);
+    }
+    expect(fetchImage).toHaveBeenCalledTimes(2);
+    hydrator.clear();
+  });
+
+  it("lets a user prioritize an over-budget visible image without growing the decoded budget or thrashing", async () => {
+    const first = image("https://a/first");
+    const second = image("https://a/second");
+    const fetchImage = vi.fn(async () => ({
+      ...cached,
+      width: 4096,
+      height: 4096,
+    }));
+    const live = new Set<string>();
+    let sequence = 0;
+    let maximum = 0;
+    const hydrator = new ReaderImageHydrator(
+      fetchImage,
+      3,
+      () => {
+        const url = `blob:${++sequence}`;
+        live.add(url);
+        maximum = Math.max(maximum, live.size);
+        return url;
+      },
+      (url) => live.delete(url),
+    );
+    hydrator.setPinnedImages([first, second]);
+    hydrator.hydrateImages([first, second]);
+    await vi.waitFor(() =>
+      expect(second.dataset.gripImageState).toBe("capacity"),
+    );
+    hydrator.retryImage(second);
+    hydrator.retryImage(second);
+    await vi.waitFor(() => expect(second.src).toBe("blob:2"));
+    expect(first.dataset.gripImageState).toBe("capacity");
+    expect(first.src).toBe("");
+    hydrator.setPinnedImages([first, second]);
+    hydrator.hydrateImages([first, second]);
+    expect(fetchImage).toHaveBeenCalledTimes(3);
+    hydrator.retryImage(first);
+    await vi.waitFor(() => expect(first.src).toBe("blob:3"));
+    expect(second.dataset.gripImageState).toBe("capacity");
+    expect(maximum).toBe(1);
+    hydrator.clear();
+  });
+
+  it("prioritizes newly visible work while retaining the default 3 RPC, 48 pending URL and 64 entry limits", async () => {
+    const nearby = Array.from({ length: 70 }, (_, index) =>
+      image(`https://a/${index}`),
+    );
+    const visible = image("https://a/visible");
+    const release: Array<() => void> = [];
+    let active = 0;
+    let maximumActive = 0;
+    const fetchImage = vi.fn(
+      (url: string) =>
+        new Promise<CachedGuideImage>((resolve) => {
+          active++;
+          maximumActive = Math.max(maximumActive, active);
+          release.push(() => {
+            active--;
+            resolve(cached);
+          });
+          void url;
+        }),
+    );
+    const live = new Set<string>();
+    let sequence = 0;
+    let maximumEntries = 0;
+    const hydrator = new ReaderImageHydrator(
+      fetchImage,
+      3,
+      () => {
+        const url = `blob:${++sequence}`;
+        live.add(url);
+        maximumEntries = Math.max(maximumEntries, live.size);
+        return url;
+      },
+      (url) => live.delete(url),
+    );
+    const pendingCount = () =>
+      [...nearby, visible].filter((entry) =>
+        ["queued", "loading"].includes(entry.dataset.gripImageState ?? ""),
+      ).length;
+    hydrator.setPinnedImages([], nearby);
+    hydrator.hydrateImages(nearby);
+    expect(fetchImage).toHaveBeenCalledTimes(3);
+    expect(pendingCount()).toBe(48);
+    hydrator.setPinnedImages([visible], [...nearby, visible]);
+    hydrator.hydrateImages([visible]);
+    expect(pendingCount()).toBe(48);
+    release.shift()!();
+    await vi.waitFor(() => expect(fetchImage).toHaveBeenCalledTimes(4));
+    expect(fetchImage.mock.calls[3]).toEqual(["https://a/visible", true]);
+    while (release.length) {
+      release.shift()!();
+      for (let count = 0; count < 8; count++) await Promise.resolve();
+      expect(pendingCount()).toBeLessThanOrEqual(48);
+    }
+    expect(maximumActive).toBe(3);
+    expect(maximumEntries).toBe(64);
+    expect(visible.src).not.toBe("");
+    hydrator.clear();
+    expect(live.size).toBe(0);
   });
 
   it("rehydrates a reused image node after a guide refresh clears blobs", async () => {

@@ -61,6 +61,7 @@ interface RestoreEpoch {
   stableHeightChecks: number;
   timer: ReturnType<typeof setTimeout> | null;
   applying: boolean;
+  timedOut: boolean;
 }
 
 interface QueuedSave {
@@ -565,7 +566,9 @@ export class GripController {
   }
 
   private handleGuideLayout(): void {
-    if (this.restore) {
+    if (this.restore?.timedOut) {
+      this.beginRestore(this.restore.identity, this.restore.target);
+    } else if (this.restore) {
       this.scheduleRestoreCheck();
     }
     this.handleLifecycle();
@@ -581,7 +584,7 @@ export class GripController {
     }
 
     this.lastScrollerElement = null;
-    this.handleLifecycle();
+    this.handleGuideLayout();
   }
 
   private handleLifecycle(): void {
@@ -687,6 +690,7 @@ export class GripController {
       stableHeightChecks: 0,
       timer: null,
       applying: false,
+      timedOut: false,
     };
     this.status.update({
       phase: "watching",
@@ -698,7 +702,7 @@ export class GripController {
 
   private scheduleRestoreCheck(delay = RESTORE_CHECK_MS): void {
     const restore = this.restore;
-    if (!restore || restore.timer !== null) {
+    if (!restore || restore.timedOut || restore.timer !== null) {
       return;
     }
     restore.timer = setTimeout(() => {
@@ -865,7 +869,8 @@ export class GripController {
       return;
     }
 
-    this.restore = null;
+    // Keep capture blocked until content changes or the user deliberately scrolls.
+    restore.timedOut = true;
     this.status.update({
       phase: "watching",
       activeGuide: restore.identity,
