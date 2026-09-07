@@ -88,19 +88,25 @@ Python tests use only the standard library.
    not list downloaded guides; switch guides inside the reader with **Y**.
    Open **高级选项** for local cache maintenance and diagnostics.
 3. Scroll normally in the full-screen reader. Press **Y** to open the current
-   game's guide list with focus directly on another guide, and **B** to close the
-   list or leave the reader. The narrow chapter list highlights the current
-   chapter and shows the full focused title in an overlay without resizing the
-   article. A failed image offers its own retry button; **A** in the article
+   game's guide list with focus directly on another guide. Cards keep their
+   titles and focus while opening, show errors in place, and retry with **A**.
+   Press **X** or move right from the article to expand the full chapter directory;
+   it overlays the article without changing its width or reading position.
+   **B** backs out one layer at a time: search, directory, then the reader.
+   **L1 / R1** page through the article. A failed image offers its own retry
+   button; **A** in the article
    retries the first visible failed image without reloading the guide.
    Click a loaded image, or press **A** when a loaded image is visible and no
    failed image needs retrying, to view it full-screen. Use **L1 / R1** or the
-   zoom buttons to change scale, and direction buttons or dragging to pan.
+   zoom buttons to change scale, **X** to fit the complete image, **L2 / R2**
+   to switch between loaded images in the current viewport, and direction
+   buttons or dragging to pan. Move down at the bottom of the image to reach
+   the image controls.
    Tall images initially fit the reading width and scroll vertically; **适应屏幕**
    still shows the complete image. **B** returns to the unchanged reading position; the viewer reuses the local
    image without downloading it again.
-   Choose **搜索** to find local
-   guide titles, chapters, or body text, preview matching context, and step
+   Choose **搜索** in the directory (or press **Ctrl/Cmd+F**) to find text in
+   the current guide, preview matching context, and step
    through highlighted matches. GRIP saves each guide's visible text and exact
    viewport offset independently.
 4. For instant in-game access after that first handoff, map the upper-left

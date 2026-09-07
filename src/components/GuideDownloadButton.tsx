@@ -74,11 +74,10 @@ function GuideDownloadButtonForGuide({
   const [downloadStatus, setDownloadStatus] =
     useState<GuideDownloadStatus | null>(null);
   const [checking, setChecking] = useState(true);
-  const [checkFailed, setCheckFailed] = useState(false);
+  const [checkError, setCheckError] = useState<string | null>(null);
   const [checkRevision, setCheckRevision] = useState(0);
   const [operation, setOperation] = useState<"open" | null>(null);
-  const [failedOperation, setFailedOperation] =
-    useState<typeof operation>(null);
+  const [openError, setOpenError] = useState<string | null>(null);
   const task = useSyncExternalStore(downloads.subscribe, () =>
     downloads.getSnapshot(identity.guideId),
   );
@@ -99,13 +98,14 @@ function GuideDownloadButtonForGuide({
     if (operation !== null || downloading) return;
     let canceled = false;
     setChecking(true);
-    setCheckFailed(false);
+    setCheckError(null);
     void getDownloadStatus(identity.guideId)
       .then((status) => {
         if (!canceled && !busyRef.current) setDownloadStatus(status);
       })
-      .catch(() => {
-        if (!canceled && !busyRef.current) setCheckFailed(true);
+      .catch((error: unknown) => {
+        if (!canceled && !busyRef.current)
+          setCheckError(error instanceof Error ? error.message : String(error));
       })
       .finally(() => {
         if (!canceled && !busyRef.current) setChecking(false);
@@ -123,23 +123,43 @@ function GuideDownloadButtonForGuide({
   ]);
 
   const activate = async (): Promise<void> => {
-    if (busyRef.current || checking || downloading) return;
-    if (checkFailed || !downloadStatus) {
+    if (busyRef.current || !mountedRef.current) return;
+    const currentTask = downloads.getSnapshot(identity.guideId);
+    if (
+      currentTask?.phase === "canceling" ||
+      (currentTask?.progress?.publishing && currentTask.phase === "downloading")
+    )
+      return;
+    if (currentTask?.phase === "downloading") {
+      busyRef.current = true;
+      downloads.cancel(identity.guideId);
+      queueMicrotask(() => {
+        busyRef.current = false;
+      });
+      return;
+    }
+    if (checking) return;
+    if (checkError || !downloadStatus) {
+      setChecking(true);
       setCheckRevision((value) => value + 1);
       return;
     }
     if (downloadStatus.state !== "complete") {
+      busyRef.current = true;
       void downloads.start(identity);
+      queueMicrotask(() => {
+        busyRef.current = false;
+      });
       return;
     }
-    const nextOperation = "open";
     busyRef.current = true;
-    setOperation(nextOperation);
-    setFailedOperation(null);
+    setOperation("open");
+    setOpenError(null);
     try {
       await openGuide(identity);
-    } catch {
-      if (mountedRef.current) setFailedOperation(nextOperation);
+    } catch (error: unknown) {
+      if (mountedRef.current)
+        setOpenError(error instanceof Error ? error.message : String(error));
     } finally {
       busyRef.current = false;
       if (mountedRef.current) {
@@ -155,72 +175,117 @@ function GuideDownloadButtonForGuide({
   }
 
   const NavigationProvider = target.navigationProvider;
+  const blocked =
+    operation !== null ||
+    (!downloading && checking) ||
+    task?.phase === "canceling" ||
+    (downloading && progress?.publishing);
+  const completed = Math.max(
+    0,
+    Math.min(progress?.completed ?? 0, progress?.total ?? 0),
+  );
+  const total = Math.max(0, progress?.total ?? 0);
+  const progressText =
+    task?.phase === "canceling"
+      ? "正在停止下载，已保存的图片会保留"
+      : progress?.publishing
+        ? "图片已齐全，正在保存新版…"
+        : progress?.stopped
+          ? "空间不足，已停止后续下载"
+          : total > 0
+            ? `图片 ${completed}/${total} · ${Math.floor((completed / total) * 100)}%`
+            : "正在下载指南正文…";
   return createPortal(
     <NavigationProvider value={target.navigationNode}>
-      <DialogButton
-        aria-live="polite"
-        data-grip-guide-download="true"
-        disabled={operation !== null || checking || downloading}
-        onClick={() => void activate()}
+      <div
+        data-grip-guide-actions="true"
+        style={{ display: "grid", gap: 6, minWidth: 0, flex: "1 1 0" }}
       >
-        {operation !== null || checking || downloading ? (
-          <BusyLabel>
-            {operation === "open"
-              ? "正在打开…"
-              : task?.phase === "canceling"
-                ? "正在停止下载…"
-                : progress?.publishing
-                  ? "保存新版…"
-                  : progress?.stopped
-                    ? "空间不足，已停止后续下载"
-                    : downloading
-                      ? progress
-                        ? `图片 ${progress.completed}/${progress.total}…`
-                        : "下载中…"
-                      : "检查下载…"}
-          </BusyLabel>
-        ) : checkFailed ? (
-          "检查失败，重试"
-        ) : downloadStatus?.state === "complete" ? (
-          failedOperation === "open" ? (
-            "重试打开"
-          ) : (
-            "本地阅读"
-          )
-        ) : task?.phase === "failed" ? (
-          "重试下载"
-        ) : task?.phase === "canceled" ? (
-          "继续下载"
-        ) : downloadStatus?.state === "partial" ? (
-          "补全下载"
-        ) : (
-          "下载到 GRIP"
-        )}
-      </DialogButton>
-      {downloading && (
         <DialogButton
-          disabled={task?.phase === "canceling" || progress?.publishing}
-          onClick={() => downloads.cancel(identity.guideId)}
+          aria-disabled={Boolean(blocked)}
+          aria-busy={Boolean(blocked)}
+          data-grip-guide-download="true"
+          focusable
+          onClick={() => void activate()}
         >
-          取消下载
+          {operation !== null ||
+          (!downloading && checking) ||
+          task?.phase === "canceling" ||
+          (downloading && progress?.publishing) ? (
+            <BusyLabel>
+              {operation === "open"
+                ? "正在打开…"
+                : task?.phase === "canceling"
+                  ? "正在停止下载…"
+                  : downloading && progress?.publishing
+                    ? "保存新版…"
+                    : "检查下载…"}
+            </BusyLabel>
+          ) : downloading ? (
+            "取消下载"
+          ) : checkError ? (
+            "检查失败，重试"
+          ) : downloadStatus?.state === "complete" ? (
+            openError ? (
+              "重试打开"
+            ) : (
+              "本地阅读"
+            )
+          ) : task?.phase === "failed" ? (
+            "重试下载"
+          ) : task?.phase === "canceled" ? (
+            "继续下载"
+          ) : downloadStatus?.state === "partial" ? (
+            "补全下载"
+          ) : (
+            "下载到 GRIP"
+          )}
         </DialogButton>
-      )}
-      {(progress?.error || task?.error) && (
-        <div
-          role="status"
-          style={{ color: "#ffc582", fontSize: 14, padding: "6px 0" }}
-        >
-          {progress?.stopped
-            ? "已暂停："
-            : progress?.failed
-              ? `${progress.failed} 张图片失败：`
-              : ""}
-          {progress?.error ?? task?.error}
-          {downloading && !progress?.stopped
-            ? "；其余图片继续下载，完成后可重试失败图片。"
-            : "；已下载内容保留。"}
-        </div>
-      )}
+        {downloading && (
+          <div data-grip-download-progress="true" style={{ fontSize: 14 }}>
+            {total > 0 && (
+              <progress
+                aria-label="离线图片下载进度"
+                max={total}
+                value={completed}
+                style={{ width: "100%", accentColor: "#67c1f5" }}
+              />
+            )}
+            <div role="status">{progressText}</div>
+          </div>
+        )}
+        {!checking && !downloading && downloadStatus?.state === "complete" && (
+          <div role="status" style={{ fontSize: 14 }}>
+            正文和图片已完整离线，按 A 本地阅读
+          </div>
+        )}
+        {checkError && (
+          <div role="status" style={{ color: "#ffc582", fontSize: 14 }}>
+            本地状态读取失败：{checkError}
+          </div>
+        )}
+        {openError && (
+          <div role="alert" style={{ color: "#ffc582", fontSize: 14 }}>
+            本地阅读打开失败：{openError}
+          </div>
+        )}
+        {(progress?.error || task?.error) && (
+          <div
+            role="status"
+            style={{ color: "#ffc582", fontSize: 14, padding: "6px 0" }}
+          >
+            {progress?.stopped
+              ? "已暂停："
+              : progress?.failed
+                ? `${progress.failed} 张图片失败：`
+                : ""}
+            {progress?.error ?? task?.error}
+            {downloading && !progress?.stopped
+              ? "；其余图片继续下载，完成后可重试失败图片。"
+              : "；已下载内容保留。"}
+          </div>
+        )}
+      </div>
     </NavigationProvider>,
     target.element,
   );

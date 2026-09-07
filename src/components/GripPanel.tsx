@@ -1,12 +1,14 @@
 import { useQuickAccessVisible } from "@decky/api";
 import {
   ButtonItem,
+  ConfirmModal,
   DropdownItem,
   PanelSection,
   PanelSectionRow,
   ToggleField,
+  showModal,
 } from "@decky/ui";
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import {
   getHotkeyStatus,
@@ -78,23 +80,29 @@ export function GripPanel({
   const [cacheMessage, setCacheMessage] = useState<string | null>(null);
   const [cacheStats, setCacheStats] = useState<ReaderCacheStats | null>(null);
   const [cacheStatsError, setCacheStatsError] = useState<string | null>(null);
+  const [cacheStatsLoading, setCacheStatsLoading] = useState(false);
+  const [cacheStatsRevision, setCacheStatsRevision] = useState(0);
+  const mounted = useRef(true);
+  const readerBusyRef = useRef(false);
+  const cacheBusyRef = useRef(false);
+  const positionBusyRef = useRef(false);
+  const statsGeneration = useRef(0);
+  const confirmation = useRef<ReturnType<typeof showModal> | null>(null);
   const performanceSnapshot = useSyncExternalStore(
     performance.subscribe,
     performance.getSnapshot,
   );
   const cacheBusy = cacheBusyKey !== null;
 
-  const refreshCacheStats = async (): Promise<void> => {
-    setCacheStatsError(null);
-    try {
-      setCacheStats(await getCacheStats());
-    } catch (error: unknown) {
-      setCacheStats(null);
-      setCacheStatsError(
-        error instanceof Error ? error.message : String(error),
-      );
-    }
-  };
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      statsGeneration.current++;
+      confirmation.current?.Close();
+      confirmation.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     if (!quickAccessVisible) {
@@ -118,27 +126,41 @@ export function GripPanel({
   }, [quickAccessVisible]);
 
   useEffect(() => {
-    let canceled = false;
+    const generation = ++statsGeneration.current;
+    if (!quickAccessVisible || !showAdvanced || cacheBusyRef.current) return;
+    const current = () =>
+      mounted.current && statsGeneration.current === generation;
+    setCacheStatsLoading(true);
     setCacheStatsError(null);
     void getCacheStats()
       .then((stats) => {
-        if (!canceled) {
+        if (current()) {
           setCacheStats(stats);
           setCacheStatsError(null);
         }
       })
       .catch((error: unknown) => {
-        if (!canceled) {
+        if (current()) {
           setCacheStats(null);
           setCacheStatsError(
             error instanceof Error ? error.message : String(error),
           );
         }
+      })
+      .finally(() => {
+        if (current()) setCacheStatsLoading(false);
       });
     return () => {
-      canceled = true;
+      statsGeneration.current++;
     };
-  }, [getCacheStats]);
+  }, [
+    getCacheStats,
+    quickAccessVisible,
+    showAdvanced,
+    status.downloadRevision,
+    cacheStatsRevision,
+    cacheBusyKey,
+  ]);
 
   const runCacheAction = async <Result,>(
     busyKey: string,
@@ -146,47 +168,121 @@ export function GripPanel({
     successMessage: (result: Result) => string,
     failureLabel: string,
   ): Promise<void> => {
-    if (cacheBusy) {
+    if (!mounted.current || cacheBusyRef.current || readerBusyRef.current) {
       return;
     }
+    cacheBusyRef.current = true;
+    statsGeneration.current++;
     setCacheBusyKey(busyKey);
     setCacheMessage(null);
     try {
       const result = await action();
-      setCacheMessage(successMessage(result));
+      if (mounted.current) setCacheMessage(successMessage(result));
     } catch (error: unknown) {
-      setCacheMessage(
-        `${failureLabel}失败：${error instanceof Error ? error.message : String(error)}`,
-      );
+      if (mounted.current)
+        setCacheMessage(
+          `${failureLabel}失败：${error instanceof Error ? error.message : String(error)}`,
+        );
     } finally {
-      await refreshCacheStats();
-      setCacheBusyKey(null);
+      cacheBusyRef.current = false;
+      if (mounted.current) {
+        setCacheBusyKey(null);
+        setCacheStatsRevision((value) => value + 1);
+      }
     }
   };
 
-  const retryCacheStats = async (): Promise<void> => {
-    if (cacheBusy) {
+  const confirmCacheAction = (kind: "guides" | "images"): void => {
+    if (
+      confirmation.current ||
+      cacheBusyRef.current ||
+      readerBusyRef.current ||
+      !mounted.current
+    )
       return;
-    }
-    setCacheBusyKey("stats");
-    try {
-      await refreshCacheStats();
-    } finally {
-      setCacheBusyKey(null);
-    }
+    let settled = false;
+    let modal: ReturnType<typeof showModal> | null = null;
+    const closed = () => {
+      settled = true;
+      if (confirmation.current === modal) confirmation.current = null;
+    };
+    const cancel = () => {
+      closed();
+      modal?.Close();
+    };
+    const title = kind === "guides" ? "清除指南正文缓存" : "清除图片缓存";
+    modal = showModal(
+      <ConfirmModal
+        bDestructiveWarning
+        strTitle={title}
+        strDescription={
+          kind === "guides"
+            ? "将移除所有缓存正文，包括已下载指南。阅读位置会保留，但下次打开需要联网重新下载。"
+            : "将移除所有缓存图片，包括离线下载的图片。正文和阅读位置保留，但图片需要联网重新下载。"
+        }
+        strOKButtonText="确认清除"
+        strCancelButtonText="保留，返回"
+        onCancel={cancel}
+        onOK={() => {
+          if (settled || !mounted.current) return;
+          cancel();
+          void runCacheAction(
+            `clear-${kind}`,
+            kind === "guides" ? clearGuides : clearImages,
+            (result) =>
+              `${kind === "guides" ? "指南" : "图片"}缓存已清除：删除 ${result.filesRemoved} 个文件，释放 ${formatBytes(result.bytesRemoved)}`,
+            title,
+          );
+        }}
+      />,
+      undefined,
+      { fnOnClose: closed },
+    );
+    confirmation.current = modal;
   };
 
   const runOpen = (): void => {
-    if (readerBusy || cacheBusy) {
+    if (readerBusyRef.current || cacheBusyRef.current || !mounted.current) {
       return;
     }
+    readerBusyRef.current = true;
     setReaderBusy(true);
     setReaderError(null);
     void openReader()
       .catch((error: unknown) => {
-        setReaderError(error instanceof Error ? error.message : String(error));
+        if (mounted.current)
+          setReaderError(
+            error instanceof Error ? error.message : String(error),
+          );
       })
-      .finally(() => setReaderBusy(false));
+      .finally(() => {
+        readerBusyRef.current = false;
+        if (mounted.current) setReaderBusy(false);
+      });
+  };
+
+  const runPositionAction = async (kind: "retry" | "repair"): Promise<void> => {
+    if (positionBusyRef.current || !mounted.current) return;
+    positionBusyRef.current = true;
+    setPositionBusy(kind);
+    setRepairMessage(null);
+    try {
+      const message =
+        kind === "repair"
+          ? await repairPositions()
+          : (await retryPositions())
+            ? "阅读位置已重新读取"
+            : "仍未能读取阅读位置，请查看上方原因后重试或备份重置。";
+      if (mounted.current) setRepairMessage(message);
+    } catch (error: unknown) {
+      if (mounted.current)
+        setRepairMessage(
+          `位置恢复失败：${error instanceof Error ? error.message : String(error)}`,
+        );
+    } finally {
+      positionBusyRef.current = false;
+      if (mounted.current) setPositionBusy(null);
+    }
   };
 
   const lastAction = describeLastAction(status);
@@ -224,10 +320,7 @@ export function GripPanel({
                   )
                 }
                 layout="below"
-                onClick={() => {
-                  setPositionBusy("retry");
-                  void retryPositions().finally(() => setPositionBusy(null));
-                }}
+                onClick={() => void runPositionAction("retry")}
               >
                 不会影响已缓存的指南正文
               </ButtonItem>
@@ -241,18 +334,7 @@ export function GripPanel({
                   )
                 }
                 layout="below"
-                onClick={() => {
-                  setPositionBusy("repair");
-                  setRepairMessage(null);
-                  void repairPositions()
-                    .then(setRepairMessage)
-                    .catch((error: unknown) =>
-                      setRepairMessage(
-                        `位置恢复失败：${error instanceof Error ? error.message : String(error)}`,
-                      ),
-                    )
-                    .finally(() => setPositionBusy(null));
-                }}
+                onClick={() => void runPositionAction("repair")}
               >
                 仅在校验失败时备份原文件并重置
               </ButtonItem>
@@ -261,14 +343,16 @@ export function GripPanel({
         )}
         {repairMessage && (
           <PanelSectionRow>
-            <div style={{ color: "#f0b35a", opacity: 0.88 }}>
+            <div role="status" style={{ color: "#f0b35a", opacity: 0.88 }}>
               {repairMessage}
             </div>
           </PanelSectionRow>
         )}
         {cacheMessage && (
           <PanelSectionRow>
-            <div style={{ opacity: 0.82 }}>{cacheMessage}</div>
+            <div role="status" style={{ opacity: 0.82 }}>
+              {cacheMessage}
+            </div>
           </PanelSectionRow>
         )}
         {status.phase === "error" && (
@@ -278,7 +362,9 @@ export function GripPanel({
         )}
         {readerError && (
           <PanelSectionRow>
-            <div style={{ color: "#ff6b6b" }}>{readerError}</div>
+            <div role="alert" style={{ color: "#ff6b6b" }}>
+              {readerError}
+            </div>
           </PanelSectionRow>
         )}
         <PanelSectionRow>
@@ -352,7 +438,7 @@ export function GripPanel({
                   )
                 }
                 description="额度满后不会删除已下载图片；单篇删除请在阅读器按 Y。"
-                disabled={cacheBusy || !cacheStats}
+                disabled={cacheBusy || readerBusy || !cacheStats}
                 selectedOption={cacheStats?.images.diskLimitBytes}
                 rgOptions={[64, 128, 256, 512, 1024, 2048, 4096, 8192].map(
                   (mib) => ({
@@ -378,20 +464,30 @@ export function GripPanel({
                     ? `缓存用量读取失败：${cacheStatsError}`
                     : "正在读取缓存用量…"}
               </div>
+              {cacheStats && cacheStatsLoading && (
+                <BusyLabel>正在刷新缓存用量…</BusyLabel>
+              )}
             </PanelSectionRow>
             {cacheStatsError && (
               <PanelSectionRow>
                 <ButtonItem
-                  disabled={cacheBusy}
+                  disabled={cacheBusy || cacheStatsLoading}
                   label={
-                    cacheBusyKey === "stats" ? (
+                    cacheStatsLoading ? (
                       <BusyLabel>正在读取…</BusyLabel>
                     ) : (
                       "重试读取缓存用量"
                     )
                   }
                   layout="below"
-                  onClick={() => void retryCacheStats()}
+                  onClick={() => {
+                    if (
+                      !cacheBusyRef.current &&
+                      !cacheStatsLoading &&
+                      mounted.current
+                    )
+                      setCacheStatsRevision((value) => value + 1);
+                  }}
                 >
                   仅重新读取统计，不会修改缓存或阅读位置
                 </ButtonItem>
@@ -399,7 +495,7 @@ export function GripPanel({
             )}
             <PanelSectionRow>
               <ButtonItem
-                disabled={cacheBusy}
+                disabled={cacheBusy || readerBusy}
                 label={
                   cacheBusyKey === "clear-guides" ? (
                     <BusyLabel>正在清除…</BusyLabel>
@@ -408,22 +504,14 @@ export function GripPanel({
                   )
                 }
                 layout="below"
-                onClick={() =>
-                  void runCacheAction(
-                    "clear-guides",
-                    clearGuides,
-                    (result) =>
-                      `指南缓存已清除：删除 ${result.filesRemoved} 个文件，释放 ${formatBytes(result.bytesRemoved)}`,
-                    "清除指南缓存",
-                  )
-                }
+                onClick={() => confirmCacheAction("guides")}
               >
-                不删除阅读位置；下次打开会重新下载正文
+                包括已下载正文；保留阅读位置，下次需要联网下载
               </ButtonItem>
             </PanelSectionRow>
             <PanelSectionRow>
               <ButtonItem
-                disabled={cacheBusy}
+                disabled={cacheBusy || readerBusy}
                 label={
                   cacheBusyKey === "clear-images" ? (
                     <BusyLabel>正在清除…</BusyLabel>
@@ -432,17 +520,9 @@ export function GripPanel({
                   )
                 }
                 layout="below"
-                onClick={() =>
-                  void runCacheAction(
-                    "clear-images",
-                    clearImages,
-                    (result) =>
-                      `图片缓存已清除：删除 ${result.filesRemoved} 个文件，释放 ${formatBytes(result.bytesRemoved)}`,
-                    "清除图片缓存",
-                  )
-                }
+                onClick={() => confirmCacheAction("images")}
               >
-                清除 Rust 内存 LRU 与磁盘图片；正文不受影响
+                包括离线图片；正文和阅读位置保留
               </ButtonItem>
             </PanelSectionRow>
           </PanelSection>

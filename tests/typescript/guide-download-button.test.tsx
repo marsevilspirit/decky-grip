@@ -21,11 +21,25 @@ vi.mock("@decky/ui", () => ({
     children,
     disabled,
     onClick,
+    "aria-disabled": ariaDisabled,
+    "aria-busy": ariaBusy,
   }: {
     children?: ReactNode;
     disabled?: boolean;
     onClick?: () => void;
-  }) => createElement("button", { disabled, onClick }, children),
+    "aria-disabled"?: boolean;
+    "aria-busy"?: boolean;
+  }) =>
+    createElement(
+      "button",
+      {
+        disabled,
+        onClick,
+        "aria-disabled": ariaDisabled,
+        "aria-busy": ariaBusy,
+      },
+      children,
+    ),
   Spinner: () => createElement("span"),
 }));
 
@@ -104,14 +118,18 @@ describe("GuideDownloadButton", () => {
         />,
       ),
     );
-    expect(button()?.textContent).toBe("图片 13/61…");
+    const primary = button()!;
+    primary.focus();
+    expect(primary.textContent).toBe("取消下载");
+    expect(portalTarget.textContent).toContain("图片 13/61 · 21%");
+    const progress = portalTarget.querySelector("progress")!;
+    expect(progress.max).toBe(61);
+    expect(progress.value).toBe(13);
     expect(getDownloadStatus).not.toHaveBeenCalled();
     await act(async () =>
       report({ completed: 13, total: 61, failed: 1, error: "网络中断" }),
     );
-    expect(
-      portalTarget.querySelector('[role="status"]')?.textContent,
-    ).toContain("1 张图片失败：网络中断");
+    expect(portalTarget.textContent).toContain("1 张图片失败：网络中断");
     expect(portalTarget.textContent).toContain("其余图片继续下载");
     await act(async () =>
       report({
@@ -122,18 +140,24 @@ describe("GuideDownloadButton", () => {
         stopped: true,
       }),
     );
-    expect(button()?.textContent).toBe("空间不足，已停止后续下载");
-    expect(
-      portalTarget.querySelector('[role="status"]')?.textContent,
-    ).toContain("已暂停：空间不足");
-    await act(async () => portalTarget?.querySelectorAll("button")[1]?.click());
+    expect(portalTarget.textContent).toContain("空间不足，已停止后续下载");
+    expect(portalTarget.textContent).toContain("已暂停：空间不足");
+    await act(async () => {
+      primary.click();
+      primary.click();
+    });
     expect(signal.aborted).toBe(true);
     expect(button()?.textContent).toBe("正在停止下载…");
+    expect(button()).toBe(primary);
+    expect(document.activeElement).toBe(primary);
+    expect(primary.getAttribute("aria-disabled")).toBe("true");
     await act(async () => {
       finish();
       await work;
     });
     expect(button()?.textContent).toBe("继续下载");
+    expect(button()).toBe(primary);
+    expect(document.activeElement).toBe(primary);
     expect(portalTarget.querySelectorAll("button")).toHaveLength(1);
   });
 
@@ -193,28 +217,29 @@ describe("GuideDownloadButton", () => {
     expect(button()).toBeNull();
 
     await render(firstGuide);
-    expect(button()?.parentElement).toBe(portalTarget);
+    expect(button()?.parentElement?.dataset.gripGuideActions).toBe("true");
+    expect(button()?.parentElement?.parentElement).toBe(portalTarget);
     expect(button()?.textContent).toBe("下载到 GRIP");
     await act(async () => {
       button()?.click();
+      button()?.click();
     });
-    expect(button()?.disabled).toBe(true);
-    expect(button()?.textContent).toBe("下载中…");
-    expect(button()?.querySelector('[data-grip-busy="true"]')).not.toBeNull();
-    await act(async () => button()?.click());
+    expect(button()?.disabled).toBe(false);
+    expect(button()?.textContent).toBe("取消下载");
+    expect(portalTarget.textContent).toContain("正在下载指南正文…");
     expect(downloadGuide).toHaveBeenCalledOnce();
+    expect(downloadGuide.mock.calls[0][2].aborted).toBe(false);
     await act(async () => {
       downloadGuide.mock.calls[0][1]?.({ completed: 13, total: 61 });
     });
-    expect(button()?.textContent).toBe("图片 13/61…");
-    expect(button()?.disabled).toBe(true);
+    expect(button()?.textContent).toBe("取消下载");
+    expect(portalTarget.textContent).toContain("图片 13/61 · 21%");
 
     await render(secondGuide);
     expect(button()?.disabled).toBe(false);
     await render(firstGuide);
-    expect(button()?.disabled).toBe(true);
-    expect(button()?.textContent).toBe("图片 13/61…");
-    await act(async () => button()?.click());
+    expect(button()?.textContent).toBe("取消下载");
+    expect(portalTarget.textContent).toContain("图片 13/61 · 21%");
     expect(downloadGuide).toHaveBeenCalledOnce();
     await act(async () => {
       states.set(firstGuide.guideId, complete);
@@ -307,9 +332,12 @@ describe("GuideDownloadButton", () => {
       ),
     );
     expect(button()?.textContent).toBe("检查失败，重试");
+    expect(portalTarget.textContent).toContain(
+      "本地状态读取失败：sidecar unavailable",
+    );
     await act(async () => button()?.click());
     expect(button()?.textContent).toBe("检查下载…");
-    expect(button()?.disabled).toBe(true);
+    expect(button()?.getAttribute("aria-disabled")).toBe("true");
     await act(async () =>
       finishCheck({ state: "complete", completed: 1, total: 1 }),
     );
@@ -319,12 +347,109 @@ describe("GuideDownloadButton", () => {
       button()?.click();
     });
     expect(button()?.textContent).toBe("正在打开…");
-    expect(button()?.disabled).toBe(true);
+    expect(button()?.getAttribute("aria-disabled")).toBe("true");
     expect(openGuide).toHaveBeenCalledTimes(1);
     await act(async () => failOpen(new Error("navigation failed")));
     expect(button()?.textContent).toBe("重试打开");
+    expect(portalTarget.textContent).toContain(
+      "本地阅读打开失败：navigation failed",
+    );
     await act(async () => button()?.click());
     expect(openGuide).toHaveBeenCalledTimes(2);
     expect(downloadGuide).not.toHaveBeenCalled();
+  });
+
+  it("keeps one focused native action through download, publication and verified local reading", async () => {
+    let report!: (progress: GuideImageDownloadProgress) => void;
+    let finish!: () => void;
+    let signal!: AbortSignal;
+    let verify!: (status: GuideDownloadStatus) => void;
+    const downloads = new GuideDownloadTasks(
+      async (_id, nextReport, nextSignal) => {
+        report = nextReport;
+        signal = nextSignal;
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+      },
+    );
+    const getDownloadStatus = vi
+      .fn<GuideDownloadButtonProps["getDownloadStatus"]>()
+      .mockResolvedValueOnce({ state: "missing", completed: 0, total: 0 })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            verify = resolve;
+          }),
+      )
+      .mockResolvedValue({ state: "complete", completed: 2, total: 2 });
+    const openGuide = vi.fn(async () => undefined);
+    const cancel = vi.spyOn(downloads, "cancel");
+    const NavigationContext = createContext<unknown>(null);
+    const navigationNode = { id: "native-guide-context" };
+    container = document.createElement("div");
+    portalTarget = document.createElement("div");
+    document.body.append(container, portalTarget);
+    root = createRoot(container);
+    await act(async () =>
+      root?.render(
+        <GuideDownloadButton
+          downloads={downloads}
+          getDownloadStatus={getDownloadStatus}
+          identity={firstGuide}
+          openGuide={openGuide}
+          target={{
+            element: portalTarget!,
+            navigationNode,
+            navigationProvider: NavigationContext,
+          }}
+        />,
+      ),
+    );
+    const primary = button()!;
+    primary.focus();
+    await act(async () => {
+      primary.click();
+      primary.click();
+    });
+    expect(primary.textContent).toBe("取消下载");
+    expect(cancel).not.toHaveBeenCalled();
+    expect(portalTarget.querySelector("progress")).toBeNull();
+    expect(portalTarget.textContent).not.toContain("NaN");
+    await act(async () => report({ completed: 1, total: 2 }));
+    expect(portalTarget.querySelector("progress")?.value).toBe(1);
+    expect(portalTarget.textContent).toContain("图片 1/2 · 50%");
+    await act(async () => {
+      // Publication can arrive before React commits the previous cancel label.
+      report({ completed: 2, total: 2, publishing: true });
+      primary.click();
+      primary.click();
+    });
+    expect(signal.aborted).toBe(false);
+    expect(cancel).not.toHaveBeenCalled();
+    expect(primary.textContent).toBe("保存新版…");
+    expect(primary.getAttribute("aria-disabled")).toBe("true");
+    expect(primary.disabled).toBe(false);
+    expect(button()).toBe(primary);
+    expect(document.activeElement).toBe(primary);
+    await act(async () => finish());
+    expect(primary.textContent).toBe("检查下载…");
+    expect(portalTarget.textContent).not.toContain("已完整离线");
+    await act(async () => primary.click());
+    expect(openGuide).not.toHaveBeenCalled();
+    await act(async () =>
+      verify({ state: "complete", completed: 2, total: 2 }),
+    );
+    expect(primary.textContent).toBe("本地阅读");
+    expect(primary.getAttribute("aria-disabled")).toBe("false");
+    expect(portalTarget.textContent).toContain("正文和图片已完整离线");
+    expect(portalTarget.querySelectorAll("button")).toHaveLength(1);
+    expect(button()).toBe(primary);
+    expect(document.activeElement).toBe(primary);
+    await act(async () => {
+      primary.click();
+      primary.click();
+    });
+    expect(openGuide).toHaveBeenCalledExactlyOnceWith(firstGuide);
   });
 });

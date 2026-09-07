@@ -5,6 +5,7 @@ const SCROLL_KEYS = new Set([
   "PageDown",
   "Home",
   "End",
+  " ",
 ]);
 
 export function canTriggerGuideScroll(event: Event): boolean {

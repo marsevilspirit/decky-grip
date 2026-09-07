@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 
-import { act, createElement, type ReactNode } from "react";
+import { showModal, type ConfirmModalProps } from "@decky/ui";
+import { act, createElement, type ReactElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -34,6 +35,8 @@ vi.mock("@decky/ui", () => {
   }
 
   return {
+    ConfirmModal: () => null,
+    showModal: vi.fn(() => ({ Close: vi.fn(), Update: vi.fn() })),
     DropdownItem: ({
       label,
       disabled,
@@ -130,10 +133,12 @@ describe("GripPanel", () => {
   const mount = async (
     options: {
       clearGuides?: () => Promise<CacheClearResult>;
+      clearImages?: () => Promise<CacheClearResult>;
       getCacheStats?: () => Promise<ReaderCacheStats>;
       setImageLimit?: (bytes: number) => Promise<ReaderCacheStats["images"]>;
       openReader?: () => Promise<void>;
       repairPositions?: () => Promise<string>;
+      retryPositions?: () => Promise<boolean>;
       status?: RuntimeStatusStore;
     } = {},
   ): Promise<void> => {
@@ -147,7 +152,10 @@ describe("GripPanel", () => {
             options.clearGuides ??
             (async () => ({ bytesRemoved: 0, filesRemoved: 0 }))
           }
-          clearImages={async () => ({ bytesRemoved: 0, filesRemoved: 0 })}
+          clearImages={
+            options.clearImages ??
+            (async () => ({ bytesRemoved: 0, filesRemoved: 0 }))
+          }
           getCacheStats={options.getCacheStats ?? (async () => cacheStats)}
           setImageLimit={
             options.setImageLimit ?? (async () => cacheStats.images)
@@ -155,7 +163,7 @@ describe("GripPanel", () => {
           openReader={options.openReader ?? (async () => undefined)}
           performance={new ReaderPerformanceTracker()}
           repairPositions={options.repairPositions ?? (async () => "")}
-          retryPositions={async () => true}
+          retryPositions={options.retryPositions ?? (async () => true)}
           status={options.status ?? new RuntimeStatusStore("1113000")}
         />,
       );
@@ -174,6 +182,9 @@ describe("GripPanel", () => {
   };
 
   const panelText = (): string => container?.textContent ?? "";
+  const confirmation = (): ConfirmModalProps =>
+    (vi.mocked(showModal).mock.lastCall![0] as ReactElement<ConfirmModalProps>)
+      .props;
 
   it("saves an offline quota choice and shows a failed shrink without clearing downloads", async () => {
     const setImageLimit = vi.fn(async () => {
@@ -204,6 +215,7 @@ describe("GripPanel", () => {
     container = null;
     deckyApiMock.quickAccessVisible = true;
     vi.mocked(getGuideLibrary).mockClear();
+    vi.mocked(showModal).mockClear();
   });
 
   it("refreshes the hotkey status whenever quick access becomes visible", async () => {
@@ -265,6 +277,177 @@ describe("GripPanel", () => {
     expect(panelText()).not.toContain("缓存用量读取失败");
   });
 
+  it("reads cache usage only while advanced quick access is visible and rejects outdated responses", async () => {
+    const status = new RuntimeStatusStore("1113000");
+    const finish: Array<(stats: ReaderCacheStats) => void> = [];
+    const getCacheStats = vi.fn(
+      () => new Promise<ReaderCacheStats>((resolve) => finish.push(resolve)),
+    );
+    deckyApiMock.quickAccessVisible = false;
+    await mount({ status, getCacheStats });
+    await act(async () => button("高级选项").click());
+    expect(getCacheStats).not.toHaveBeenCalled();
+    await act(async () => {
+      deckyApiMock.quickAccessVisible = true;
+      status.update({ message: "visible" });
+    });
+    expect(getCacheStats).toHaveBeenCalledTimes(1);
+    await act(async () => status.refreshDownloads());
+    expect(getCacheStats).toHaveBeenCalledTimes(2);
+    const newerStats = {
+      ...cacheStats,
+      guides: { ...cacheStats.guides, files: 7 },
+    };
+    await act(async () => finish[1](newerStats));
+    await act(async () => finish[0](cacheStats));
+    expect(panelText()).toContain("指南 7 个");
+    expect(panelText()).not.toContain("指南 2 个");
+    await act(async () => {
+      deckyApiMock.quickAccessVisible = false;
+      status.refreshDownloads();
+    });
+    expect(getCacheStats).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      deckyApiMock.quickAccessVisible = true;
+      status.update({ message: "visible again" });
+    });
+    expect(getCacheStats).toHaveBeenCalledTimes(3);
+    await act(async () => button("高级选项").click());
+    await act(async () => status.refreshDownloads());
+    await act(async () => finish[2](cacheStats));
+    expect(getCacheStats).toHaveBeenCalledTimes(3);
+    await act(async () => button("高级选项").click());
+    expect(panelText()).toContain("指南 7 个");
+    expect(getCacheStats).toHaveBeenCalledTimes(4);
+    await act(async () => root?.unmount());
+    root = null;
+    await act(async () => finish[3](cacheStats));
+    expect(container?.childElementCount).toBe(0);
+  });
+
+  it("requires a native destructive confirmation, supports cancel and prevents duplicate clears", async () => {
+    let finishClear!: (result: CacheClearResult) => void;
+    const clearGuides = vi.fn(
+      () =>
+        new Promise<CacheClearResult>((resolve) => {
+          finishClear = resolve;
+        }),
+    );
+    const clearImages = vi.fn(async () => ({
+      filesRemoved: 0,
+      bytesRemoved: 0,
+    }));
+    await mount({ clearGuides, clearImages });
+    await act(async () => button("高级选项").click());
+    await act(async () => {
+      button("清除指南正文缓存").click();
+      button("清除指南正文缓存").click();
+    });
+    expect(showModal).toHaveBeenCalledTimes(1);
+    expect(clearGuides).not.toHaveBeenCalled();
+    const canceled = confirmation();
+    expect(canceled.bDestructiveWarning).toBe(true);
+    expect(canceled.strDescription).toContain("已下载指南");
+    expect(canceled.strCancelButtonText).toBe("保留，返回");
+    await act(async () => {
+      canceled.onCancel?.();
+      canceled.onOK?.();
+    });
+    expect(clearGuides).not.toHaveBeenCalled();
+    expect(
+      vi.mocked(showModal).mock.results[0].value.Close,
+    ).toHaveBeenCalledOnce();
+    await act(async () => button("清除指南正文缓存").click());
+    const accepted = confirmation();
+    await act(async () => {
+      accepted.onOK?.();
+      accepted.onOK?.();
+      button("清除图片缓存").click();
+    });
+    expect(clearGuides).toHaveBeenCalledOnce();
+    expect(clearImages).not.toHaveBeenCalled();
+    expect(showModal).toHaveBeenCalledTimes(2);
+    await act(async () =>
+      finishClear({ filesRemoved: 2, bytesRemoved: 1_024 }),
+    );
+    expect(panelText()).toContain(
+      "指南缓存已清除：删除 2 个文件，释放 1.0 KiB",
+    );
+    await act(async () => button("清除图片缓存").click());
+    expect(confirmation().strDescription).toContain("离线下载的图片");
+    await act(async () => confirmation().onOK?.());
+    expect(clearImages).toHaveBeenCalledOnce();
+  });
+
+  it("finishes cache-action feedback without waiting for stats and invalidates pre-action reads", async () => {
+    let finishOldStats!: (stats: ReaderCacheStats) => void;
+    let finishNewStats!: (stats: ReaderCacheStats) => void;
+    let finishClear!: (result: CacheClearResult) => void;
+    const getCacheStats = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<ReaderCacheStats>((resolve) => {
+            finishOldStats = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<ReaderCacheStats>((resolve) => {
+            finishNewStats = resolve;
+          }),
+      );
+    const openReader = vi.fn(async () => undefined);
+    await mount({
+      getCacheStats,
+      openReader,
+      clearGuides: () =>
+        new Promise((resolve) => {
+          finishClear = resolve;
+        }),
+    });
+    await act(async () => button("高级选项").click());
+    await act(async () => button("清除指南正文缓存").click());
+    await act(async () => confirmation().onOK?.());
+    await act(async () => finishOldStats(cacheStats));
+    expect(panelText()).not.toContain("指南 2 个");
+    expect(button("继续当前或最近指南").disabled).toBe(true);
+    await act(async () =>
+      finishClear({ bytesRemoved: 1_024, filesRemoved: 2 }),
+    );
+    expect(getCacheStats).toHaveBeenCalledTimes(2);
+    expect(panelText()).toContain("指南缓存已清除：删除 2 个文件");
+    expect(button("清除指南正文缓存").disabled).toBe(false);
+    expect(button("继续当前或最近指南").disabled).toBe(false);
+    await act(async () => button("继续当前或最近指南").click());
+    expect(openReader).toHaveBeenCalledOnce();
+    await act(async () =>
+      finishNewStats({
+        ...cacheStats,
+        guides: { ...cacheStats.guides, files: 0 },
+      }),
+    );
+    expect(panelText()).toContain("指南 0 个");
+  });
+
+  it("closes confirmations on unmount and ignores their stale confirm callbacks", async () => {
+    const clearImages = vi.fn(async () => ({
+      filesRemoved: 0,
+      bytesRemoved: 0,
+    }));
+    await mount({ clearImages });
+    await act(async () => button("高级选项").click());
+    await act(async () => button("清除图片缓存").click());
+    const pending = confirmation();
+    await act(async () => root?.unmount());
+    root = null;
+    expect(
+      vi.mocked(showModal).mock.results[0].value.Close,
+    ).toHaveBeenCalledOnce();
+    await act(async () => pending.onOK?.());
+    expect(clearImages).not.toHaveBeenCalled();
+  });
+
   it("keeps the default guide actions compact and reveals maintenance controls", async () => {
     await mount();
 
@@ -301,7 +484,10 @@ describe("GripPanel", () => {
       .mockRejectedValueOnce(new Error("打开失败"));
     await mount({ openReader });
 
-    await act(async () => button("继续当前或最近指南").click());
+    await act(async () => {
+      button("继续当前或最近指南").click();
+      button("继续当前或最近指南").click();
+    });
     const opening = button("正在打开 GRIP 阅读器");
     expect(opening.disabled).toBe(true);
     expect(opening.querySelector('[data-grip-busy="true"]')).not.toBeNull();
@@ -333,6 +519,32 @@ describe("GripPanel", () => {
     expect(panelText()).not.toContain("清除指南正文缓存");
   });
 
+  it("reports retry failures and prevents same-tick duplicate position operations", async () => {
+    let failRetry!: (error: unknown) => void;
+    const retryPositions = vi.fn(
+      () =>
+        new Promise<boolean>((_resolve, reject) => {
+          failRetry = reject;
+        }),
+    );
+    const repairPositions = vi.fn(async () => "损坏位置已备份并重置");
+    const status = new RuntimeStatusStore("1113000");
+    status.update({ positionWarning: "位置文件损坏" });
+    await mount({ status, retryPositions, repairPositions });
+    await act(async () => {
+      button("重试读取位置").click();
+      button("重试读取位置").click();
+      button("备份并重置损坏位置").click();
+    });
+    expect(retryPositions).toHaveBeenCalledOnce();
+    expect(repairPositions).not.toHaveBeenCalled();
+    await act(async () => failRetry(new Error("disk unavailable")));
+    expect(panelText()).toContain("位置恢复失败：disk unavailable");
+    expect(button("重试读取位置").disabled).toBe(false);
+    await act(async () => button("备份并重置损坏位置").click());
+    expect(panelText()).toContain("损坏位置已备份并重置");
+  });
+
   it("keeps cache action feedback visible after advanced options close", async () => {
     let finishClear!: (result: CacheClearResult) => void;
     await mount({
@@ -344,6 +556,7 @@ describe("GripPanel", () => {
 
     await act(async () => button("高级选项").click());
     await act(async () => button("清除指南正文缓存").click());
+    await act(async () => confirmation().onOK?.());
     expect(
       button("正在清除").querySelector('[data-grip-busy="true"]'),
     ).not.toBeNull();

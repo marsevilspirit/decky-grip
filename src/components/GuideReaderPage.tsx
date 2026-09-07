@@ -50,6 +50,7 @@ import { shortSectionTitle } from "../reader/toc-title";
 import { makeGuideKey, type GuideIdentity } from "../steam/guide-key";
 import { BusyLabel } from "./BusyLabel";
 import { GuideImageViewer, type ReaderPreviewImage } from "./GuideImageViewer";
+import { GuideSwitcher } from "./GuideSwitcher";
 
 const SAVE_DELAY_MS = 400;
 const STEAM_TOP_BAR_HEIGHT = 40;
@@ -64,12 +65,16 @@ const SEARCH_HIGHLIGHT_MS = 1_800;
 const SEARCH_ALIGNMENT_TIMEOUT_MS = RESTORE_TIMEOUT_MS;
 const SEARCH_SCROLL_MARGIN = 48;
 const READER_CSS = `
-@keyframes grip-guide-switcher-enter { from { opacity: 0; transform: translateY(-10px); } }
 @keyframes grip-guide-content-enter { from { opacity: 0.35; transform: translateX(12px); } }
 @media (prefers-reduced-motion: no-preference) {
-  .grip-reader-guide-switcher { animation: grip-guide-switcher-enter 140ms ease-out; }
   .grip-reader-guide-enter { animation: grip-guide-content-enter 180ms ease-out; }
+  .grip-reader-control { transition: background 100ms ease-out, box-shadow 100ms ease-out, transform 100ms ease-out; }
 }
+.grip-reader-control { border-radius: 6px; }
+.grip-reader-control:focus, .grip-reader-control.gpfocus, .grip-reader-control.grip-is-focused { background: #dceefa !important; color: #102131 !important; box-shadow: inset 0 0 0 2px #67c1f5; }
+.grip-reader-control:active { transform: scale(0.98); }
+.grip-reader-toc[data-expanded="true"] { box-shadow: -12px 0 30px #0007; }
+@media (prefers-reduced-motion: reduce) { .grip-reader-control:active { transform: none; } }
 .grip-reader-content { color: #dcdedf; font-size: 18px; line-height: 1.55; padding: 10px 34px 80px; }
 .grip-reader-content ::selection { background: #f3c64b; color: #101820; }
 .grip-reader-content img { display: block; max-width: 100%; height: auto; margin: 14px auto; border-radius: 4px; }
@@ -123,20 +128,6 @@ function selectionMatchesRange(selection: Selection, range: Range): boolean {
     selected.endContainer === range.endContainer &&
     selected.endOffset === range.endOffset
   );
-}
-
-function guideChoiceDetails(entry: GuideLibraryEntry): string {
-  return [
-    entry.cache
-      ? entry.cache.stale
-        ? "旧正文已缓存，可更新"
-        : "正文已缓存"
-      : "首次打开将下载正文",
-    entry.cache?.author ? `作者：${entry.cache.author}` : null,
-    entry.cache?.sectionTitle ? `上次：${entry.cache.sectionTitle}` : null,
-  ]
-    .filter((detail): detail is string => detail !== null)
-    .join(" · ");
 }
 
 function readIdentity(
@@ -217,14 +208,13 @@ export function GuideReaderPage({
     "retry" | "repair" | null
   >(null);
   const [guideSwitcherOpen, setGuideSwitcherOpen] = useState(false);
-  const [removeMode, setRemoveMode] = useState<
-    "confirm" | "busy" | "done" | null
-  >(null);
-  const [removeMessage, setRemoveMessage] = useState<string | null>(null);
-  const removeCancelRef = useRef<HTMLDivElement>(null);
+  const [offlineRemoved, setOfflineRemoved] = useState(false);
+  const [navigationOpen, setNavigationOpen] = useState(false);
   const [previewImage, setPreviewImage] = useState<ReaderPreviewImage | null>(
     null,
   );
+  const [previewImages, setPreviewImages] = useState<ReaderPreviewImage[]>([]);
+  const previewReturnFocusRef = useRef<HTMLElement | null>(null);
   const [visiblePreviewImage, setVisiblePreviewImage] =
     useState<HTMLImageElement | null>(null);
   const [guideLibrary, setGuideLibrary] = useState<GuideLibraryEntry[] | null>(
@@ -242,13 +232,9 @@ export function GuideReaderPage({
       initialSnapshot?.guide.sections[0]?.id ??
       null,
   );
-  const [tocHint, setTocHint] = useState<{
-    sectionId: string;
-    title: string;
-    right: number;
-    top?: number;
-    bottom?: number;
-  } | null>(null);
+  const [focusedTocSection, setFocusedTocSection] = useState<string | null>(
+    null,
+  );
   const [imageRetries, setImageRetries] = useState<
     Array<{
       image: HTMLImageElement;
@@ -269,9 +255,7 @@ export function GuideReaderPage({
     }));
   const positionRepairBusy = positionRepairMode !== null;
   const scrollerRef = useRef<HTMLDivElement | null>(null);
-  const guideSwitcherRef = useRef<HTMLDivElement | null>(null);
   const tocRef = useRef<HTMLDivElement | null>(null);
-  const focusedTocSectionRef = useRef<string | null>(null);
   const guideSearchButtonRef = useRef<HTMLDivElement | null>(null);
   const guideSearchIndexRef = useRef<{
     guide: ReaderSessionSnapshot["guide"];
@@ -299,6 +283,20 @@ export function GuideReaderPage({
   const loadedRef = useRef(loaded);
   loadedRef.current = loaded;
   const switchRequestRef = useRef<object | null>(null);
+  const focusFrameRef = useRef<number | null>(null);
+  const cancelPendingFocus = () => {
+    if (focusFrameRef.current !== null)
+      cancelAnimationFrame(focusFrameRef.current);
+    focusFrameRef.current = null;
+  };
+  const scheduleFocus = (focus: () => void) => {
+    cancelPendingFocus();
+    focusFrameRef.current = requestAnimationFrame(() => {
+      focusFrameRef.current = null;
+      focus();
+    });
+  };
+  useEffect(() => cancelPendingFocus, [identity?.appId, identity?.guideId]);
 
   const stopGuideSearchAlignment = () => {
     guideSearchAlignmentStopRef.current?.();
@@ -334,15 +332,16 @@ export function GuideReaderPage({
   };
 
   const hideTocTitle = () => {
-    focusedTocSectionRef.current = null;
-    setTocHint(null);
+    setFocusedTocSection(null);
   };
 
   const openGuideSwitcher = () => {
     if (guideSwitcherOpen) {
       return;
     }
+    cancelPendingFocus();
     setGuideSearchOpen(false);
+    setNavigationOpen(false);
     hideTocTitle();
     setGuideSwitcherOpen(true);
   };
@@ -351,7 +350,8 @@ export function GuideReaderPage({
     switchRequestRef.current = null;
     setSwitchPending(null);
     setGuideSwitcherOpen(false);
-    requestAnimationFrame(() => {
+    if (guideLibrary !== null) setGuideSwitcherError(null);
+    scheduleFocus(() => {
       focusWithoutScrolling(scrollerRef.current);
     });
   };
@@ -361,6 +361,7 @@ export function GuideReaderPage({
     if (!guide || loading || refreshPending) {
       return;
     }
+    cancelPendingFocus();
     if (guideSearchIndexRef.current?.guide !== guide) {
       // ponytail: build the bounded index on demand; split it across frames only
       // if Steam Deck profiling shows a visible first-search stall.
@@ -370,12 +371,36 @@ export function GuideReaderPage({
       };
     }
     hideTocTitle();
+    setNavigationOpen(true);
     setGuideSearchOpen(true);
+  };
+
+  const openNavigation = () => {
+    if (!loaded || loading) return;
+    setNavigationOpen(true);
+    scheduleFocus(() => {
+      const chapters = tocRef.current?.querySelectorAll<HTMLElement>(
+        "[data-grip-toc-section]",
+      );
+      const target =
+        [...(chapters ?? [])].find(
+          (chapter) => chapter.dataset.gripTocSection === activeSectionId,
+        ) ?? guideSearchButtonRef.current;
+      focusWithoutScrolling(target);
+      target?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    });
+  };
+
+  const closeNavigation = () => {
+    setNavigationOpen(false);
+    setGuideSearchOpen(false);
+    hideTocTitle();
+    scheduleFocus(() => focusWithoutScrolling(scrollerRef.current));
   };
 
   const closeGuideSearch = () => {
     setGuideSearchOpen(false);
-    requestAnimationFrame(() => {
+    scheduleFocus(() => {
       focusWithoutScrolling(
         guideSearchButtonRef.current ?? scrollerRef.current,
       );
@@ -385,58 +410,59 @@ export function GuideReaderPage({
   const cancelReader = (event: CustomEvent) => {
     event.preventDefault();
     event.stopPropagation();
+    if (event.detail?.is_repeat || ("repeat" in event && event.repeat)) return;
     if (previewImage) {
       closeImagePreview();
-    } else if (removeMode === "busy") {
-      return;
-    } else if (removeMode === "confirm") {
-      setRemoveMode(null);
-      requestAnimationFrame(() =>
-        focusWithoutScrolling(guideSwitcherRef.current),
-      );
     } else if (guideSwitcherOpen) {
       closeGuideSwitcher();
     } else if (guideSearchOpen) {
       closeGuideSearch();
+    } else if (navigationOpen) {
+      closeNavigation();
     } else {
       onClose();
     }
   };
   const closeImagePreview = () => {
     setPreviewImage(null);
-    requestAnimationFrame(() => focusWithoutScrolling(scrollerRef.current));
+    scheduleFocus(() =>
+      focusWithoutScrolling(
+        previewReturnFocusRef.current?.isConnected
+          ? previewReturnFocusRef.current
+          : scrollerRef.current,
+      ),
+    );
   };
   const openImagePreview = (image: HTMLImageElement) => {
     if (image.dataset.gripImageState !== "ready") return;
+    cancelPendingFocus();
     hideTocTitle();
-    setPreviewImage({
-      src: image.currentSrc || image.src,
-      alt: image.alt,
-      width: image.naturalWidth || image.width || 1,
-      height: image.naturalHeight || image.height || 1,
+    previewReturnFocusRef.current =
+      document.activeElement instanceof HTMLElement &&
+      scrollerRef.current?.contains(document.activeElement)
+        ? document.activeElement
+        : scrollerRef.current;
+    const toPreview = (element: HTMLImageElement): ReaderPreviewImage => ({
+      src: element.currentSrc || element.src,
+      alt: element.alt,
+      width: element.naturalWidth || element.width || 1,
+      height: element.naturalHeight || element.height || 1,
     });
-  };
-  useLayoutEffect(() => {
-    if (removeMode === "confirm")
-      focusWithoutScrolling(removeCancelRef.current);
-  }, [removeMode]);
-  const removeCurrentOffline = async () => {
-    if (!identity || removeMode !== "confirm") return;
-    setRemoveMode("busy");
-    try {
-      const result = await onRemoveOffline(identity.guideId);
-      setRemoveMode("done");
-      setRemoveMessage(
-        `离线副本已删除，释放 ${(result.bytesRemoved / 1024 / 1024).toFixed(1)} MiB。阅读位置和其他指南共用图片已保留；当前正文可继续阅读。`,
-      );
-    } catch (error: unknown) {
-      setRemoveMode(null);
-      setRemoveMessage(`删除失败：${errorMessage(error)}`);
-    } finally {
-      requestAnimationFrame(() =>
-        focusWithoutScrolling(guideSwitcherRef.current),
-      );
+    const candidates = new Map<string, HTMLImageElement>();
+    for (const element of [...visibleImagesRef.current, image]) {
+      if (element.isConnected && element.dataset.gripImageState === "ready")
+        candidates.set(element.currentSrc || element.src, element);
     }
+    setPreviewImages(
+      [...candidates.values()]
+        .sort((left, right) =>
+          left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING
+            ? -1
+            : 1,
+        )
+        .map(toPreview),
+    );
+    setPreviewImage(toPreview(image));
   };
   const restoringRef = useRef(false);
   const stopRestoreRef = useRef<(() => void) | null>(null);
@@ -566,25 +592,6 @@ export function GuideReaderPage({
     return () => clearTimeout(timer);
   }, [identity?.appId, identity?.guideId, loaded, loading, performance]);
 
-  useLayoutEffect(() => {
-    if (
-      !guideSwitcherOpen ||
-      removeMode === "confirm" ||
-      removeMode === "busy"
-    ) {
-      return;
-    }
-    const animationFrame = requestAnimationFrame(() => {
-      const dialog = guideSwitcherRef.current;
-      focusWithoutScrolling(
-        dialog?.querySelector<HTMLElement>(
-          "[data-grip-guide-choice], [data-grip-guide-list-retry]",
-        ) ?? dialog,
-      );
-    });
-    return () => cancelAnimationFrame(animationFrame);
-  }, [guideSwitcherOpen, guideLibrary, guideSwitcherError, removeMode]);
-
   useEffect(() => {
     if (!identity) {
       return;
@@ -628,6 +635,14 @@ export function GuideReaderPage({
     },
     [identity?.appId, identity?.guideId],
   );
+
+  useEffect(() => {
+    setOfflineRemoved(false);
+    setNavigationOpen(false);
+    setGuideSearchOpen(false);
+    setGuideSwitcherOpen(false);
+    setPreviewImage(null);
+  }, [identity?.appId, identity?.guideId]);
 
   useEffect(() => {
     if (!identity) {
@@ -689,8 +704,7 @@ export function GuideReaderPage({
               : null;
           setLoaded(displaySnapshot);
           if (refreshGeneration > 0 && !snapshot.guide.stale) {
-            setRemoveMode(null);
-            setRemoveMessage(null);
+            setOfflineRemoved(false);
             setGuideSwitcherRevision((revision) => revision + 1);
           }
           if (refreshGeneration > 0 && snapshot.guide.stale) {
@@ -863,25 +877,8 @@ export function GuideReaderPage({
   }, [loaded?.guide, updateActiveSection]);
 
   const showTocTitle = (sectionId: string) => {
-    const section = loadedRef.current?.guide.sections.find(
-      (entry) => entry.id === sectionId,
-    );
-    const toc = tocRef.current;
-    const button = [
-      ...(toc?.querySelectorAll<HTMLElement>("[data-grip-toc-section]") ?? []),
-    ].find((element) => element.dataset.gripTocSection === sectionId);
-    if (!section || !button || !toc) return;
-    focusedTocSectionRef.current = sectionId;
-    const rect = button.getBoundingClientRect();
-    const view = button.ownerDocument.defaultView ?? window;
-    const above = rect.top > view.innerHeight / 2;
-    setTocHint({
-      sectionId,
-      title: section.title,
-      right: view.innerWidth - toc.getBoundingClientRect().left + 10,
-      top: above ? undefined : Math.max(STEAM_TOP_BAR_HEIGHT, rect.top),
-      bottom: above ? Math.max(64, view.innerHeight - rect.bottom) : undefined,
-    });
+    setFocusedTocSection(sectionId);
+    setNavigationOpen(true);
   };
 
   useEffect(() => {
@@ -1489,6 +1486,10 @@ export function GuideReaderPage({
       scrollReaderBy(-line, event);
     } else if (event.detail.button === GamepadButton.DIR_DOWN) {
       scrollReaderBy(line, event);
+    } else if (event.detail.button === GamepadButton.DIR_RIGHT) {
+      event.preventDefault();
+      event.stopPropagation();
+      openNavigation();
     }
   };
 
@@ -1531,7 +1532,11 @@ export function GuideReaderPage({
   };
 
   const switchGuide = async (entry: GuideLibraryEntry) => {
-    if (!identity || entry.appId !== identity.appId || switchPending !== null) {
+    if (
+      !identity ||
+      entry.appId !== identity.appId ||
+      switchRequestRef.current !== null
+    ) {
       return;
     }
 
@@ -1638,6 +1643,7 @@ export function GuideReaderPage({
   };
 
   const jumpToSection = (sectionId: string) => {
+    if (navigationOpen) closeNavigation();
     stopGuideSearchAlignment();
     failAndCancelRestore("用户在阅读位置稳定前跳转章节");
     if (scrollToRenderedSection(sectionId)) {
@@ -1879,7 +1885,41 @@ export function GuideReaderPage({
 
   return (
     <Focusable
+      className="grip-reader"
       onCancel={cancelReader}
+      onSecondaryActionDescription={
+        !previewImage && !guideSwitcherOpen && loaded
+          ? navigationOpen
+            ? "返回正文"
+            : "目录"
+          : undefined
+      }
+      onSecondaryButton={(event) => {
+        if (previewImage || guideSwitcherOpen || !loaded) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.detail.is_repeat) {
+          if (navigationOpen) closeNavigation();
+          else openNavigation();
+        }
+      }}
+      onKeyDown={(event) => {
+        if (event.defaultPrevented || previewImage || guideSwitcherOpen) return;
+        if (event.key === "Escape") {
+          cancelReader(event as unknown as CustomEvent);
+          return;
+        }
+        const target = event.target as HTMLElement;
+        if (target.closest("input, textarea, [contenteditable='true']")) return;
+        if (
+          (event.ctrlKey || event.metaKey) &&
+          event.key.toLowerCase() === "f"
+        ) {
+          event.preventDefault();
+          event.stopPropagation();
+          openGuideSearch();
+        }
+      }}
       onOptionsActionDescription={
         !previewImage &&
         !guideSwitcherOpen &&
@@ -1914,203 +1954,36 @@ export function GuideReaderPage({
     >
       <style>{READER_CSS}</style>
       {previewImage && (
-        <GuideImageViewer image={previewImage} onClose={closeImagePreview} />
-      )}
-      {tocHint && (
-        <div
-          id="grip-reader-chapter-title"
-          role="tooltip"
-          style={{
-            background: "#223241",
-            border: "1px solid #67c1f5",
-            borderRadius: 6,
-            boxShadow: "0 4px 18px #0008",
-            boxSizing: "border-box",
-            color: "#fff",
-            fontSize: 16,
-            lineHeight: 1.5,
-            maxWidth: "min(420px, calc(100vw - 120px))",
-            overflowWrap: "anywhere",
-            padding: "12px 16px",
-            pointerEvents: "none",
-            position: "fixed",
-            right: tocHint.right,
-            top: tocHint.top,
-            bottom: tocHint.bottom,
-            zIndex: 5,
-          }}
-        >
-          {tocHint.title}
-        </div>
+        <GuideImageViewer
+          image={previewImage}
+          images={previewImages}
+          onClose={closeImagePreview}
+        />
       )}
       {guideSwitcherOpen && (
-        <Focusable
-          aria-label="切换指南"
-          aria-modal="true"
-          className="grip-reader-guide-switcher"
-          onCancelActionDescription="返回阅读"
-          ref={guideSwitcherRef}
-          role="dialog"
-          tabIndex={0}
-          style={{
-            background: "linear-gradient(180deg, #16202b 0%, #0d141c 100%)",
-            bottom: 0,
-            display: "flex",
-            flexDirection: "column",
-            left: 0,
-            padding: "24px 28px",
-            position: "absolute",
-            right: 0,
-            top: STEAM_TOP_BAR_HEIGHT,
-            zIndex: 10,
+        <GuideSwitcher
+          entries={guideChoices}
+          currentGuideId={identity.guideId}
+          pendingKey={switchPending}
+          error={guideSwitcherError}
+          removed={offlineRemoved}
+          removeDisabled={downloadActive || refreshPending}
+          onChoose={(entry) => void switchGuide(entry)}
+          onReload={() => setGuideSwitcherRevision((revision) => revision + 1)}
+          onClose={closeGuideSwitcher}
+          onRemove={async () => {
+            const result = await onRemoveOffline(identity.guideId);
+            setOfflineRemoved(true);
+            return result;
           }}
-        >
-          <div
-            style={{
-              alignItems: "center",
-              display: "flex",
-              gap: 12,
-              marginBottom: 18,
-            }}
-          >
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 24, fontWeight: 700 }}>本游戏指南</div>
-            </div>
-          </div>
-          {guideLibrary === null && !guideSwitcherError && (
-            <div
-              style={{
-                alignItems: "center",
-                display: "flex",
-                flex: 1,
-                gap: 12,
-                justifyContent: "center",
-              }}
-            >
-              <Spinner /> 正在读取本游戏指南…
-            </div>
-          )}
-          {guideSwitcherError && (
-            <div role="alert" style={{ color: "#ff8a8a", marginBottom: 16 }}>
-              <div>{guideSwitcherError}</div>
-              <Button
-                data-grip-guide-list-retry="true"
-                disabled={switchPending !== null}
-                onClick={() =>
-                  setGuideSwitcherRevision((revision) => revision + 1)
-                }
-              >
-                重新读取指南列表
-              </Button>
-            </div>
-          )}
-          {guideChoices &&
-            removeMode !== "confirm" &&
-            removeMode !== "busy" && (
-              <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
-                {guideChoices.map((entry) => {
-                  const guideKey = makeGuideKey(entry);
-                  const current = entry.guideId === identity.guideId;
-                  const pending = switchPending === guideKey;
-                  const style = {
-                    boxSizing: "border-box" as const,
-                    marginBottom: 12,
-                    minHeight: 72,
-                    padding: "12px 16px",
-                    textAlign: "left" as const,
-                    width: "100%",
-                  };
-                  const content = (
-                    <div>
-                      <div style={{ fontSize: 18, fontWeight: 700 }}>
-                        {pending ? (
-                          <BusyLabel>正在准备并打开…</BusyLabel>
-                        ) : (
-                          `${current ? "正在阅读 · " : ""}${entry.cache?.title ?? `Steam 指南 ${entry.guideId}`}`
-                        )}
-                      </div>
-                      <div
-                        style={{ fontSize: 13, marginTop: 5, opacity: 0.72 }}
-                      >
-                        {current && removeMode === "done"
-                          ? "离线副本已删除，当前会话仍可阅读"
-                          : guideChoiceDetails(entry)}
-                      </div>
-                    </div>
-                  );
-                  if (current) {
-                    return (
-                      <div aria-current="page" key={guideKey} style={style}>
-                        {content}
-                      </div>
-                    );
-                  }
-                  return (
-                    <Button
-                      aria-label={`打开指南：${entry.cache?.title ?? entry.guideId}`}
-                      data-grip-guide-choice="true"
-                      disabled={switchPending !== null}
-                      key={guideKey}
-                      onClick={() => void switchGuide(entry)}
-                      preferredFocus={entry === guideChoices[1]}
-                      style={style}
-                    >
-                      {content}
-                    </Button>
-                  );
-                })}
-              </div>
-            )}
-          {removeMode === "confirm" || removeMode === "busy" ? (
-            <div role="alertdialog" aria-label="确认删除离线副本">
-              <p>
-                删除《{loaded?.guide.title}
-                》的正文和独有图片？阅读位置及其他指南共用的图片会保留。
-              </p>
-              <Button
-                ref={removeCancelRef}
-                preferredFocus
-                disabled={removeMode === "busy"}
-                onClick={() => {
-                  setRemoveMode(null);
-                  requestAnimationFrame(() =>
-                    focusWithoutScrolling(guideSwitcherRef.current),
-                  );
-                }}
-              >
-                取消
-              </Button>
-              <Button
-                disabled={removeMode === "busy"}
-                onClick={() => void removeCurrentOffline()}
-              >
-                {removeMode === "busy" ? (
-                  <BusyLabel>正在删除…</BusyLabel>
-                ) : (
-                  "确认删除"
-                )}
-              </Button>
-            </div>
-          ) : (
-            <Button
-              disabled={removeMode === "done" || switchPending !== null}
-              onClick={() => {
-                setRemoveMessage(null);
-                setRemoveMode("confirm");
-              }}
-            >
-              删除当前指南离线副本
-            </Button>
-          )}
-          {removeMessage && <p role="status">{removeMessage}</p>}
-        </Focusable>
+        />
       )}
 
       {readerWarning && (
         <div
           role="status"
-          aria-hidden={readerCovered}
-          inert={readerCovered ? true : undefined}
+          aria-hidden={readerCovered || navigationOpen}
+          inert={readerCovered || navigationOpen ? true : undefined}
           style={{
             alignItems: "center",
             background: "#5c471f",
@@ -2181,10 +2054,17 @@ export function GuideReaderPage({
         <div
           aria-hidden={readerCovered}
           inert={readerCovered ? true : undefined}
-          style={{ display: "flex", flex: 1, minHeight: 0 }}
+          style={{
+            display: "flex",
+            flex: 1,
+            minHeight: 0,
+            position: "relative",
+          }}
         >
           <Focusable
             aria-label="指南正文"
+            aria-hidden={(navigationOpen && !guideSearchOpen) || undefined}
+            inert={navigationOpen && !guideSearchOpen ? true : undefined}
             ref={scrollerRef}
             flow-children="none"
             onButtonDown={onReaderButton}
@@ -2218,9 +2098,14 @@ export function GuideReaderPage({
             }}
             onGamepadDirection={onReaderDirection}
             onScroll={onScroll}
-            preferredFocus={!guideSwitcherOpen}
+            preferredFocus={!guideSwitcherOpen && !navigationOpen}
+            actionDescriptionMap={{
+              [GamepadButton.BUMPER_LEFT]: "上翻",
+              [GamepadButton.BUMPER_RIGHT]: "下翻",
+            }}
             style={{
               flex: 1,
+              marginRight: 88,
               minWidth: 0,
               outline: "none",
               overflowY: loading || guideSwitcherOpen ? "hidden" : "auto",
@@ -2279,10 +2164,13 @@ export function GuideReaderPage({
               ),
             )}
           </Focusable>
-          <div
+          <Focusable
             aria-label={guideSearchOpen ? "指南搜索" : "指南目录"}
+            aria-modal={(navigationOpen && !guideSearchOpen) || undefined}
+            data-expanded={navigationOpen ? "true" : "false"}
             className="grip-reader-toc"
             onFocusCapture={(event) => {
+              setNavigationOpen(true);
               const target = (event.target as HTMLElement).closest<HTMLElement>(
                 "[data-grip-toc-section]",
               );
@@ -2290,24 +2178,66 @@ export function GuideReaderPage({
                 showTocTitle(target.dataset.gripTocSection);
             }}
             onBlurCapture={hideTocTitle}
-            onScroll={() => {
-              if (focusedTocSectionRef.current)
-                showTocTitle(focusedTocSectionRef.current);
-            }}
             ref={tocRef}
-            role={guideSearchOpen ? "search" : "navigation"}
+            role={
+              guideSearchOpen
+                ? "search"
+                : navigationOpen
+                  ? "dialog"
+                  : "navigation"
+            }
+            onCancelActionDescription={
+              guideSearchOpen ? "返回目录" : "返回正文"
+            }
+            onGamepadDirection={(event) => {
+              const target = event.target as HTMLElement;
+              if (
+                event.detail.button === GamepadButton.DIR_LEFT &&
+                !target.closest("input, textarea, [contenteditable='true']")
+              ) {
+                event.preventDefault();
+                event.stopPropagation();
+                closeNavigation();
+              }
+            }}
             style={{
-              background: "rgba(7, 12, 18, 0.48)",
+              background: navigationOpen ? "#14212d" : "rgba(7, 12, 18, 0.48)",
               borderLeft: "1px solid #314252",
               boxSizing: "border-box",
-              flex: guideSearchOpen ? "0 0 320px" : "0 0 88px",
+              position: "absolute",
+              right: 0,
+              top: 0,
+              bottom: 0,
+              width: navigationOpen ? 340 : 88,
+              maxWidth: "calc(100% - 40px)",
+              zIndex: navigationOpen ? 6 : 1,
               overflowY: "auto",
-              padding: "18px 6px",
+              padding: navigationOpen ? "16px 14px 72px" : "18px 6px 64px",
             }}
           >
+            {navigationOpen && !guideSearchOpen && (
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 6 }}>
+                  章节目录
+                </div>
+                <div
+                  style={{ fontSize: 13, color: "#a7becf", marginBottom: 12 }}
+                >
+                  {loaded.guide.title} · {loaded.guide.sections.length} 章
+                </div>
+                <Button
+                  className="grip-reader-control"
+                  onClick={closeNavigation}
+                  style={{ width: "100%", minHeight: 44 }}
+                >
+                  返回正文
+                </Button>
+              </div>
+            )}
             {guideSearchOpen ? (
               <>
                 <Button
+                  className="grip-reader-control"
                   onClick={closeGuideSearch}
                   ref={guideSearchButtonRef}
                   style={{
@@ -2355,6 +2285,7 @@ export function GuideReaderPage({
                       }}
                     >
                       <Button
+                        className="grip-reader-control"
                         aria-label="上一个搜索命中"
                         disabled={
                           loading ||
@@ -2375,6 +2306,7 @@ export function GuideReaderPage({
                           : `${activeGuideSearchResultIndex + 1} / ${guideSearchResults.length}`}
                       </div>
                       <Button
+                        className="grip-reader-control"
                         aria-label="下一个搜索命中"
                         disabled={
                           loading ||
@@ -2398,6 +2330,7 @@ export function GuideReaderPage({
                     )}
                     {guideSearchResults.map((result, index) => (
                       <Button
+                        className="grip-reader-control"
                         aria-current={
                           activeGuideSearchResultIndex === index
                             ? "location"
@@ -2442,6 +2375,8 @@ export function GuideReaderPage({
               <>
                 <Button
                   disabled={loading || refreshPending}
+                  className="grip-reader-control"
+                  aria-label="搜索指南正文"
                   onClick={openGuideSearch}
                   ref={guideSearchButtonRef}
                   style={{
@@ -2459,6 +2394,7 @@ export function GuideReaderPage({
                   搜索
                 </Button>
                 <Button
+                  className="grip-reader-control"
                   aria-label={
                     (canCancelUpdate ? "取消更新" : "更新指南") +
                     (downloadActive && downloadProgress
@@ -2512,13 +2448,9 @@ export function GuideReaderPage({
                   .slice(0, renderedSectionCount)
                   .map((section) => (
                     <Button
+                      className={`grip-reader-control${focusedTocSection === section.id ? " grip-is-focused" : ""}`}
                       aria-current={
                         activeSectionId === section.id ? "location" : undefined
-                      }
-                      aria-describedby={
-                        tocHint?.sectionId === section.id
-                          ? "grip-reader-chapter-title"
-                          : undefined
                       }
                       aria-label={`跳转到章节：${section.title}`}
                       data-grip-toc-section={section.id}
@@ -2530,32 +2462,37 @@ export function GuideReaderPage({
                       style={{
                         boxSizing: "border-box",
                         fontSize: 16,
+                        minHeight: 44,
                         lineHeight: "22px",
                         marginBottom: 8,
                         minWidth: 0,
                         overflow: "hidden",
-                        padding: "8px 2px",
-                        whiteSpace: "nowrap",
+                        padding: navigationOpen ? "12px" : "8px 2px",
+                        textAlign: navigationOpen ? "left" : "center",
+                        whiteSpace: navigationOpen ? "normal" : "nowrap",
+                        overflowWrap: "anywhere",
                         width: "100%",
                       }}
                     >
-                      {shortSectionTitle(section.title)}
+                      {navigationOpen
+                        ? section.title
+                        : shortSectionTitle(section.title)}
                     </Button>
                   ))}
               </>
             )}
-          </div>
+          </Focusable>
         </div>
       ) : null}
 
       {saveError && (
         <div
-          aria-hidden={readerCovered}
-          inert={readerCovered ? true : undefined}
+          aria-hidden={readerCovered || navigationOpen}
+          inert={readerCovered || navigationOpen ? true : undefined}
           role="alert"
           style={{
             background: "#6d2525",
-            bottom: 12,
+            bottom: 64,
             padding: "8px 14px",
             position: "absolute",
             right: 12,

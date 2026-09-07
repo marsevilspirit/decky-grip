@@ -54,4 +54,10 @@ describe("Steam guide interaction classification", () => {
   it("does not treat a touch tap as scroll intent", () => {
     expect(isGuideScrollIntent(event("touchstart"), scroller)).toBe(false);
   });
+
+  it("recognizes Space paging before restoring the native guide position", () => {
+    const space = event("keydown", { key: " " });
+    expect(canTriggerGuideScroll(space)).toBe(true);
+    expect(isGuideScrollIntent(space, scroller)).toBe(true);
+  });
 });
