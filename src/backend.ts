@@ -124,10 +124,40 @@ export const prepareGuide = callable<
   [guideId: string, forceRefresh: boolean],
   import("./reader/download").PreparedGuide
 >("prepare_guide");
+export const captureHeybox = callable<
+  [sourceUrl: string, marker: string],
+  import("./import/heybox").RenderedHeyboxGuide
+>("capture_heybox");
+export const cancelHeyboxCapture = callable<[marker: string], void>(
+  "cancel_heybox_capture",
+);
+export interface PhoneImportSession {
+  id: string;
+  url: string;
+  expiresAt: number;
+}
+export const startPhoneImport = callable<[], PhoneImportSession>(
+  "start_phone_import",
+);
+export const getPhoneImport = callable<
+  [sessionId: string],
+  { state: "waiting" | "submitted" | "expired"; text?: string }
+>("get_phone_import");
+export const stopPhoneImport = callable<[sessionId: string], void>(
+  "stop_phone_import",
+);
+export const prepareImportedGuide = callable<
+  [guide: import("./import/heybox").RenderedHeyboxGuide],
+  import("./reader/download").PreparedGuide
+>("prepare_imported_guide");
 export const commitGuide = callable<
   [guideId: string, token: string],
   DownloadedGuide
 >("commit_guide");
+export const commitImportedGuide = callable<
+  [guideId: string, token: string, appId: string],
+  DownloadedGuide
+>("commit_imported_guide");
 export const discardGuide = callable<[guideId: string, token: string], boolean>(
   "discard_guide",
 );

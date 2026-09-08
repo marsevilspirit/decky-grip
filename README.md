@@ -18,12 +18,12 @@ restore it when the guide is opened again.
 
 - **TypeScript/React** integrates with Decky and Steam's Gamepad UI.
 - A resident **Rust sidecar** owns positions, public-guide download and
-  sanitization, body/image caches, and physical L4 input. The thin Python Decky
-  bridge keeps only the RPC and lifecycle contract.
+  sanitization, body/image caches, and physical L4 input. The Python Decky bridge
+  also handles temporary browser capture and the opt-in LAN link inbox.
 - **GRIP Reader** renders the validated Rust response in a dedicated Decky
   route.
-- Guide images never load directly in the Steam browser. The backend validates,
-  bounds, and caches trusted Steam-hosted raster images, then the reader exposes
+- In GRIP Reader, images never load directly from the web. The backend validates,
+  bounds, and caches allowed Steam/Heybox raster images, then the reader exposes
   them through local Blob URLs for offline reuse.
 - Reader positions include both a pixel fallback and the visible text anchor,
   section id, and viewport offset. The reader content itself has no focusable
@@ -36,14 +36,15 @@ restore it when the guide is opened again.
 - Restoration waits for lazy-loaded guide content to reach a stable, usable
   height before scrolling, preventing Steam's early clamped position from
   overwriting the saved value.
-- Guide and app ids stay decimal strings so large Steam ids never lose
-  precision.
+- Steam guide and app ids stay decimal strings so large Steam ids never lose
+  precision. Imported articles use `heybox-<12 lowercase hex digits>` without
+  migrating existing Steam cache files or bookmarks.
 - The reader's **Y** switcher lists up to 20 recent guides for that game, with
   cached titles and last-read chapters. Reader history remains available when a
   guide body cache is removed; the plugin panel stays compact.
 - The plugin does not need root privileges.
 
-The current Steam UI findings and implementation boundaries are recorded in
+The code's module boundaries, ownership rules and earlier Steam UI findings are recorded in
 [`docs/architecture.md`](docs/architecture.md).
 
 ## Development
@@ -68,9 +69,35 @@ pnpm run test
 pnpm run build
 ```
 
-The frontend bundle is written to `dist/index.js`. Decky's custom-backend build
+The frontend bundle is written to `dist/index.js`, with the fixed browser-only
+extractor in `dist/heybox-render.js`. Both must be packaged. Decky's custom-backend build
 places `backend/out/grip-sidecar` in the packaged plugin's `bin/` directory.
 Python tests use only the standard library.
+
+## Importing public Heybox articles (experimental)
+
+Choose **导入攻略** in GRIP, paste a public Xiaoheihe share link/text, confirm
+the game, and choose **保存完整图文**. The game choices include the running game,
+the open library page, and games in GRIP history; open the target game's library
+page first if it is missing. The existing **Y** switcher, image zoom and reading
+positions work with imported articles.
+
+**手机扫码发送链接** opens a one-link, ten-minute LAN inbox only on demand.
+Keep the Deck awake and the phone on the same trusted Wi-Fi with `.local` name
+resolution. This uses HTTP, not cloud storage; do not use an untrusted network.
+The phone only fills the link field. Confirm the game and start the download on
+the Deck; receiving a link is not download success.
+
+Import uses a disposable page in Steam's existing CEF browser, not a second
+installed browser. It waits for lazy image URLs, extracts public article DOM,
+and passes it through Rust validation. Only complete body/image transactions
+are published; failed updates keep the previous offline version. Login-only
+pages, video, unsupported embedded graphics, and incomplete pages fail instead
+of silently saving partial content. Imported guides never need a browser to read.
+
+Local checks and a loopback browser submission have passed; **Steam Deck CEF
+capture, real phone scanning, and offline device acceptance remain unverified**.
+See [implementation and acceptance notes](docs/heybox-import.md).
 
 ## Using GRIP Reader
 

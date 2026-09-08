@@ -857,7 +857,7 @@ pub fn canonical_image_url(value: &str) -> Result<String, ImageError> {
         Some(without_fragment) if !without_fragment.contains('#') => without_fragment,
         _ if value.contains('#') => {
             return Err(ImageError::validation(
-                "image URL is not an allowed Steam image URL",
+                "image URL is not an allowed guide image URL",
             ));
         }
         _ => value,
@@ -875,10 +875,11 @@ pub fn canonical_image_url(value: &str) -> Result<String, ImageError> {
     let host = parsed
         .host_str()
         .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
-        .ok_or_else(|| ImageError::validation("image URL is not an allowed Steam image URL"))?;
-    let allowed_host = ["steamstatic.com", "steamusercontent.com"]
-        .iter()
-        .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")));
+        .ok_or_else(|| ImageError::validation("image URL is not an allowed guide image URL"))?;
+    let allowed_host = host == "imgheybox.max-c.com"
+        || ["steamstatic.com", "steamusercontent.com"]
+            .iter()
+            .any(|suffix| host == *suffix || host.ends_with(&format!(".{suffix}")));
     let port_valid = explicit_port.is_none_or(|port| {
         !port.is_empty()
             && port.bytes().all(|byte| byte.is_ascii_digit())
@@ -891,7 +892,7 @@ pub fn canonical_image_url(value: &str) -> Result<String, ImageError> {
         || !allowed_host
     {
         return Err(ImageError::validation(
-            "image URL is not an allowed Steam image URL",
+            "image URL is not an allowed guide image URL",
         ));
     }
 
@@ -926,21 +927,21 @@ fn validate_image(
             .iter()
             .find(|(candidate, _)| image_type_matches(candidate, &body))
             .map(|(candidate, _)| (*candidate).to_owned())
-            .ok_or_else(|| ImageError::download("Steam returned an unsupported image type"))?;
+            .ok_or_else(|| ImageError::download("Source returned an unsupported image type"))?;
     }
     if extension_for_mime(&mime_type).is_none() {
         return Err(ImageError::download(
-            "Steam returned an unsupported image type",
+            "Source returned an unsupported image type",
         ));
     }
     if body.is_empty() || body.len() > max_bytes {
         return Err(ImageError::download(
-            "Steam image exceeds the download size limit",
+            "Guide image exceeds the download size limit",
         ));
     }
     if !image_type_matches(&mime_type, &body) {
         return Err(ImageError::download(
-            "Steam image content does not match its type",
+            "Guide image content does not match its type",
         ));
     }
     reject_animated_image(&mime_type, &body)?;
@@ -953,30 +954,30 @@ fn validate_image(
     reader.limits(limits.clone());
     let mut decoder = reader
         .into_decoder()
-        .map_err(|_| ImageError::download("Steam returned an invalid image"))?;
+        .map_err(|_| ImageError::download("Image source returned an invalid image"))?;
     let (width, height) = decoder.dimensions();
     if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
         return Err(ImageError::download(
-            "Steam image exceeds the decoded pixel limit",
+            "Guide image exceeds the decoded pixel limit",
         ));
     }
     let bytes = usize::try_from(decoder.total_bytes())
         .ok()
         .filter(|bytes| *bytes as u64 <= MAX_DECODE_BYTES)
-        .ok_or_else(|| ImageError::download("Steam image exceeds the decode memory limit"))?;
+        .ok_or_else(|| ImageError::download("Guide image exceeds the decode memory limit"))?;
     // Account for our output buffer before allowing the decoder its remaining working budget.
     limits
         .reserve(bytes as u64)
         .and_then(|()| decoder.set_limits(limits))
-        .map_err(|_| ImageError::download("Steam image exceeds the decode memory limit"))?;
+        .map_err(|_| ImageError::download("Guide image exceeds the decode memory limit"))?;
     let mut pixels = Vec::new();
     pixels
         .try_reserve_exact(bytes)
-        .map_err(|_| ImageError::download("Not enough memory to validate the Steam image"))?;
+        .map_err(|_| ImageError::download("Not enough memory to validate the guide image"))?;
     pixels.resize(bytes, 0);
     decoder
         .read_image(&mut pixels)
-        .map_err(|_| ImageError::download("Steam returned an incomplete or corrupt image"))?;
+        .map_err(|_| ImageError::download("Incomplete or corrupt guide image"))?;
     Ok(ImageData {
         mime_type,
         body,
@@ -996,7 +997,7 @@ fn image_type_matches(mime_type: &str, body: &[u8]) -> bool {
 }
 
 fn reject_animated_image(mime_type: &str, body: &[u8]) -> Result<(), ImageError> {
-    let invalid = || ImageError::download("Steam returned an incomplete image container");
+    let invalid = || ImageError::download("Image source returned an incomplete image container");
     let animated = match mime_type {
         "image/gif" => gif_frame_count(body)? > 1,
         "image/png" | "image/webp" => {
@@ -1053,7 +1054,7 @@ fn reject_animated_image(mime_type: &str, body: &[u8]) -> Result<(), ImageError>
     };
     if animated {
         Err(ImageError::download(
-            "animated Steam guide images are not supported",
+            "animated guide images are not supported",
         ))
     } else {
         Ok(())
@@ -1097,7 +1098,7 @@ fn jpeg_has_end(body: &[u8]) -> bool {
 fn gif_frame_count(body: &[u8]) -> Result<usize, ImageError> {
     if body.len() < 13 || !(body.starts_with(b"GIF87a") || body.starts_with(b"GIF89a")) {
         return Err(ImageError::download(
-            "Steam returned an invalid GIF structure",
+            "Image source returned an invalid GIF structure",
         ));
     }
     let mut cursor = 13_usize;
@@ -1106,7 +1107,7 @@ fn gif_frame_count(body: &[u8]) -> Result<usize, ImageError> {
     }
     if cursor > body.len() {
         return Err(ImageError::download(
-            "Steam returned an invalid GIF structure",
+            "Image source returned an invalid GIF structure",
         ));
     }
     let mut frames = 0;
@@ -1115,7 +1116,7 @@ fn gif_frame_count(body: &[u8]) -> Result<usize, ImageError> {
             0x3b => {
                 return if frames == 0 {
                     Err(ImageError::download(
-                        "Steam returned a GIF without an image frame",
+                        "Image source returned a GIF without an image frame",
                     ))
                 } else {
                     Ok(frames)
@@ -1124,7 +1125,7 @@ fn gif_frame_count(body: &[u8]) -> Result<usize, ImageError> {
             0x21 => {
                 if cursor + 2 > body.len() {
                     return Err(ImageError::download(
-                        "Steam returned an invalid GIF structure",
+                        "Image source returned an invalid GIF structure",
                     ));
                 }
                 cursor = skip_gif_sub_blocks(body, cursor + 2)?;
@@ -1137,7 +1138,7 @@ fn gif_frame_count(body: &[u8]) -> Result<usize, ImageError> {
                 }
                 if cursor >= body.len() {
                     return Err(ImageError::download(
-                        "Steam returned an invalid GIF structure",
+                        "Image source returned an invalid GIF structure",
                     ));
                 }
                 cursor += 1;
@@ -1149,19 +1150,19 @@ fn gif_frame_count(body: &[u8]) -> Result<usize, ImageError> {
             }
             _ => {
                 return Err(ImageError::download(
-                    "Steam returned an invalid GIF structure",
+                    "Image source returned an invalid GIF structure",
                 ));
             }
         }
     }
-    Err(ImageError::download("Steam returned an unterminated GIF"))
+    Err(ImageError::download("Unterminated guide GIF"))
 }
 
 fn skip_gif_sub_blocks(body: &[u8], mut offset: usize) -> Result<usize, ImageError> {
     loop {
         let Some(size) = body.get(offset).copied() else {
             return Err(ImageError::download(
-                "Steam returned an invalid GIF structure",
+                "Image source returned an invalid GIF structure",
             ));
         };
         offset += 1;
@@ -1171,7 +1172,7 @@ fn skip_gif_sub_blocks(body: &[u8], mut offset: usize) -> Result<usize, ImageErr
         offset = offset.saturating_add(size as usize);
         if offset > body.len() {
             return Err(ImageError::download(
-                "Steam returned an invalid GIF structure",
+                "Image source returned an invalid GIF structure",
             ));
         }
     }
@@ -1183,6 +1184,9 @@ fn download(
     max_bytes: usize,
 ) -> Result<(String, Vec<u8>), ImageError> {
     let mut current = canonical_image_url(url)?;
+    let heybox = Url::parse(&current)
+        .ok()
+        .is_some_and(|url| url.host_str() == Some("imgheybox.max-c.com"));
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .max_redirects(0)
         .https_only(true)
@@ -1196,33 +1200,36 @@ fn download(
             .header("Accept-Encoding", "identity")
             .header("User-Agent", "GRIP/1.0 Steam-Deck local guide reader")
             .call()
-            .map_err(|_| ImageError::download("Could not download the Steam image"))?;
+            .map_err(|_| ImageError::download("Could not download the guide image"))?;
         if redirect_status(response.status().as_u16()) {
             if redirects == MAX_REDIRECTS {
-                return Err(ImageError::download("Could not download the Steam image"));
+                return Err(ImageError::download("Could not download the guide image"));
             }
             let location = response
                 .headers()
                 .get("Location")
                 .and_then(|value| value.to_str().ok())
-                .ok_or_else(|| ImageError::download("Could not download the Steam image"))?;
+                .ok_or_else(|| ImageError::download("Could not download the guide image"))?;
             let joined = Url::parse(&current)
                 .ok()
                 .and_then(|base| base.join(location).ok())
                 .ok_or_else(|| {
-                    ImageError::download("Steam redirected the image to an unsafe URL")
+                    ImageError::download("Image source redirected to an unsafe target")
                 })?;
             current = canonical_image_url(joined.as_str())
-                .map_err(|_| ImageError::download("Steam redirected the image to an unsafe URL"))?;
+                .map_err(|_| ImageError::download("Image source redirected to an unsafe target"))?;
+            if heybox != (joined.host_str() == Some("imgheybox.max-c.com")) {
+                return Err(ImageError::download("图片重定向超出来源允许范围"));
+            }
             continue;
         }
         canonical_image_url(&current)
-            .map_err(|_| ImageError::download("Steam returned an unsafe final image URL"))?;
+            .map_err(|_| ImageError::download("Image source returned an unsafe final image URL"))?;
         if let Some(encoding) = response.headers().get("Content-Encoding") {
             let encoding = encoding.to_str().unwrap_or_default();
             if !encoding.eq_ignore_ascii_case("identity") {
                 return Err(ImageError::download(
-                    "Steam returned an encoded image response",
+                    "Image source returned an encoded image response",
                 ));
             }
         }
@@ -1242,7 +1249,7 @@ fn download(
             && extension_for_mime(&normalized_mime).is_none()
         {
             return Err(ImageError::download(
-                "Steam returned an unsupported image type",
+                "Source returned an unsupported image type",
             ));
         }
         if let Some(length) = response.headers().get("Content-Length") {
@@ -1251,11 +1258,11 @@ fn download(
                 .ok()
                 .and_then(|value| value.parse::<u64>().ok())
                 .ok_or_else(|| {
-                    ImageError::download("Steam returned an invalid image Content-Length")
+                    ImageError::download("Image source returned an invalid image Content-Length")
                 })?;
             if length > max_bytes as u64 {
                 return Err(ImageError::download(
-                    "Steam image exceeds the download size limit",
+                    "Guide image exceeds the download size limit",
                 ));
             }
         }
@@ -1266,9 +1273,9 @@ fn download(
             .read_to_vec()
             .map_err(|error| {
                 let message = if matches!(error, ureq::Error::BodyExceedsLimit(_)) {
-                    "Steam image exceeds the download size limit"
+                    "Guide image exceeds the download size limit"
                 } else {
-                    "Could not download the Steam image"
+                    "Could not download the guide image"
                 };
                 ImageError::download(message)
             })?;

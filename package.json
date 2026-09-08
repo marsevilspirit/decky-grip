@@ -51,6 +51,7 @@
     "vitest": "4.1.11"
   },
   "dependencies": {
-    "@decky/api": "1.1.3"
+    "@decky/api": "1.1.3",
+    "qrcode-generator": "2.0.4"
   }
 }

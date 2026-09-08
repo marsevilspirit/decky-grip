@@ -1,4 +1,4 @@
-"""Decky Loader RPC bridge for GRIP's persistent guide positions."""
+"""Decky Loader RPC bridge and composition root for GRIP's backend services."""
 
 import asyncio
 import concurrent.futures
@@ -9,6 +9,7 @@ from typing import Any, Callable, Optional
 import decky
 
 from rust_sidecar import RustSidecar, RustSidecarError
+from import_sessions import ImportSessions
 
 
 class _ExecutorUnavailable(RuntimeError):
@@ -25,6 +26,8 @@ class Plugin:
             decky.logger,
         )
         self._io_lock = asyncio.Lock()
+        self._import_sessions = ImportSessions(self._run_executor_io)
+        self._closing = False
         self._preload_executor: Optional[concurrent.futures.ThreadPoolExecutor] = (
             concurrent.futures.ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="grip-preload"
@@ -90,12 +93,16 @@ class Plugin:
         decky.logger.info("GRIP backend ready")
 
     async def _unload(self) -> None:
+        self._closing = True
+        await self._import_sessions.close()
         self._stop_hotkey()
         self._stop_preloading()
         await self._run_io(self._sidecar.close)
         decky.logger.info("GRIP backend stopped")
 
     async def _uninstall(self) -> None:
+        self._closing = True
+        await self._import_sessions.close()
         self._stop_hotkey()
         self._stop_preloading()
         await self._run_io(self._sidecar.close)
@@ -197,10 +204,71 @@ class Plugin:
             timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
         )
 
+    async def capture_heybox(self, source_url: str, marker: str):
+        return await self._import_sessions.capture(source_url, marker)
+
+    async def cancel_heybox_capture(self, marker: str):
+        await self._import_sessions.cancel_capture(marker)
+
+    async def start_phone_import(self):
+        return await self._import_sessions.start_phone()
+
+    async def get_phone_import(self, session_id: str):
+        return await self._import_sessions.get_phone(session_id)
+
+    async def stop_phone_import(self, session_id: str):
+        await self._import_sessions.stop_phone(session_id)
+
+    async def prepare_imported_guide(self, guide: dict):
+        return await self._run_executor_io(
+            self._sidecar.request,
+            "guides.prepare_import",
+            {"guide": guide},
+            timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
+        )
+
     async def commit_guide(self, guide_id: str, token: str):
         return await self._run_destructive_guide_io(
             "guides.commit", {"guide_id": guide_id, "token": token}
         )
+
+    async def commit_imported_guide(self, guide_id: str, token: str, app_id: str) -> dict:
+        return await self._run_io(self._commit_imported_guide, guide_id, token, app_id)
+
+    def _commit_imported_guide(self, guide_id: str, token: str, app_id: str) -> dict:
+        # Keep publication and its game association ahead of sidecar shutdown.
+        if self._closing:
+            raise RuntimeError("插件正在卸载，无法保存导入指南")
+        guide_key = f"{app_id}:{guide_id}"
+        position = self._sidecar.request(
+            "reader_positions.get", {"guide_key": guide_key}
+        ) or {
+            "scroll_top": 0,
+            "section_id": None,
+            "anchor_text": None,
+            "anchor_offset": 0,
+        }
+        guide = self._sidecar.request(
+            "guides.commit",
+            {"guide_id": guide_id, "token": token},
+            timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
+        )
+        try:
+            self._sidecar.request(
+                "reader_positions.save",
+                {
+                    "guide_key": guide_key,
+                    "scroll_top": position["scroll_top"],
+                    "section_id": position["section_id"],
+                    "anchor_text": position["anchor_text"],
+                    "anchor_offset": position["anchor_offset"],
+                },
+            )
+        except Exception as error:
+            raise RuntimeError(
+                f"图文已保存，但游戏关联记录保存失败，请重试导入：{error}"
+            ) from error
+        return guide
 
     async def discard_guide(self, guide_id: str, token: str):
         return await self._run_destructive_guide_io(

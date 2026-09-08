@@ -282,6 +282,8 @@ fn legacy_corrupt_disk_image_blocks_commit_and_retry_replaces_it() {
 
 #[test]
 fn canonicalizes_only_trusted_https_urls() {
+    let heybox = "https://imgheybox.max-c.com/web/bbs/2025/a/thumb.jpeg?imageMogr2/format/webp";
+    assert_eq!(canonical_image_url(heybox).unwrap(), heybox);
     assert_eq!(
         canonical_image_url("HTTPS://IMAGES.STEAMUSERCONTENT.COM.:443/ugc/a.png?x=1&y=2").unwrap(),
         "https://images.steamusercontent.com:443/ugc/a.png?x=1&y=2"
@@ -296,6 +298,12 @@ fn canonicalizes_only_trusted_https_urls() {
     );
 
     for unsafe_url in [
+        "http://imgheybox.max-c.com/a.png",
+        "https://user@imgheybox.max-c.com/a.png",
+        "https://imgheybox.max-c.com:444/a.png",
+        "https://imgheybox.max-c.com.evil.example/a.png",
+        "https://evil.imgheybox.max-c.com/a.png",
+        "https://max-c.com/a.png",
         "data:image/png;base64,AAAA",
         "http://images.steamusercontent.com/a.png",
         "https://user@images.steamusercontent.com/a.png",

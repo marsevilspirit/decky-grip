@@ -2,7 +2,7 @@ import { Button, Focusable, GamepadButton, type GamepadEvent } from "@decky/ui";
 import { useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 
 import type { CacheClearResult, GuideLibraryEntry } from "../backend";
-import { makeGuideKey } from "../steam/guide-key";
+import { isHeyboxGuideId, makeGuideKey } from "../steam/guide-key";
 import { BusyLabel } from "./BusyLabel";
 
 export interface GuideSwitcherProps {
@@ -45,7 +45,10 @@ const SWITCHER_CSS = `
 `;
 
 function titleFor(entry: GuideLibraryEntry): string {
-  return entry.cache?.title || `Steam 指南 ${entry.guideId}`;
+  return (
+    entry.cache?.title ||
+    `${isHeyboxGuideId(entry.guideId) ? "小黑盒" : "Steam"} 指南 ${entry.guideId}`
+  );
 }
 
 export function GuideSwitcher({
@@ -299,7 +302,8 @@ export function GuideSwitcher({
               </div>
               {entry.cache?.author && (
                 <div style={{ fontSize: 14, marginTop: 5, opacity: 0.8 }}>
-                  作者：{entry.cache.author}
+                  {isHeyboxGuideId(entry.guideId) ? "小黑盒 · " : ""}作者：
+                  {entry.cache.author}
                 </div>
               )}
               {entry.cache?.sectionTitle && (
@@ -341,7 +345,7 @@ export function GuideSwitcher({
             删除《
             {currentEntry
               ? titleFor(currentEntry)
-              : `Steam 指南 ${currentGuideId}`}
+              : `${isHeyboxGuideId(currentGuideId) ? "小黑盒" : "Steam"} 指南 ${currentGuideId}`}
             》的正文和独有图片？阅读位置及其他指南共用的图片会保留。
           </p>
           <div style={{ display: "flex", gap: 12 }}>

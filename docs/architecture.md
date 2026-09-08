@@ -1,5 +1,41 @@
 # Architecture and device findings
 
+## Module boundaries
+
+The frontend entry point wires features to Decky. Source selection, offline
+transactions, document rendering, and temporary import resources have separate
+owners; there is no provider registry or dependency-injection framework.
+
+| Responsibility                              | Owner                                       | Boundary                                                                                                                                                         |
+| ------------------------------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Decky registration and feature coordination | `src/index.tsx`                             | Connects routes, status, caches and game lifecycle; shows user-facing notifications.                                                                             |
+| Download source selection                   | `src/guide-download.ts`                     | Chooses Steam preparation or public Heybox capture; knows which commit persists game association. No UI state.                                                   |
+| Offline transaction and download jobs       | `src/reader/download.ts`                    | Prepare → save every image → commit/discard; owns cancellation, progress and shared job lifetime. No Steam or Decky API imports.                                 |
+| Platform/browser access                     | `src/steam/`                                | `import-browser.ts` owns one temporary Steam browser page; `src/import/heybox.ts` reads and sanitizes public article DOM without Steam APIs.                     |
+| Reader interaction / document presentation  | `GuideReaderPage.tsx` / `GuideDocument.tsx` | Page owns focus, restoration, search and hydration scheduling. Document receives the validated guide, visible section count and content ref; it performs no I/O. |
+| Decky RPC and backend lifetime              | `main.py`                                   | Keeps public RPC names and serialized publication/association. It closes temporary sessions before the Rust sidecar.                                             |
+| Temporary import sessions                   | `py_modules/import_sessions.py`             | Owns capture tasks, the opt-in phone inbox and their cancellation/close lifecycle; reuses the bridge's executor helper.                                          |
+| Validation and durable storage              | `backend/src/`                              | Rust revalidates untrusted input, enforces cache budgets and atomically replaces files.                                                                          |
+
+The download call path is `index.tsx → guide-download.ts → reader/download.ts
+→ backend.ts → main.py → Rust`. Heybox preparation also uses the isolated
+Steam browser and bundled DOM extractor; downloaded articles never need that
+browser to be read.
+
+Keep these invariants when moving code:
+
+- Body/image cache identity is the guide id; reading position and association
+  identity is `appId:guideId`. Do not merge the two storage scopes.
+- A download succeeds only after complete image validation and publication;
+  imported game association finishes before graceful sidecar shutdown.
+- `GuideDocument` keeps stable `dangerouslySetInnerHTML` objects for unchanged
+  section HTML. Parent rerenders and appended chapters must not replace hydrated
+  image nodes. Its style node stays outside the indexed content container.
+- Restoration, incremental section mounting and focus still share the Page's
+  lifecycle. Do not split them into hooks that merely exchange mutable refs.
+- Public RPC signatures, cache schemas and hardware hotkeys are unchanged by
+  this refactor. Validation is local; no device deployment is implied.
+
 ## Confirmed on-device behavior
 
 Read-only CEF inspection on 2026-08-24 used Decky Loader `v3.2.8-pre1`.
@@ -82,8 +118,9 @@ the Decky panel must not depend on React Fiber shapes or minified module names.
 
 ## Position identity
 
-The storage key is `<appId>:<guideId>`, with both ids represented as positive
-decimal strings. The first schema stores Steam's exact `scrollTop` value.
+The storage key is `<appId>:<guideId>`. Steam ids remain positive decimal
+strings; the independent reader also accepts `heybox-<12 lowercase hex digits>`
+as the guide id. The first, native schema stores Steam's exact `scrollTop` value.
 
 The native compatibility store remains pixel-only. Text anchors live in the
 independent reader store because only that renderer can guarantee stable,
@@ -109,16 +146,18 @@ Decky full-screen reader route
 reader_positions.json
 ```
 
-The backend accepts only decimal guide ids, Steam HTTPS hosts, bounded UTF-8
-HTML, and known guide page structure. Scriptable elements, event handlers,
-inline styles, unsafe URLs, and non-Steam images are removed. Cached content is
+Steam preparation accepts decimal guide ids, Steam HTTPS hosts, bounded UTF-8
+HTML, and known guide page structure. Imported Heybox content takes a separate
+validated path with namespaced ids and its own image-host allowlist, then joins
+the same offline transaction. Scriptable elements, event handlers, inline
+styles and unsafe URLs are removed or rejected. Cached content is
 validated on first use and whenever its on-disk signature changes. Validated
 documents and reader positions stay in a plugin-lifetime memory snapshot, so a
 warm L4 open renders immediately; expired content remains visible until the user
 requests an update. Background preloading is cache-only and reads an atomically
 stable file snapshot without taking the foreground lock; network and write I/O
 is serialized per guide id, so one slow Steam request cannot block another guide.
-Remote image URLs are removed from returned HTML. Only trusted Steam HTTPS
+Remote image URLs are removed from returned HTML. Only allowed Steam/Heybox HTTPS
 static PNG/JPEG/GIF/WebP content with bounded encoded bytes and decoded
 dimensions can enter the bounded Rust cache. The image decoder validates actual
 pixels before a download or changed disk file counts as complete; unchanged

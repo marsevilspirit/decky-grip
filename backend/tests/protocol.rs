@@ -20,6 +20,94 @@ fn responses_by_id(messages: Vec<Value>) -> BTreeMap<u64, Value> {
 }
 
 #[test]
+fn browser_import_and_reader_history_round_trip_without_relaxing_native_positions() {
+    let directory = TestDirectory::new();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_grip-sidecar"))
+        .arg(directory.0.join("positions.json"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut call = |method: &str, params: Value| {
+        send_and_read_response(
+            &mut input,
+            &mut output,
+            &json!({"id": 1, "method": method, "params": params}),
+        )
+    };
+    let id = "heybox-8a79701fa858";
+    let key = format!("1113000:{id}");
+    let mut guide = json!({"guideId": id, "title": "Article", "author": "Author", "sourceUrl": "https://www.xiaoheihe.cn/app/bbs/link/8a79701fa858",
+        "sections": (1..=4).map(|id| json!({"id": id.to_string(), "title": "正文", "html": "a".repeat(1024 * 1024 - 1024)})).collect::<Vec<_>>(), "imageUrls": []});
+    let remaining = 4 * 1024 * 1024 - serde_json::to_vec(&guide).unwrap().len();
+    // Fill labels rather than one fragment, keeping every fragment below its independent budget.
+    guide["sections"][3]["title"] = json!(format!("正文{}", "a".repeat(remaining)));
+    assert_eq!(serde_json::to_vec(&guide).unwrap().len(), 4 * 1024 * 1024);
+    let prepared = call("guides.prepare_import", json!({"guide": guide}));
+    assert_eq!(prepared["ok"], true, "{prepared}");
+    assert_eq!(
+        call("guides.get_cached", json!({"guide_id": id}))["result"],
+        Value::Null
+    );
+    assert_eq!(
+        call(
+            "guides.commit",
+            json!({"guide_id": id, "token": prepared["result"]["token"]})
+        )["ok"],
+        true
+    );
+    assert_eq!(
+        call("guides.download_status", json!({"guide_id": id}))["result"]["state"],
+        "complete"
+    );
+    assert_eq!(
+        call(
+            "positions.save",
+            json!({"guide_key": key, "scroll_top": 50})
+        )["ok"],
+        false
+    );
+    assert_eq!(
+        call(
+            "positions.save",
+            json!({"guide_key": "1113000:123", "scroll_top": 99})
+        )["ok"],
+        true
+    );
+    assert_eq!(
+        call(
+            "reader_positions.save",
+            json!({"guide_key": key, "scroll_top": 50, "section_id": "1", "anchor_text": null, "anchor_offset": 0})
+        )["ok"],
+        true
+    );
+    assert_eq!(
+        call("reader_positions.get", json!({"guide_key": key}))["result"]["scroll_top"],
+        50.0
+    );
+    let library = call("guides.list", json!({"app_id": "1113000"}));
+    assert_eq!(library["result"][0]["guideId"], id);
+    assert_eq!(library["result"][0]["cache"]["title"], "Article");
+    assert_eq!(
+        call("positions.snapshot", json!({}))["result"]["1113000:123"]["scroll_top"],
+        99.0
+    );
+    assert_eq!(
+        call("guides.remove_offline", json!({"guide_id": id}))["ok"],
+        true
+    );
+    assert_eq!(
+        call("reader_positions.get", json!({"guide_key": key}))["result"]["scroll_top"],
+        50.0
+    );
+    drop(input);
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
 fn offline_transactions_round_trip_through_the_real_process() {
     let directory = TestDirectory::new();
     let guides = directory.0.join("guides");

@@ -23,6 +23,7 @@ import { BusyLabel } from "./BusyLabel";
 export interface GripPanelProps {
   status: RuntimeStatusStore;
   openReader: () => Promise<void>;
+  openImport?: () => Promise<void>;
   retryPositions: () => Promise<boolean>;
   performance: ReaderPerformanceTracker;
   clearGuides: () => Promise<CacheClearResult>;
@@ -55,6 +56,7 @@ function describeLastAction(status: GripRuntimeStatus): string | null {
 export function GripPanel({
   status: statusStore,
   openReader,
+  openImport,
   retryPositions,
   performance,
   clearGuides,
@@ -290,6 +292,24 @@ export function GripPanel({
   return (
     <>
       <PanelSection title="阅读器">
+        {openImport && (
+          <PanelSectionRow>
+            <ButtonItem
+              label="导入攻略"
+              layout="below"
+              disabled={cacheBusy}
+              onClick={() =>
+                void openImport().catch((error: unknown) =>
+                  setReaderError(
+                    error instanceof Error ? error.message : String(error),
+                  ),
+                )
+              }
+            >
+              从小黑盒分享链接保存完整离线图文
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
         <PanelSectionRow>
           <ButtonItem
             disabled={readerBusy || cacheBusy}

@@ -21,6 +21,7 @@ const QUEUE_CAPACITY: usize = 64;
 const GENERAL_WORKERS: usize = 4;
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const GUIDE_LIBRARY_LIMIT: usize = 20;
+const MAX_IMPORT_REQUEST_BYTES: usize = crate::guides::MAX_IMPORT_BYTES + MAX_REQUEST_BYTES;
 
 enum Work {
     Request(Value),
@@ -135,6 +136,9 @@ fn guide_request_id(work: &Work) -> Option<&str> {
         return None;
     };
     let (method, params) = request_fields(request).ok()?;
+    if method == "guides.prepare_import" {
+        return params?.get("guide")?.get("guideId")?.as_str();
+    }
     if !matches!(
         method,
         "guides.get"
@@ -244,6 +248,12 @@ fn dispatch_general(
                 "device": status.device,
                 "running": status.running,
             }))
+        }
+        "guides.prepare_import" => {
+            let object = params_with_fields(params, &["guide"])?;
+            guides
+                .prepare_import(&object["guide"], images)
+                .map_err(RequestError::Guide)
         }
         "guides.get" | "guides.prepare" => {
             let object = params_with_fields(params, &["guide_id", "force_refresh"])?;
@@ -674,7 +684,7 @@ pub fn serve_with_hotkey_roots(
             line.clear();
             let read = match input
                 .by_ref()
-                .take((MAX_REQUEST_BYTES + 1) as u64)
+                .take((MAX_IMPORT_REQUEST_BYTES + 1) as u64)
                 .read_until(b'\n', &mut line)
             {
                 Ok(read) => read,
@@ -686,7 +696,19 @@ pub fn serve_with_hotkey_roots(
             if read == 0 {
                 break;
             }
-            if line.len() > MAX_REQUEST_BYTES {
+            if line.len() > MAX_IMPORT_REQUEST_BYTES {
+                result = Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "JSON-lines import request exceeds 4 MiB plus 64 KiB envelope",
+                ));
+                break;
+            }
+            if line.len() > MAX_REQUEST_BYTES
+                && !serde_json::from_slice::<Value>(&line).is_ok_and(|request| {
+                    request_fields(&request)
+                        .is_ok_and(|(method, _)| method == "guides.prepare_import")
+                })
+            {
                 result = Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "JSON-lines request exceeds 64 KiB",

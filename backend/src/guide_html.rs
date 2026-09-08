@@ -482,6 +482,7 @@ pub(crate) struct FragmentStats {
 
 #[derive(Default)]
 struct FragmentSanitizer {
+    imported: bool,
     parts: Vec<String>,
     stack: Vec<(String, bool)>,
     open_counts: HashMap<String, usize>,
@@ -612,8 +613,43 @@ impl FragmentSanitizer {
 }
 
 impl HtmlSink for FragmentSanitizer {
-    fn handle_starttag(&mut self, tag: &str, attributes: Attributes) -> Result<(), GuideHtmlError> {
+    fn handle_starttag(
+        &mut self,
+        tag: &str,
+        mut attributes: Attributes,
+    ) -> Result<(), GuideHtmlError> {
         self.record_node()?;
+        if self.imported {
+            if matches!(
+                tag,
+                "video" | "audio" | "iframe" | "object" | "embed" | "canvas"
+            ) {
+                return Err(GuideHtmlError::new("导入内容含不支持的媒体，未保存"));
+            }
+            if tag == "img" {
+                let sources: Vec<_> = attributes
+                    .iter()
+                    .filter(|(name, _)| name == "src" || name == "data-grip-image-url")
+                    .collect();
+                if sources.len() != 1
+                    || sources[0].1.as_deref().is_none_or(|source| {
+                        canonical_image_url(source).ok().is_none_or(|url| {
+                            !url::Url::parse(&url)
+                                .is_ok_and(|url| url.host_str() == Some("imgheybox.max-c.com"))
+                        })
+                    })
+                {
+                    return Err(GuideHtmlError::new(
+                        "导入图片未加载完整或来源不支持，未保存",
+                    ));
+                }
+                for (name, _) in &mut attributes {
+                    if name == "data-grip-image-url" {
+                        *name = "src".into();
+                    }
+                }
+            }
+        }
         if self.drop_depth > 0 {
             if drops_content(tag) && !is_void_tag(tag) {
                 self.drop_depth += 1;
@@ -688,6 +724,18 @@ pub(crate) fn sanitize_fragment_with_stats(
 
 pub fn sanitize_fragment(fragment: &str) -> Result<String, GuideHtmlError> {
     sanitize_fragment_with_stats(fragment).map(|(html, _)| html)
+}
+
+pub(crate) fn sanitize_import_fragment(
+    fragment: &str,
+) -> Result<(String, FragmentStats), GuideHtmlError> {
+    HtmlParser::new(FragmentSanitizer {
+        imported: true,
+        ..Default::default()
+    })
+    .parse(fragment)
+    .map_err(|error| public_parse_error(error, "导入正文格式无效"))?
+    .finish()
 }
 
 #[derive(Default)]
@@ -1229,7 +1277,23 @@ pub(crate) fn valid_guide_id(guide_id: &str) -> bool {
         && guide_id.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+pub(crate) fn heybox_id(guide_id: &str) -> Option<&str> {
+    guide_id.strip_prefix("heybox-").filter(|id| {
+        id.len() == 12
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+pub(crate) fn valid_resource_id(guide_id: &str) -> bool {
+    valid_guide_id(guide_id) || heybox_id(guide_id).is_some()
+}
+
 pub(crate) fn source_url(guide_id: &str) -> String {
+    if let Some(id) = heybox_id(guide_id) {
+        return format!("https://www.xiaoheihe.cn/app/bbs/link/{id}");
+    }
     format!("https://steamcommunity.com/sharedfiles/filedetails/?id={guide_id}&l=schinese")
 }
 

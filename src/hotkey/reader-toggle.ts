@@ -1,4 +1,5 @@
 import type { InstrumentedHotkeyPress } from "../reader/performance";
+import { splitGuideKey } from "../steam/guide-key";
 
 export const READER_ROUTE_PREFIX = "/decky-grip/reader/";
 
@@ -19,8 +20,13 @@ export function isReaderRoute(path: string | null): boolean {
 }
 
 export function readerRouteAppId(path: string | null): string | null {
-  const match = path?.match(/^\/decky-grip\/reader\/([1-9]\d*)\/[1-9]\d*\/?$/);
-  return match?.[1] ?? null;
+  const match = path?.match(/^\/decky-grip\/reader\/([^/]+)\/([^/]+)\/?$/);
+  if (!match) return null;
+  try {
+    return splitGuideKey(`${match[1]}:${match[2]}`).appId;
+  } catch {
+    return null;
+  }
 }
 
 export function readerBelongsToStoppedApp(

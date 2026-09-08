@@ -1,7 +1,8 @@
 use super::{
     AtomicReplaceError, JAVASCRIPT_MAX_SAFE_INTEGER, MAX_POSITIONS, MAX_SCROLL_TOP, ReadError,
     SCHEMA_VERSION, StoreError, acquire_store_lock, atomic_replace, backup_corrupt_file,
-    read_bounded_regular_file, valid_guide_key, validate_guide_key,
+    read_bounded_regular_file, valid_reader_guide_key as valid_guide_key,
+    validate_reader_guide_key as validate_guide_key,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;

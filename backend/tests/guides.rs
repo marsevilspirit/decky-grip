@@ -24,6 +24,157 @@ const CACHE_MAX_AGE_MS: u64 = 6 * 60 * 60 * 1_000;
 const MAX_DOWNLOAD_BYTES: usize = 16 * 1024 * 1024;
 
 #[test]
+fn browser_import_validates_and_atomically_publishes_complete_namespaced_guides() {
+    use grip_sidecar::guide_images::{ImageError, ImageLimits};
+    let directory = TestDirectory::new();
+    let reader = GuideReader::with_fetcher(
+        directory.0.join("guides"),
+        |_, _, _| panic!("import must never fetch Steam"),
+        || NOW_MS,
+    );
+    let failed = Arc::new(AtomicBool::new(false));
+    let fail = failed.clone();
+    let images = GuideImageCache::with_fetcher(
+        directory.0.join("images"),
+        move |_, _, _| {
+            if fail.load(Ordering::Relaxed) {
+                return Err(ImageError::download("offline"));
+            }
+            Ok((
+                "image/png".into(),
+                include!("fixtures/static_png.rs").to_vec(),
+            ))
+        },
+        ImageLimits::default(),
+    )
+    .unwrap();
+    let id = "heybox-123456789012";
+    let url = "https://imgheybox.max-c.com/web/bbs/a.jpeg?imageMogr2/format/webp";
+    let mut guide = json!({"guideId": id, "title": "Old", "author": "Author",
+        "sourceUrl": "https://www.xiaoheihe.cn/app/bbs/link/123456789012",
+        "sections": [{"id": "1", "title": "Chapter", "html": format!("<p onclick='bad()'>Body</p><script>bad()</script><img src='{url}'>")}],
+        "imageUrls": [url]});
+    assert!(
+        reader
+            .get(id, false)
+            .unwrap_err()
+            .message()
+            .contains("重新导入")
+    );
+    let pending = reader.prepare_import(&guide, &images).unwrap();
+    let token = pending["token"].as_str().unwrap();
+    let body = pending["guide"]["sections"][0]["html"].as_str().unwrap();
+    assert!(body.contains("data-grip-image-url="));
+    assert!(!body.contains("onclick") && !body.contains("script") && !body.contains(" src="));
+    assert!(reader.commit(id, token, &images).is_err());
+    assert!(reader.get_cached(id).unwrap().is_none());
+    images.download(url).unwrap();
+    assert_eq!(reader.commit(id, token, &images).unwrap()["offline"], true);
+    let path = directory.0.join("guides").join(format!("{id}.json"));
+    let original = fs::read(&path).unwrap();
+    assert!(
+        reader
+            .get(id, true)
+            .unwrap_err()
+            .message()
+            .contains("重新导入")
+    );
+    assert_eq!(reader.get(id, false).unwrap()["title"], "Old");
+    let updated_url = "https://imgheybox.max-c.com/web/bbs/new.jpeg";
+    guide["title"] = json!("New");
+    guide["sections"][0]["html"] = json!(format!("<img data-grip-image-url='{updated_url}'>"));
+    guide["imageUrls"] = json!([updated_url]);
+    let updated = reader.prepare_import(&guide, &images).unwrap();
+    failed.store(true, Ordering::Relaxed);
+    assert!(images.download(updated_url).is_err());
+    assert!(
+        reader
+            .commit(id, updated["token"].as_str().unwrap(), &images)
+            .is_err()
+    );
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert!(images.is_downloaded(url).unwrap());
+    reader
+        .discard(id, updated["token"].as_str().unwrap(), &images)
+        .unwrap();
+    for (field, value) in [
+        ("guideId", json!("heybox-12345678901A")),
+        ("guideId", json!("../123456789012")),
+        ("guideId", json!("123456789012")),
+        (
+            "sourceUrl",
+            json!("https://www.xiaoheihe.cn/app/bbs/link/123456789012?h_session_id=secret"),
+        ),
+        (
+            "sourceUrl",
+            json!("https://www.xiaoheihe.cn.evil.example/app/bbs/link/123456789012"),
+        ),
+        (
+            "sourceUrl",
+            json!("http://www.xiaoheihe.cn/app/bbs/link/123456789012"),
+        ),
+        ("imageUrls", json!([])),
+        ("imageUrls", json!([updated_url, updated_url])),
+        ("sections", json!([])),
+        ("title", json!("")),
+    ] {
+        let mut invalid = guide.clone();
+        invalid[field] = value;
+        assert!(
+            reader.prepare_import(&invalid, &images).is_err(),
+            "{invalid}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+    for html in [
+        "<img>",
+        "<img src=''>",
+        "<img src='https://127.0.0.1/private'>",
+        "<img src='https://images.steamusercontent.com/a.png'>",
+        "<video></video>",
+        "<iframe src='https://example.com'></iframe>",
+        "<img src='https://imgheybox.max-c.com/a.png' src='https://imgheybox.max-c.com/b.png'>",
+    ] {
+        let mut invalid = guide.clone();
+        invalid["sections"][0]["html"] = json!(html);
+        invalid["imageUrls"] = json!([]);
+        assert!(reader.prepare_import(&invalid, &images).is_err(), "{html}");
+    }
+    let mut invalid = guide.clone();
+    invalid["sections"][0]["id"] = json!(id);
+    assert!(reader.prepare_import(&invalid, &images).is_err());
+    invalid = guide.clone();
+    invalid["sections"][0]["html"] = json!("x".repeat(4 * 1024 * 1024));
+    assert!(reader.prepare_import(&invalid, &images).is_err());
+    failed.store(false, Ordering::Relaxed);
+    let updated = reader.prepare_import(&guide, &images).unwrap();
+    images.download(updated_url).unwrap();
+    reader
+        .commit(id, updated["token"].as_str().unwrap(), &images)
+        .unwrap();
+    assert_eq!(reader.get(id, false).unwrap()["title"], "New");
+    assert!(images.is_downloaded(updated_url).unwrap());
+    assert!(!images.is_downloaded(url).unwrap());
+    // Imported and old Steam IDs occupy separate files, including all-digit article IDs.
+    let steam_id = "123456789012";
+    let steam = json!({"schemaVersion": 1, "guideId": steam_id, "title": "Steam", "author": "A", "fetchedAt": NOW_MS,
+        "sourceUrl": format!("https://steamcommunity.com/sharedfiles/filedetails/?id={steam_id}&l=schinese"),
+        "sections": [{"id": "1", "title": "Chapter", "html": "<p>Steam</p>"}]});
+    let steam_path = directory.0.join("guides").join(format!("{steam_id}.json"));
+    let steam_bytes = serde_json::to_vec(&steam).unwrap();
+    fs::write(&steam_path, &steam_bytes).unwrap();
+    assert_eq!(reader.get(steam_id, false).unwrap()["title"], "Steam");
+    assert_eq!(
+        reader.cached_summary(id, Some("1")).unwrap().unwrap()["title"],
+        "New"
+    );
+    assert_eq!(reader.cache_stats().unwrap()["files"], 2);
+    reader.remove_offline_guide(id, &images).unwrap();
+    assert_eq!(fs::read(steam_path).unwrap(), steam_bytes);
+    assert!(!path.exists());
+}
+
+#[test]
 fn deleting_one_offline_guide_preserves_shared_images_and_positions() {
     use grip_sidecar::guide_images::{GuideImageCache, ImageLimits};
     let directory = TestDirectory::new();

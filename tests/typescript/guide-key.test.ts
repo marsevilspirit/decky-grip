@@ -40,4 +40,21 @@ describe("guide keys", () => {
     expect(() => splitGuideKey("1113000")).toThrow(TypeError);
     expect(() => splitGuideKey("1:2:3")).toThrow(TypeError);
   });
+
+  it("namespaces imported articles without changing Steam keys or app ids", () => {
+    const identity = { appId: "1113000", guideId: "heybox-8a79701fa858" };
+    expect(splitGuideKey(makeGuideKey(identity))).toEqual(identity);
+    expect(makeGuideKey({ appId: "1113000", guideId: "123" })).toBe(
+      "1113000:123",
+    );
+    expect(() =>
+      makeGuideKey({ appId: identity.guideId, guideId: "1" }),
+    ).toThrow();
+    for (const invalid of [
+      "heybox-123",
+      "heybox-8A79701FA858",
+      "heybox-8a79701fa858/..",
+    ])
+      expect(() => makeGuideKey({ appId: "1", guideId: invalid })).toThrow();
+  });
 });

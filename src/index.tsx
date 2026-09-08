@@ -5,15 +5,11 @@ import {
   routerHook,
   toaster,
 } from "@decky/api";
-import { Router, staticClasses, useParams } from "@decky/ui";
+import { Router, showModal, staticClasses, useParams } from "@decky/ui";
 
 import {
   clearGuideCache,
   clearImageCache,
-  prepareGuide,
-  commitGuide,
-  discardGuide,
-  downloadGuideImage,
   getCachedGuide,
   getGuide,
   getGuideLibrary,
@@ -31,6 +27,8 @@ import {
 import { NativeGuideDownloadButton } from "./components/GuideDownloadButton";
 import { GuideReaderPage } from "./components/GuideReaderPage";
 import { GripPanel } from "./components/GripPanel";
+import { ImportGuideModal } from "./components/ImportGuideModal";
+import { downloadGuide } from "./guide-download";
 import { GripController } from "./grip-controller";
 import { overlayHasEditableFocus } from "./hotkey/focus-guard";
 import {
@@ -46,7 +44,6 @@ import {
 import { ReaderImageCacheControl } from "./reader/image-cache-control";
 import { ReaderImageHydrator } from "./reader/image-hydrator";
 import {
-  downloadOfflineGuide,
   GuideDownloadTasks,
   type GuideImageDownloadProgress,
 } from "./reader/download";
@@ -57,7 +54,11 @@ import {
 } from "./reader/performance";
 import { ReaderSessionCache } from "./reader/session-cache";
 import { RuntimeStatusStore } from "./runtime-status";
-import { makeGuideKey, type GuideIdentity } from "./steam/guide-key";
+import {
+  isHeyboxGuideId,
+  makeGuideKey,
+  type GuideIdentity,
+} from "./steam/guide-key";
 import {
   mainWindowPath,
   navigateMainWindow,
@@ -419,18 +420,23 @@ export default definePlugin(() => {
       throw new Error("缓存正在清理，请稍后再下载");
     }
     try {
-      const handoff = controller.captureReaderHandoff(identity);
-      const guide = await downloadOfflineGuide(
-        identity.guideId,
-        forceRefresh,
-        { prepareGuide, commitGuide, discardGuide, downloadGuideImage },
+      const imported = isHeyboxGuideId(identity.guideId);
+      const handoff = imported
+        ? null
+        : controller.captureReaderHandoff(identity);
+      const guide = await downloadGuide(
+        identity,
         onProgress,
         signal,
+        forceRefresh,
       );
       readerCache.acceptOfflineGuide(guide);
-      if (mounted) {
+      // Imported publication already persists the game association before unload can stop the backend.
+      if (mounted && imported) status.rememberGuide(identity);
+      if (mounted && !imported) {
         try {
           await readerCache.rememberAccess(identity, handoff);
+          if (mounted) status.rememberGuide(identity);
         } catch (error: unknown) {
           toaster.toast({
             title: "GRIP：图文已下载，阅读记录保存失败",
@@ -450,6 +456,44 @@ export default definePlugin(() => {
   };
 
   const downloads = new GuideDownloadTasks(cacheGuide);
+  let importModal: ReturnType<typeof showModal> | null = null;
+  const openImport = async () => {
+    if (importModal || !mounted) return;
+    const pathApp = currentMainPath()?.match(/^\/library\/app\/([1-9]\d*)/);
+    const ids = new Set(
+      [
+        currentRunningAppId(),
+        pathApp?.[1],
+        status.getSnapshot().activeGuide?.appId,
+        ...(await getGuideLibrary(null)).map((entry) => entry.appId),
+      ].filter((id): id is string => !!id),
+    );
+    if (!mounted || importModal) return;
+    const games = Array.from(ids, (data) => ({
+      data,
+      label:
+        window.appStore?.GetAppOverviewByAppID(Number(data))?.display_name ||
+        `游戏 ${data}`,
+    }));
+    const close = () => {
+      importModal?.Close();
+      importModal = null;
+    };
+    importModal = showModal(
+      <ImportGuideModal
+        games={games}
+        downloads={downloads}
+        onOpen={(identity) => openReader(undefined, identity)}
+        closeModal={close}
+      />,
+      undefined,
+      {
+        fnOnClose: () => {
+          importModal = null;
+        },
+      },
+    );
+  };
   const deleteOfflineGuide = (guideId: string) =>
     mutateGuideCache(() => removeOfflineGuide(guideId));
 
@@ -606,6 +650,7 @@ export default definePlugin(() => {
         getCacheStats={getReaderCacheStats}
         setImageLimit={setImageCacheLimit}
         openReader={openReader}
+        openImport={openImport}
         performance={readerPerformance}
         repairPositions={repairPositions}
         retryPositions={retryPositions}
@@ -616,6 +661,8 @@ export default definePlugin(() => {
     onDismount() {
       mounted = false;
       downloads.dispose();
+      importModal?.Close();
+      importModal = null;
       routerHook.removeGlobalComponent(GUIDE_DOWNLOAD_COMPONENT);
       stopPreloading();
       readerPerformance.clear();

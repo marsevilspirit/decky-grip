@@ -533,6 +533,22 @@ fn valid_guide_key(value: &str) -> bool {
     !guide_id.contains(':') && valid_id(app_id) && valid_id(guide_id)
 }
 
+fn valid_reader_guide_key(value: &str) -> bool {
+    value.split_once(':').is_some_and(|(app_id, guide_id)| {
+        valid_id(app_id) && guide_html::valid_resource_id(guide_id)
+    })
+}
+
+fn validate_reader_guide_key(value: &str) -> Result<&str, StoreError> {
+    if valid_reader_guide_key(value) {
+        Ok(value)
+    } else {
+        Err(StoreError::Validation(
+            "reader guide_key must have the form <app_id>:<resource_id>",
+        ))
+    }
+}
+
 fn valid_id(value: &str) -> bool {
     (1..=20).contains(&value.len())
         && value.as_bytes()[0] != b'0'

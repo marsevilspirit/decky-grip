@@ -1,7 +1,8 @@
 use crate::guide_html::{
     MAX_LABEL_CHARS, MAX_PAGE_NODES, MAX_PAGE_TEXT_CHARS, MAX_SANITIZED_HTML_BYTES, MAX_SECTIONS,
-    localize_guide_images, localized_image_urls, parse_guide_html, sanitize_fragment_with_stats,
-    source_url as guide_source_url, valid_guide_id,
+    heybox_id, localize_guide_images, localized_image_urls, parse_guide_html,
+    sanitize_fragment_with_stats, sanitize_import_fragment, source_url as guide_source_url,
+    valid_guide_id, valid_resource_id,
 };
 use crate::guide_images::{GuideImageCache, OrphanImages};
 use crate::{
@@ -22,6 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
 pub const MAX_DOWNLOAD_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_IMPORT_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_CACHE_BYTES: u64 = 20 * 1024 * 1024;
 pub const MAX_DISK_CACHE_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_MEMORY_CACHE_BYTES: usize = 32 * 1024 * 1024;
@@ -299,52 +301,160 @@ impl GuideReader {
                         None => (self.fetch_and_validate(guide_id, (self.now_ms)())?, false),
                     }
                 };
-                let bytes = serde_json::to_vec(&document)
-                    .map_err(|_| GuideError::cache("指南无法编码"))?
-                    .len();
-                let _disk = lock(&self.disk_lock);
-                if generation != *lock(&self.generation) {
-                    return Err(GuideError::cache("缓存已清理，请重新下载"));
-                }
-                let mut prepared = lock(&self.prepared);
-                // ponytail: byte-bounded staging in memory; persistent resumable manifests only if needed.
-                let used: usize = prepared
-                    .iter()
-                    .filter(|(id, _)| id.as_str() != guide_id)
-                    .map(|(_, candidate)| candidate.bytes)
-                    .sum();
-                if bytes > MAX_CACHE_BYTES as usize || used + bytes > MAX_MEMORY_CACHE_BYTES {
-                    return Err(GuideError::cache("正在准备的指南过多，请等待其他下载完成"));
-                }
-                let token = format!(
-                    "{}-{}-{}",
-                    std::process::id(),
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos(),
-                    PREPARE_COUNTER.fetch_add(1, Ordering::Relaxed)
-                );
-                let guide = with_cache_status(
-                    &document,
-                    from_cache,
-                    is_stale((self.now_ms)(), fetched_at(&document)),
-                );
-                prepared.insert(
-                    guide_id.to_owned(),
-                    PreparedGuide {
-                        token: token.clone(),
-                        document,
-                        generation,
-                        bytes,
-                    },
-                );
-                self.reclaim_images_locked(images, &prepared, OrphanImages::RetryCache);
-                Ok(json!({"token": token, "guide": guide}))
+                self.stage(document, from_cache, generation, images)
             })()
         };
         self.guide_locks.release(guide_id, &guide_lock);
         result
+    }
+
+    /// Stage untrusted browser output; only commit can publish it after all images are durable.
+    pub fn prepare_import(
+        &self,
+        guide: &Value,
+        images: &GuideImageCache,
+    ) -> Result<Value, GuideError> {
+        if serde_json::to_vec(guide)
+            .map_err(|_| GuideError::validation("导入数据无效"))?
+            .len()
+            > MAX_IMPORT_BYTES
+        {
+            return Err(GuideError::validation("导入指南超过 4 MiB 限制"));
+        }
+        let object = exact_object(
+            guide,
+            &[
+                "guideId",
+                "title",
+                "author",
+                "sourceUrl",
+                "sections",
+                "imageUrls",
+            ],
+            "导入指南字段无效",
+        )
+        .map_err(|error| GuideError::validation(error.message))?;
+        let guide_id = object["guideId"]
+            .as_str()
+            .filter(|id| heybox_id(id).is_some())
+            .ok_or_else(|| GuideError::validation("仅支持小黑盒公开文章导入"))?;
+        if object["sourceUrl"].as_str() != Some(guide_source_url(guide_id).as_str()) {
+            return Err(GuideError::validation("小黑盒文章地址与资源 ID 不匹配"));
+        }
+        let guide_lock = self.guide_locks.retain(guide_id);
+        let result = {
+            let _guide = lock(&guide_lock);
+            (|| {
+                let generation = *lock(&self.generation);
+                let sections = object["sections"]
+                    .as_array()
+                    .filter(|sections| !sections.is_empty() && sections.len() <= MAX_SECTIONS)
+                    .ok_or_else(|| GuideError::validation("导入章节无效或过多"))?;
+                let mut document = guide.clone();
+                document.as_object_mut().unwrap().remove("imageUrls");
+                let mut total_nodes = 0;
+                let mut total_text = 0;
+                let mut total_html = 0;
+                for (index, section) in sections.iter().enumerate() {
+                    exact_object(section, &["id", "title", "html"], "导入章节字段无效")
+                        .map_err(|error| GuideError::validation(error.message))?;
+                    let raw = section["html"]
+                        .as_str()
+                        .ok_or_else(|| GuideError::validation("导入正文无效"))?;
+                    let (html, stats) = sanitize_import_fragment(raw).map_err(GuideError::parse)?;
+                    total_nodes += stats.nodes;
+                    total_text += stats.text_chars;
+                    total_html += stats.output_bytes;
+                    if total_nodes > MAX_PAGE_NODES
+                        || total_text > MAX_PAGE_TEXT_CHARS
+                        || total_html > MAX_SANITIZED_HTML_BYTES
+                    {
+                        return Err(GuideError::validation("导入正文超过解析安全限制"));
+                    }
+                    document["sections"][index]["html"] = json!(html);
+                }
+                document["schemaVersion"] = json!(CACHE_SCHEMA_VERSION);
+                document["offline"] = json!(false);
+                document["fetchedAt"] = json!((self.now_ms)());
+                let document = self.validate_cached_document(guide_id, &document)?;
+                let manifest = object["imageUrls"]
+                    .as_array()
+                    .ok_or_else(|| GuideError::validation("缺少完整图片清单"))?;
+                let mut expected = HashSet::new();
+                for value in manifest {
+                    let url = value
+                        .as_str()
+                        .and_then(|url| crate::guide_images::canonical_image_url(url).ok())
+                        .ok_or_else(|| GuideError::validation("导入图片清单无效"))?;
+                    if !expected.insert(url) {
+                        return Err(GuideError::validation("导入图片清单含重复项"));
+                    }
+                }
+                if expected != document_image_urls(&document)? {
+                    return Err(GuideError::validation(
+                        "导入正文与完整图片清单不一致，未保存",
+                    ));
+                }
+                self.stage(document, false, generation, images)
+            })()
+        };
+        self.guide_locks.release(guide_id, &guide_lock);
+        result
+    }
+
+    fn stage(
+        &self,
+        document: Value,
+        from_cache: bool,
+        generation: u64,
+        images: &GuideImageCache,
+    ) -> Result<Value, GuideError> {
+        let guide_id = document["guideId"]
+            .as_str()
+            .expect("validated guide id")
+            .to_owned();
+        let bytes = serde_json::to_vec(&document)
+            .map_err(|_| GuideError::cache("指南无法编码"))?
+            .len();
+        let _disk = lock(&self.disk_lock);
+        if generation != *lock(&self.generation) {
+            return Err(GuideError::cache("缓存已清理，请重新下载"));
+        }
+        let mut prepared = lock(&self.prepared);
+        // ponytail: byte-bounded staging in memory; persistent resumable manifests only if needed.
+        let used: usize = prepared
+            .iter()
+            .filter(|(id, _)| **id != guide_id)
+            .map(|(_, candidate)| candidate.bytes)
+            .sum();
+        if bytes > MAX_CACHE_BYTES as usize || used + bytes > MAX_MEMORY_CACHE_BYTES {
+            return Err(GuideError::cache("正在准备的指南过多，请等待其他下载完成"));
+        }
+        let token = format!(
+            "{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+            PREPARE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let guide = with_cache_status(
+            &document,
+            from_cache,
+            is_stale((self.now_ms)(), fetched_at(&document)),
+        );
+        prepared.insert(
+            guide_id,
+            PreparedGuide {
+                token: token.clone(),
+                document,
+                generation,
+                bytes,
+            },
+        );
+        self.reclaim_images_locked(images, &prepared, OrphanImages::RetryCache);
+        Ok(json!({"token": token, "guide": guide}))
     }
 
     pub fn commit(
@@ -416,7 +526,7 @@ impl GuideReader {
                 let Some(id) = name
                     .to_str()
                     .and_then(|name| name.strip_suffix(".json"))
-                    .filter(|id| valid_guide_id(id))
+                    .filter(|id| valid_resource_id(id))
                 else {
                     continue;
                 };
@@ -593,6 +703,11 @@ impl GuideReader {
     }
 
     fn get_locked(&self, guide_id: &str, force_refresh: bool) -> Result<Value, GuideError> {
+        if force_refresh && heybox_id(guide_id).is_some() {
+            return Err(GuideError::validation(
+                "小黑盒指南需重新导入以更新，已保留本地版本",
+            ));
+        }
         let cache_generation = *lock(&self.generation);
         let cached = match self.read_cache(guide_id) {
             Ok(cached) => cached,
@@ -637,6 +752,11 @@ impl GuideReader {
     }
 
     fn fetch_and_validate(&self, guide_id: &str, fetched_at_ms: u64) -> Result<Value, GuideError> {
+        if heybox_id(guide_id).is_some() {
+            return Err(GuideError::validation(
+                "小黑盒指南本地内容缺失或需要更新，请重新导入",
+            ));
+        }
         let body = (self.fetcher)(
             &guide_source_url(guide_id),
             REQUEST_TIMEOUT,
@@ -843,8 +963,16 @@ impl GuideReader {
                 .and_then(Value::as_str)
                 .filter(|fragment| fragment.len() <= MAX_DOWNLOAD_BYTES)
                 .ok_or_else(|| GuideError::cache("cached guide contains invalid section HTML"))?;
-            let (sanitized, stats) = sanitize_fragment_with_stats(fragment)
-                .map_err(|_| GuideError::cache("cached guide exceeds the HTML parsing budget"))?;
+            let (sanitized, stats) = if heybox_id(guide_id).is_some() {
+                sanitize_import_fragment(fragment)
+            } else {
+                sanitize_fragment_with_stats(fragment)
+            }
+            .map_err(|_| {
+                GuideError::cache(
+                    "cached guide contains unsupported media or exceeds the HTML parsing budget",
+                )
+            })?;
             total_nodes = total_nodes.saturating_add(stats.nodes);
             total_text_chars = total_text_chars.saturating_add(stats.text_chars);
             total_html_bytes = total_html_bytes.saturating_add(stats.output_bytes);
@@ -1021,7 +1149,10 @@ impl GuideReader {
             let Some(name) = name.to_str() else {
                 continue;
             };
-            let Some(guide_id) = name.strip_suffix(".json").filter(|id| valid_guide_id(id)) else {
+            let Some(guide_id) = name
+                .strip_suffix(".json")
+                .filter(|id| valid_resource_id(id))
+            else {
                 continue;
             };
             let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
@@ -1096,11 +1227,11 @@ fn document_image_urls(document: &Value) -> Result<HashSet<String>, GuideError> 
 }
 
 fn validate_guide_id(guide_id: &str) -> Result<(), GuideError> {
-    if valid_guide_id(guide_id) {
+    if valid_resource_id(guide_id) {
         Ok(())
     } else {
         Err(GuideError::validation(
-            "guide_id must be a positive decimal string",
+            "guide_id must be a positive decimal string or heybox-<12 lowercase hex digits>",
         ))
     }
 }
@@ -1162,7 +1293,7 @@ fn with_cache_status(document: &Value, from_cache: bool, stale: bool) -> Value {
 }
 
 fn managed_cache_name(name: &str) -> bool {
-    name.strip_suffix(".json").is_some_and(valid_guide_id)
+    name.strip_suffix(".json").is_some_and(valid_resource_id)
 }
 
 fn read_cache_directory(path: &Path) -> Result<Option<fs::ReadDir>, GuideError> {

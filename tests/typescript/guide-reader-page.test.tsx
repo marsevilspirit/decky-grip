@@ -9,9 +9,11 @@ import {
 } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as DeckyUI from "@decky/ui";
 
 import type { CacheClearResult, GuideLibraryEntry } from "../../src/backend";
 import { GuideReaderPage } from "../../src/components/GuideReaderPage";
+import { extractHeyboxArticle } from "../../src/import/heybox";
 import { ReaderImageCacheControl } from "../../src/reader/image-cache-control";
 import {
   GuideDownloadTasks,
@@ -1580,6 +1582,122 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(scroller.scrollTop).toBe(234);
     expect([...scroller.querySelectorAll("img")]).toEqual(original);
     expect(fetchImage).toHaveBeenCalledTimes(2);
+  });
+
+  it("reads extracted Heybox screenshots from cache with fit-width, zoom and gallery navigation without downloading", async () => {
+    const heyboxIdentity = {
+      appId: "1113000",
+      guideId: "heybox-249c72219fed",
+    };
+    vi.spyOn(DeckyUI, "useParams").mockReturnValue(heyboxIdentity);
+    // Synthetic public DOM and cached image bytes, not a device/browser acceptance test.
+    const article = new DOMParser().parseFromString(
+      `<div class="post__container">
+        <h1 class="section-title__content">p4g毕业面具展示</h1>
+        <span class="link-user__username">R</span>
+        <div class="hb-article">
+          <div><img src="https://imgheybox.max-c.com/web/bbs/screenshot-1.webp" alt="第一张"></div>
+          <h4 class="img-desc">面具一</h4>
+          <div><img src="https://imgheybox.max-c.com/web/bbs/screenshot-2.webp" alt="第二张"></div>
+          <h4 class="img-desc">面具二</h4>
+        </div>
+      </div>`,
+      "text/html",
+    );
+    const rendered = extractHeyboxArticle(
+      article,
+      "https://www.xiaoheihe.cn/app/bbs/link/249c72219fed",
+    );
+    expect(rendered.guideId).toBe(heyboxIdentity.guideId);
+    expect(rendered.sections).toHaveLength(1);
+    expect(rendered.imageUrls).toHaveLength(2);
+    const captions = [...article.querySelectorAll(".img-desc")].map(
+      (caption) => caption.textContent,
+    );
+    const guide: DownloadedGuide = {
+      ...rendered,
+      fetchedAt: 1,
+      fromCache: true,
+      stale: false,
+    };
+    const getGuide = vi.fn(async () => guide);
+    const getCachedGuide = vi.fn(async () => guide);
+    const cache = new ReaderSessionCache({
+      getCachedGuide,
+      getGuide,
+      getReaderPosition: async () => null,
+      saveReaderPosition: async () => savedPosition,
+    });
+    const download = vi.fn();
+    const downloads = new GuideDownloadTasks(download);
+    const fetchImage = vi.fn(async (url: string) => {
+      expect(rendered.imageUrls).toContain(url);
+      return {
+        mimeType: "image/webp",
+        base64: "AQID",
+        fromCache: true,
+        width: 1280,
+        height: 582,
+      };
+    });
+    let sequence = 0;
+    vi.spyOn(URL, "createObjectURL").mockImplementation(
+      () => `blob:heybox-${++sequence}`,
+    );
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(800);
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(600);
+    await cache.preload(heyboxIdentity);
+    const scroller = await mount(cache, fetchImage, 3000, {
+      downloads,
+      imageHydrator: new ReaderImageHydrator(fetchImage),
+    });
+    await flushFrame();
+    await flushMicrotasks();
+    const original = [...scroller.querySelectorAll("img")];
+    expect(original).toHaveLength(rendered.imageUrls.length);
+    for (const caption of captions)
+      expect(scroller.textContent).toContain(caption);
+    for (const image of original) {
+      expect(image.src).toMatch(/^blob:heybox-/);
+      expect(image.width).toBe(1280);
+      expect(image.height).toBe(582);
+      expect(getComputedStyle(image).maxWidth).toBe("100%");
+      expect(getComputedStyle(image).height).toBe("auto");
+      image.getBoundingClientRect = () =>
+        ({ top: 250, bottom: 600, width: 768, height: 349.2 }) as DOMRect;
+    }
+    notifyResize();
+    await flushFrame();
+    await act(async () => {
+      scroller.scrollTop = 234;
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await flushFrame();
+    await act(async () => pressKey(scroller, "Enter"));
+    const dialog = container!.querySelector('[aria-label="图片全屏查看"]')!;
+    expect(dialog).not.toBeNull();
+    const enlarged = dialog.querySelector("img")!;
+    expect(enlarged.src).toBe(original[0].src);
+    expect(parseFloat(enlarged.style.width)).toBe(768);
+    expect(parseFloat(enlarged.style.height)).toBeCloseTo((582 * 768) / 1280);
+    await act(async () => pressKey(document.activeElement!, "BumperRight"));
+    expect(parseFloat(enlarged.style.width)).toBeGreaterThan(768);
+    await act(async () => pressKey(document.activeElement!, "TriggerRight"));
+    expect(dialog.querySelector("img")?.src).toBe(original[1].src);
+    expect(container!.querySelectorAll('img[src^="http"]')).toHaveLength(0);
+    await act(async () => pressKey(document.activeElement!, "Escape"));
+    await flushFrame();
+    expect(container!.querySelector('[aria-label="图片全屏查看"]')).toBeNull();
+    expect(document.activeElement).toBe(scroller);
+    expect(scroller.scrollTop).toBe(234);
+    expect([...scroller.querySelectorAll("img")]).toEqual(original);
+    expect(getCachedGuide).toHaveBeenCalledExactlyOnceWith(
+      heyboxIdentity.guideId,
+    );
+    expect(getGuide).not.toHaveBeenCalled();
+    expect(download).not.toHaveBeenCalled();
+    expect(fetchImage).toHaveBeenCalledTimes(rendered.imageUrls.length);
   });
 
   it("requires a named confirmation for single-guide deletion and preserves the active article", async () => {

@@ -1,5 +1,9 @@
 const DECIMAL_ID = /^[1-9]\d{0,19}$/;
 
+export function isHeyboxGuideId(value: string): boolean {
+  return /^heybox-[a-f0-9]{12}$/.test(value);
+}
+
 export interface GuideIdentity {
   appId: string;
   guideId: string;
@@ -13,7 +17,7 @@ function assertDecimalId(label: string, value: string): void {
 
 export function makeGuideKey({ appId, guideId }: GuideIdentity): string {
   assertDecimalId("appId", appId);
-  assertDecimalId("guideId", guideId);
+  if (!isHeyboxGuideId(guideId)) assertDecimalId("guideId", guideId);
   return `${appId}:${guideId}`;
 }
 
@@ -27,6 +31,6 @@ export function splitGuideKey(
 
   const [appId, guideId] = parts;
   assertDecimalId("appId", appId);
-  assertDecimalId("guideId", guideId);
+  if (!isHeyboxGuideId(guideId)) assertDecimalId("guideId", guideId);
   return { appId, guideId };
 }
