@@ -9,6 +9,7 @@ import {
   GuideSwitcher,
   type GuideSwitcherProps,
 } from "../../src/components/GuideSwitcher";
+import { GamepadButton, gamepadEvent } from "./helpers/decky-gamepad";
 
 vi.mock("@decky/ui", async () => {
   const { GamepadButton, gamepadRef } = await import("./helpers/decky-gamepad");
@@ -45,6 +46,8 @@ vi.mock("@decky/ui", async () => {
         "preferredFocus",
         "onCancelActionDescription",
         "onOptionsButton",
+        "onSecondaryButton",
+        "onSecondaryActionDescription",
       ])
         delete dom[name];
       dom["data-ok-action"] = dom.onOKActionDescription;
@@ -161,6 +164,10 @@ describe("GuideSwitcher", () => {
     [...container.querySelectorAll<HTMLButtonElement>("button")].find(
       (node) => node.textContent === label,
     )!;
+  const manage = (id: string) =>
+    container.querySelector<HTMLButtonElement>(
+      `[data-grip-guide-manage="10:${id}"]`,
+    )!;
   const click = async (node: HTMLElement) => {
     await act(async () => {
       node.focus();
@@ -205,6 +212,90 @@ describe("GuideSwitcher", () => {
     expect(props.onChoose).not.toHaveBeenCalled();
   });
 
+  it("manages the explicit card rather than the current or last opened guide, even after list reorder", async () => {
+    await render();
+    await click(choice("3"));
+    await click(manage("2"));
+    const target = props.entries![1];
+    expect(manage("2").closest("button")).toBe(manage("2"));
+    expect(choice("2").contains(manage("2"))).toBe(false);
+    expect(document.activeElement).toBe(button("取消"));
+    const confirmation = container.querySelector('[role="alertdialog"]')!;
+    expect(confirmation.getAttribute("aria-label")).toBe("管理指南：指南 2");
+    expect(confirmation.textContent).toContain("来源：Steam");
+    expect(confirmation.textContent).toContain("作者：作者 2");
+    expect(confirmation.textContent).toContain("阅读位置");
+    await render({ entries: [entry("3"), entry("1"), entry("2")] });
+    await click(button("确认卸载"));
+    expect(props.onRemove).toHaveBeenCalledExactlyOnceWith(target);
+    expect(choice("2").textContent).toContain("释放 1.0 MiB");
+    expect(choice("1").textContent).not.toContain("已卸载");
+    expect(document.activeElement).toBe(manage("2"));
+    await click(manage("3"));
+    await click(button("确认卸载"));
+    expect(props.onRemove).toHaveBeenLastCalledWith(props.entries![0]);
+    expect(props.onRemove).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["x", "X", "gamepad"])(
+    "opens the focused card's management with %s, consumes repeats, and returns to that card",
+    async (input) => {
+      await render();
+      const target = choice("2");
+      const escaped = vi.fn();
+      document.body.addEventListener("onSecondaryButton", escaped);
+      if (input === "gamepad") {
+        const repeat = gamepadEvent(
+          "onSecondaryButton",
+          GamepadButton.SECONDARY,
+          true,
+        );
+        await act(async () => target.dispatchEvent(repeat));
+        expect(repeat.defaultPrevented).toBe(true);
+        expect(container.querySelector('[role="alertdialog"]')).toBeNull();
+        const event = gamepadEvent(
+          "onSecondaryButton",
+          GamepadButton.SECONDARY,
+        );
+        await act(async () => target.dispatchEvent(event));
+        expect(event.defaultPrevented).toBe(true);
+        await act(async () => vi.advanceTimersByTimeAsync(0));
+      } else {
+        await key(target, input, "keydown", { repeat: true });
+        expect(container.querySelector('[role="alertdialog"]')).toBeNull();
+        await key(target, input);
+      }
+      document.body.removeEventListener("onSecondaryButton", escaped);
+      expect(escaped).not.toHaveBeenCalled();
+      expect(
+        container
+          .querySelector('[role="alertdialog"]')
+          ?.getAttribute("aria-label"),
+      ).toBe("管理指南：指南 2");
+      expect(props.onChoose).not.toHaveBeenCalled();
+      expect(props.onRemove).not.toHaveBeenCalled();
+      await key(button("取消"), "Escape");
+      expect(document.activeElement).toBe(target);
+      expect(props.onClose).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not uninstall a target whose cache disappeared while its management was open", async () => {
+    await render();
+    await click(manage("2"));
+    await render({
+      entries: [entry("1"), { ...entry("2"), cache: null }, entry("3")],
+    });
+    expect(button("确认卸载").getAttribute("aria-disabled")).toBe("true");
+    await click(button("确认卸载"));
+    expect(props.onRemove).not.toHaveBeenCalled();
+    expect(
+      container
+        .querySelector('[role="alertdialog"]')
+        ?.getAttribute("aria-label"),
+    ).toBe("管理指南：指南 2");
+  });
+
   it("moves from loading to a card, including when only the current guide exists", async () => {
     await render({ entries: null });
     expect(document.activeElement).toBe(dialog());
@@ -227,6 +318,10 @@ describe("GuideSwitcher", () => {
     expect(target.getAttribute("aria-busy")).toBe("true");
     expect(target.textContent).toContain("指南 3");
     expect(target.textContent).toContain("正在准备并打开");
+    await click(manage("2"));
+    expect(container.querySelector('[role="alertdialog"]')).toBeNull();
+    await key(choice("2"), "x");
+    expect(container.querySelector('[role="alertdialog"]')).toBeNull();
     await click(target);
     expect(props.onChoose).toHaveBeenCalledOnce();
     await render({ pendingKey: null, error: "指南打开失败：读取失败" });
@@ -299,7 +394,7 @@ describe("GuideSwitcher", () => {
       behavior: "auto",
     });
     expect(reveal.mock.instances[reveal.mock.instances.length - 1]).toBe(
-      choice("20"),
+      choice("20").parentElement,
     );
     await key(choice("20"), "ArrowDown");
     expect(document.activeElement).toBe(choice("20"));
@@ -308,17 +403,19 @@ describe("GuideSwitcher", () => {
     await key(choice("19"), "Home");
     expect(document.activeElement).toBe(choice("1"));
     await key(choice("1"), "Tab");
-    expect(document.activeElement).toBe(choice("2"));
+    expect(document.activeElement).toBe(manage("1"));
     expect(reveal.mock.instances[reveal.mock.instances.length - 1]).toBe(
-      choice("2"),
+      choice("1").parentElement,
     );
+    await key(manage("1"), "ArrowDown");
+    expect(document.activeElement).toBe(choice("2"));
     expect(props.onChoose).not.toHaveBeenCalled();
     expect(props.onClose).not.toHaveBeenCalled();
   });
 
   it("requires confirmation, defaults to cancel, and handles B at each level", async () => {
     await render();
-    const trigger = button("删除当前指南离线副本");
+    const trigger = manage("1");
     await click(trigger);
     expect(props.onRemove).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(button("取消"));
@@ -342,7 +439,7 @@ describe("GuideSwitcher", () => {
     "consumes %s repeats so a held key only returns one level",
     async (value) => {
       await render();
-      const trigger = button("删除当前指南离线副本");
+      const trigger = manage("1");
       await click(trigger);
       await key(button("取消"), value, "keydown", { repeat: true });
       expect(container.querySelector('[role="alertdialog"]')).not.toBeNull();
@@ -361,7 +458,7 @@ describe("GuideSwitcher", () => {
 
   it("keeps real Tab focus inside the visible switcher or its deletion confirmation", async () => {
     await render();
-    const trigger = button("删除当前指南离线副本");
+    const trigger = manage("3");
     await act(async () => trigger.focus());
     await key(trigger, "Tab");
     expect(document.activeElement).toBe(choice("1"));
@@ -372,7 +469,7 @@ describe("GuideSwitcher", () => {
     expect(document.activeElement).toBe(trigger);
     await click(trigger);
     const cancel = button("取消");
-    const confirm = button("确认删除");
+    const confirm = button("确认卸载");
     await key(cancel, "Tab", "keydown", { shiftKey: true });
     expect(document.activeElement).toBe(confirm);
     await key(confirm, "Tab");
@@ -392,18 +489,24 @@ describe("GuideSwitcher", () => {
           }),
       ),
     });
-    await click(button("删除当前指南离线副本"));
-    const confirm = button("确认删除");
+    await click(manage("1"));
+    const confirm = button("确认卸载");
     await click(confirm);
     expect(document.activeElement).toBe(confirm);
     expect(confirm.disabled).toBe(false);
-    expect(confirm.textContent).toContain("正在删除");
+    expect(confirm.textContent).toContain("正在卸载");
     await key(confirm, "Escape");
     await click(button("取消"));
     await click(confirm);
+    await key(choice("2"), "x");
+    await click(manage("2"));
     expect(props.onClose).not.toHaveBeenCalled();
-    expect(props.onRemove).toHaveBeenCalledOnce();
-    expect(container.querySelector('[role="alertdialog"]')).not.toBeNull();
+    expect(props.onRemove).toHaveBeenCalledExactlyOnceWith(props.entries![0]);
+    expect(
+      container
+        .querySelector('[role="alertdialog"]')
+        ?.getAttribute("aria-label"),
+    ).toBe("管理指南：指南 1");
     await act(async () =>
       resolve({ bytesRemoved: 1_048_576, filesRemoved: 3 }),
     );
@@ -411,8 +514,9 @@ describe("GuideSwitcher", () => {
     expect(container.querySelector('[role="alertdialog"]')).toBeNull();
     expect(dialog().textContent).toContain("释放 1.0 MiB");
     expect(choice("1").textContent).toContain("当前会话仍可阅读");
-    await click(button("删除当前指南离线副本"));
-    expect(container.querySelector('[role="alertdialog"]')).toBeNull();
+    await click(manage("1"));
+    expect(button("确认卸载").getAttribute("aria-disabled")).toBe("true");
+    await click(button("确认卸载"));
     expect(props.onRemove).toHaveBeenCalledOnce();
   });
 
@@ -422,27 +526,52 @@ describe("GuideSwitcher", () => {
       .mockRejectedValueOnce(new Error("磁盘忙"))
       .mockResolvedValueOnce({ bytesRemoved: 0, filesRemoved: 1 });
     await render({ onRemove });
-    await click(button("删除当前指南离线副本"));
-    const confirm = button("确认删除");
+    await click(manage("2"));
+    const confirm = button("确认卸载");
     await click(confirm);
-    expect(button("确认删除")).toBe(confirm);
+    expect(button("确认卸载")).toBe(confirm);
     expect(document.activeElement).toBe(confirm);
     expect(
       container.querySelector('[role="alertdialog"] [role="alert"]')
         ?.textContent,
     ).toContain("磁盘忙");
+    await render({
+      entries: [entry("1"), { ...entry("2"), cache: null }, entry("3")],
+    });
+    expect(button("确认卸载").getAttribute("aria-disabled")).toBe("false");
+    expect(
+      container.querySelector('[role="alertdialog"]')?.textContent,
+    ).toContain("可重试完成剩余离线文件的清理。");
     await click(confirm);
     expect(onRemove).toHaveBeenCalledTimes(2);
+    expect(onRemove.mock.calls.map(([target]) => target.guideId)).toEqual([
+      "2",
+      "2",
+    ]);
     expect(container.querySelector('[role="alertdialog"]')).toBeNull();
   });
 
-  it("does not offer deletion while disabled or already removed", async () => {
+  it("keeps management available but blocks uninstall while busy, uncached, or already removed", async () => {
     await render({ removeDisabled: true });
-    await click(button("删除当前指南离线副本"));
-    expect(container.querySelector('[role="alertdialog"]')).toBeNull();
+    await click(manage("1"));
+    expect(container.querySelector('[role="alertdialog"]')).not.toBeNull();
+    expect(button("确认卸载").getAttribute("aria-disabled")).toBe("true");
+    await click(button("确认卸载"));
     await render({ removeDisabled: false, removed: true });
-    await click(button("删除当前指南离线副本"));
-    expect(container.querySelector('[role="alertdialog"]')).toBeNull();
+    await click(button("确认卸载"));
+    expect(button("确认卸载").getAttribute("aria-disabled")).toBe("true");
+    await click(button("取消"));
+    await render({
+      entries: [entry("1"), { ...entry("2"), cache: null }, entry("3")],
+    });
+    await click(manage("2"));
+    expect(
+      container.querySelector('[role="alertdialog"]')?.textContent,
+    ).toContain("没有可卸载的离线副本");
+    await click(button("确认卸载"));
     expect(props.onRemove).not.toHaveBeenCalled();
+    await click(button("取消"));
+    await click(manage("3"));
+    expect(button("确认卸载").getAttribute("aria-disabled")).toBe("false");
   });
 });

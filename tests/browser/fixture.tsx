@@ -60,6 +60,9 @@ const entries: GuideLibraryEntry[] = Array.from({ length: 20 }, (_, index) => ({
     stale: false,
   },
 }));
+const removedGuides = new Set<string>(
+  JSON.parse(localStorage.getItem("grip-browser:removed-guides") ?? "[]"),
+);
 const guides = new Map(
   entries.map((entry, guideIndex) => [
     entry.guideId,
@@ -92,6 +95,7 @@ const guides = new Map(
         },
   ]),
 );
+for (const guideId of removedGuides) guides.delete(guideId);
 const findGuide = (guideId: string) => {
   const result = guides.get(guideId);
   if (!result) throw new Error("本地没有该指南");
@@ -102,7 +106,7 @@ const backendGate = async (path: string, method = "GET") => {
   if (!response.ok) throw new Error(await response.text());
 };
 const cache = new ReaderSessionCache({
-  getCachedGuide: async (guideId) => findGuide(guideId),
+  getCachedGuide: async (guideId) => guides.get(guideId) ?? null,
   getGuide: async ({ guideId }) => {
     await backendGate(`guide/${guideId}`);
     return findGuide(guideId);
@@ -154,7 +158,25 @@ const imageHydrator = new ReaderImageHydrator(async (url) => {
 });
 const imageCacheControl = new ReaderImageCacheControl();
 const performance = new ReaderPerformanceTracker();
-const loadGuideLibrary = async () => entries;
+const loadGuideLibrary = async () =>
+  entries.map((entry) => ({
+    ...entry,
+    cache: guides.has(entry.guideId) ? entry.cache : null,
+  }));
+const removeOfflineGuide = async (guideId: string) => {
+  try {
+    await backendGate(`remove/${guideId}`, "DELETE");
+    const removed = guides.delete(guideId);
+    removedGuides.add(guideId);
+    localStorage.setItem(
+      "grip-browser:removed-guides",
+      JSON.stringify([...removedGuides]),
+    );
+    return { filesRemoved: removed ? 1 : 0, bytesRemoved: removed ? 100 : 0 };
+  } finally {
+    cache.clear();
+  }
+};
 
 function Fixture() {
   const [route, setRoute] = useState<GuideIdentity>(() => ({
@@ -175,10 +197,7 @@ function Fixture() {
             loadGuideLibrary={loadGuideLibrary}
             onClose={() => setOpen(false)}
             onRepairPositions={async () => ""}
-            onRemoveOffline={async () => ({
-              filesRemoved: 1,
-              bytesRemoved: 100,
-            })}
+            onRemoveOffline={removeOfflineGuide}
             onSwitchGuide={async (target) => {
               const url = new URL(location.href);
               url.searchParams.set("guideId", target.guideId);

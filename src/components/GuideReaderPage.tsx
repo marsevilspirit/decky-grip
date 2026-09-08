@@ -162,6 +162,10 @@ export function GuideReaderPage({
     () =>
       identity ? (downloads?.getSnapshot(identity.guideId) ?? null) : null,
   );
+  const anyDownloadActive = useSyncExternalStore(
+    downloads?.subscribe ?? noDownloadSubscription,
+    () => downloads?.hasActive() ?? false,
+  );
   const downloadProgress = downloadTask?.progress;
   const downloadActive =
     downloadTask?.phase === "downloading" ||
@@ -622,7 +626,11 @@ export function GuideReaderPage({
       return;
     }
     let canceled = false;
-    setGuideLibrary(null);
+    setGuideLibrary((entries) =>
+      entries?.every((entry) => entry.appId === identity.appId)
+        ? entries
+        : null,
+    );
     setGuideSwitcherError(null);
     void loadGuideLibrary(identity.appId)
       .then((entries) => {
@@ -1940,14 +1948,31 @@ export function GuideReaderPage({
           pendingKey={switchPending}
           error={guideSwitcherError}
           removed={offlineRemoved}
-          removeDisabled={downloadActive || refreshPending}
+          removeDisabled={anyDownloadActive || refreshPending}
           onChoose={(entry) => void switchGuide(entry)}
           onReload={() => setGuideSwitcherRevision((revision) => revision + 1)}
           onClose={closeGuideSwitcher}
-          onRemove={async () => {
-            const result = await onRemoveOffline(identity.guideId);
-            setOfflineRemoved(true);
-            return result;
+          onRemove={async (entry) => {
+            if (entry.appId !== identity.appId)
+              throw new Error("指南所属游戏已变化，请重新打开指南列表");
+            if (downloads?.hasActive() || refreshPending)
+              throw new Error("指南正在下载，完成后才能卸载离线内容");
+            try {
+              const result = await onRemoveOffline(entry.guideId);
+              if (entry.guideId === identity.guideId) setOfflineRemoved(true);
+              setGuideLibrary(
+                (entries) =>
+                  entries?.map((saved) =>
+                    saved.guideId === entry.guideId
+                      ? { ...saved, cache: null }
+                      : saved,
+                  ) ?? null,
+              );
+              return result;
+            } finally {
+              // A partial cleanup failure may already have removed the body.
+              setGuideSwitcherRevision((revision) => revision + 1);
+            }
           }}
         />
       )}

@@ -21,7 +21,9 @@ const expectChoiceInsideList = async (choice: Locator) => {
     .poll(() =>
       choice.evaluate((element) => {
         const card = element.getBoundingClientRect();
-        const list = element.parentElement!.getBoundingClientRect();
+        const list = element
+          .closest('[data-grip-guide-list="true"]')!
+          .getBoundingClientRect();
         return (
           card.top >= list.top - 1 &&
           card.bottom <= list.bottom + 1 &&

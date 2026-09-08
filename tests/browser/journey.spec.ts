@@ -218,3 +218,94 @@ test("a failed position write can be retried and survives a cold page reload", a
   await expectReader(page, guideA);
   await expectRestored(page, position);
 });
+
+test("uninstalling B preserves A's reading position and B's bookmark while C remains manageable", async ({
+  page,
+}) => {
+  const guideC = "3414883879";
+  const manage = (guideId: string) =>
+    page.locator(`[data-grip-guide-manage="1113000:${guideId}"]`);
+  const confirmation = page.getByRole("alertdialog");
+  let removals = 0;
+  let release!: () => void;
+  const heldResponse = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(`**/fixture/remove/${guideB}`, async (route) => {
+    expect(route.request().method()).toBe("DELETE");
+    removals++;
+    await heldResponse;
+    await route.fulfill({ status: 204 });
+  });
+  try {
+    await page.goto("/?scenario=journey");
+    await expectReader(page, guideA);
+    await scrollDown(page, 12);
+    const positionA = await rememberPosition(page, guideA);
+    await switchTo(page, guideB);
+    await scrollDown(page, 6);
+    const positionB = await rememberPosition(page, guideB);
+    await switchTo(page, guideA);
+    await expectRestored(page, positionA);
+
+    await page.keyboard.press("F2");
+    await choice(page, guideB).focus();
+    await choice(page, guideB).press("x");
+    await expect(confirmation).toHaveAccessibleName(/^管理指南：第 2 篇/);
+    await expect(
+      confirmation.getByRole("button", { name: "取消" }),
+    ).toBeFocused();
+    await confirmation.getByRole("button", { name: "取消" }).click();
+    await expect(confirmation).toHaveCount(0);
+    await expect(choice(page, guideB)).toBeFocused();
+    expect(removals).toBe(0);
+
+    await manage(guideB).click();
+    await confirmation.getByRole("button", { name: /^确认卸载/ }).click();
+    await expect(confirmation).toHaveAttribute("aria-busy", "true");
+    await expect.poll(() => removals).toBe(1);
+    await expectRestored(page, positionA);
+    release();
+    await expect(confirmation).toHaveCount(0);
+    await expect(choice(page, guideB)).toContainText("离线副本已卸载");
+    await expect(manage(guideC)).toHaveAttribute("aria-disabled", "false");
+    expect((await savedPosition(page, guideB))?.anchorText).toBe(
+      positionB.anchorText,
+    );
+    expect((await savedPosition(page, guideB))?.scrollTop).toBe(
+      positionB.scrollTop,
+    );
+    await page.keyboard.press("Escape");
+    await expectReader(page, guideA);
+    await expectRestored(page, positionA);
+
+    // A cold page recreates the cache and library from the fixture's persisted backend state.
+    await page.reload();
+    await expectReader(page, guideA);
+    await expectRestored(page, positionA);
+    await page.keyboard.press("F2");
+    await expect(choice(page, guideB)).toContainText("未下载离线副本");
+    await manage(guideB).click();
+    await expect(confirmation).toContainText("没有可卸载的离线副本");
+    await expect(
+      confirmation.getByRole("button", { name: "确认卸载" }),
+    ).toHaveAttribute("aria-disabled", "true");
+    await confirmation.getByRole("button", { name: "取消" }).click();
+    await manage(guideC).click();
+    await expect(confirmation).toHaveAccessibleName(/^管理指南：第 3 篇/);
+    await expect(
+      confirmation.getByRole("button", { name: "确认卸载" }),
+    ).toHaveAttribute("aria-disabled", "false");
+    await confirmation.getByRole("button", { name: "取消" }).click();
+    await expect(manage(guideC)).toBeFocused();
+    expect(removals).toBe(1);
+    expect((await savedPosition(page, guideB))?.anchorText).toBe(
+      positionB.anchorText,
+    );
+    await page.keyboard.press("Escape");
+    await expectReader(page, guideA);
+    await expectRestored(page, positionA);
+  } finally {
+    release();
+  }
+});

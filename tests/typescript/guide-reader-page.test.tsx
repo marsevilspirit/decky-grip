@@ -1892,33 +1892,148 @@ describe("GuideReaderPage position lifecycle", () => {
     });
     await act(async () => pressKey(scroller, "Options"));
     await flushFrame();
-    await act(async () => buttonNamed("删除当前指南离线副本").click());
+    const manage = () =>
+      container!.querySelector<HTMLElement>(
+        `[data-grip-guide-manage="${identity.appId}:${identity.guideId}"]`,
+      )!;
+    await act(async () => manage().click());
     const confirm = container!.querySelector('[role="alertdialog"]')!;
     expect(confirm.textContent).toContain(guide.title);
     expect(remove).not.toHaveBeenCalled();
     await act(async () => buttonNamed("取消").click());
     expect(remove).not.toHaveBeenCalled();
-    await act(async () => buttonNamed("删除当前指南离线副本").click());
+    await act(async () => manage().click());
     await act(async () => {
-      buttonNamed("确认删除").click();
+      buttonNamed("确认卸载").click();
     });
-    expect(buttonNamed("正在删除…").getAttribute("aria-disabled")).toBe("true");
+    expect(buttonNamed("正在卸载…").getAttribute("aria-disabled")).toBe("true");
     expect(remove).toHaveBeenCalledExactlyOnceWith(identity.guideId);
     await act(async () => {
       finish();
     });
-    expect(container!.textContent).toContain("离线副本已删除");
-    expect(
-      buttonNamed("删除当前指南离线副本").getAttribute("aria-disabled"),
-    ).toBe("true");
+    expect(container!.textContent).toContain("已卸载");
+    await act(async () => manage().click());
+    expect(buttonNamed("确认卸载").getAttribute("aria-disabled")).toBe("true");
     expect(container!.querySelector('[aria-label="指南正文"]')).toBe(scroller);
+    await act(async () => buttonNamed("取消").click());
     await act(async () => pressKey(scroller, "Escape"));
     await act(async () => buttonNamed("更新").click());
     await act(async () => pressKey(scroller, "Options"));
-    expect(
-      buttonNamed("删除当前指南离线副本").getAttribute("aria-disabled"),
-    ).toBe("false");
+    await act(async () => manage().click());
+    expect(buttonNamed("确认卸载").getAttribute("aria-disabled")).toBe("false");
   });
+
+  it.each([false, true])(
+    "refreshes another guide's uninstall without interrupting reading or downloads (partial cleanup failure: %s)",
+    async (partialFailure) => {
+      const guide = guideFixture();
+      const other: GuideLibraryEntry = {
+        ...identity,
+        guideId: "3414883888",
+        updatedAt: 1,
+        cache: {
+          title: "另一篇指南",
+          author: "作者 B",
+          fetchedAt: 1,
+          sectionTitle: null,
+          stale: false,
+        },
+      };
+      const cache = new ReaderSessionCache({
+        getCachedGuide: async () => guide,
+        getGuide: async () => guide,
+        getReaderPosition: async () => null,
+        saveReaderPosition: async (
+          _key,
+          scrollTop,
+          sectionId,
+          anchorText,
+          anchorOffset,
+        ) => ({ scrollTop, sectionId, anchorText, anchorOffset, updatedAt: 2 }),
+      });
+      await cache.load(identity);
+      let finishDownload!: () => void;
+      const downloads = new GuideDownloadTasks(
+        async () =>
+          new Promise<void>((resolve) => {
+            finishDownload = resolve;
+          }),
+      );
+      let library = [other];
+      const loadLibrary = vi.fn(async () => library);
+      let failNextRemoval = partialFailure;
+      const remove = vi.fn(async () => {
+        library = [{ ...other, cache: null }];
+        if (failNextRemoval) {
+          failNextRemoval = false;
+          throw new Error("图片清理失败");
+        }
+        return { filesRemoved: 1, bytesRemoved: 100 };
+      });
+      const onSwitchGuide = vi.fn();
+      const scroller = await mount(cache, async () => null, 5000, {
+        downloads,
+        loadGuideLibrary: loadLibrary,
+        onRemoveOffline: remove,
+        onSwitchGuide,
+      });
+      await act(async () => {
+        scroller.scrollTop = 600;
+        scroller.dispatchEvent(new Event("scroll"));
+        pressKey(scroller, "Options");
+      });
+      await flushFrame();
+      const choice = (guideId: string) =>
+        container!.querySelector<HTMLElement>(
+          `[data-grip-guide-choice="${identity.appId}:${guideId}"]`,
+        )!;
+      await act(async () => pressKey(choice(other.guideId), "Secondary"));
+      expect(
+        container!.querySelector('[role="alertdialog"]')?.textContent,
+      ).toContain(other.cache!.title);
+      let work!: Promise<void>;
+      await act(async () => {
+        work = downloads.start({ ...identity, guideId: "3414883899" });
+      });
+      expect(buttonNamed("确认卸载").getAttribute("aria-disabled")).toBe(
+        "true",
+      );
+      await act(async () => buttonNamed("确认卸载").click());
+      expect(remove).not.toHaveBeenCalled();
+      await act(async () => {
+        finishDownload();
+        await work;
+      });
+      expect(buttonNamed("确认卸载").getAttribute("aria-disabled")).toBe(
+        "false",
+      );
+      await act(async () => buttonNamed("确认卸载").click());
+      expect(remove).toHaveBeenCalledExactlyOnceWith(other.guideId);
+      expect(onSwitchGuide).not.toHaveBeenCalled();
+      expect(loadLibrary).toHaveBeenCalledTimes(2);
+      if (partialFailure) {
+        expect(
+          container!.querySelector('[role="alertdialog"]')?.textContent,
+        ).toContain("图片清理失败");
+        expect(buttonNamed("确认卸载").getAttribute("aria-disabled")).toBe(
+          "false",
+        );
+        await act(async () => buttonNamed("确认卸载").click());
+        expect(remove.mock.calls).toEqual([[other.guideId], [other.guideId]]);
+        expect(loadLibrary).toHaveBeenCalledTimes(3);
+      }
+      expect(choice(other.guideId).textContent).toContain("已卸载");
+      expect(choice(identity.guideId).textContent).not.toContain("已卸载");
+      expect(container!.querySelector('[aria-label="指南正文"]')).toBe(
+        scroller,
+      );
+      expect(scroller.scrollTop).toBe(600);
+      await act(async () => pressKey(choice(identity.guideId), "Secondary"));
+      expect(buttonNamed("确认卸载").getAttribute("aria-disabled")).toBe(
+        "false",
+      );
+    },
+  );
 
   it("retries a failed image with A or its own button without rebuilding the article or other images", async () => {
     const failedUrl = "https://images.steamusercontent.com/failed.png";
