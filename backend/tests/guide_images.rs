@@ -478,9 +478,15 @@ fn python_compatible_disk_cache_survives_an_offline_process() {
         limits(1024, 1024, 1024),
     )
     .unwrap();
+    let mut cached_response = downloaded;
+    cached_response["fromCache"] = json!(true);
     assert_eq!(
-        offline.get(IMAGE_URL, false).unwrap().unwrap()["fromCache"],
-        true
+        offline.get(IMAGE_URL, false).unwrap().unwrap(),
+        cached_response
+    );
+    assert_eq!(
+        offline.get(IMAGE_URL, false).unwrap().unwrap(),
+        cached_response
     );
     assert!(
         offline

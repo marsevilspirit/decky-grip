@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { GuideLibraryEntry } from "../../src/backend";
 import { GuideReaderPage } from "../../src/components/GuideReaderPage";
@@ -5,9 +6,12 @@ import { ReaderImageCacheControl } from "../../src/reader/image-cache-control";
 import { ReaderImageHydrator } from "../../src/reader/image-hydrator";
 import { ReaderPerformanceTracker } from "../../src/reader/performance";
 import { ReaderSessionCache } from "../../src/reader/session-cache";
-import type { DownloadedGuide } from "../../src/reader/types";
+import type { DownloadedGuide, ReaderPosition } from "../../src/reader/types";
+import type { GuideIdentity } from "../../src/steam/guide-key";
+import { ReaderRoute } from "./decky-ui";
 
 const identity = { appId: "1113000", guideId: "3414883877" };
+const scenario = new URLSearchParams(location.search).get("scenario");
 const longToken = "WideTableCellWithoutAnyBreak".repeat(8);
 const tableImage =
   '<img alt="表格中的离线图片" data-grip-image-url="https://images.steamusercontent.com/ugc/fixture/table.png">';
@@ -56,23 +60,76 @@ const entries: GuideLibraryEntry[] = Array.from({ length: 20 }, (_, index) => ({
     stale: false,
   },
 }));
+const guides = new Map(
+  entries.map((entry, guideIndex) => [
+    entry.guideId,
+    guideIndex === 0 && scenario !== "journey" && scenario !== "scroll"
+      ? guide
+      : {
+          ...guide,
+          guideId: entry.guideId,
+          title: entry.cache!.title,
+          sourceUrl: `https://steamcommunity.com/sharedfiles/filedetails/?id=${entry.guideId}`,
+          sections: Array.from(
+            { length: scenario === "scroll" ? 20 : 18 },
+            (_, chapter) => ({
+              id: String(chapter + 1),
+              title: `指南 ${guideIndex + 1} · 第 ${chapter + 1} 章`,
+              html:
+                scenario === "scroll"
+                  ? Array.from(
+                      { length: 30 },
+                      (_, image) =>
+                        `<p>第 ${chapter + 1} 章，图片 ${image + 1}</p><img alt="图片-${chapter + 1}-${image + 1}" width="96" height="96" data-grip-image-url="https://images.steamusercontent.com/ugc/fixture/table.png">`,
+                    ).join("")
+                  : Array.from(
+                      { length: 8 },
+                      (_, paragraph) =>
+                        `<p>指南 ${guideIndex + 1}，章节 ${chapter + 1}，段落 ${paragraph + 1}。这是独立的本地正文，用真实文字锚点验证切换、关闭和重新打开后仍然停在原来的阅读位置。</p>`,
+                    ).join(""),
+            }),
+          ),
+        },
+  ]),
+);
+const findGuide = (guideId: string) => {
+  const result = guides.get(guideId);
+  if (!result) throw new Error("本地没有该指南");
+  return result;
+};
+const backendGate = async (path: string, method = "GET") => {
+  const response = await fetch(`/fixture/${path}`, { method });
+  if (!response.ok) throw new Error(await response.text());
+};
 const cache = new ReaderSessionCache({
-  getCachedGuide: async () => guide,
-  getGuide: async () => guide,
-  getReaderPosition: async () => null,
+  getCachedGuide: async (guideId) => findGuide(guideId),
+  getGuide: async ({ guideId }) => {
+    await backendGate(`guide/${guideId}`);
+    return findGuide(guideId);
+  },
+  getReaderPosition: async (key) =>
+    JSON.parse(localStorage.getItem(`grip-browser:position:${key}`) ?? "null"),
   saveReaderPosition: async (
-    _key,
+    key,
     scrollTop,
     sectionId,
     anchorText,
     anchorOffset,
-  ) => ({
-    scrollTop,
-    sectionId,
-    anchorText,
-    anchorOffset,
-    updatedAt: Date.now(),
-  }),
+  ) => {
+    await backendGate(`position/${key}`, "PUT");
+    const position: ReaderPosition = {
+      scrollTop,
+      sectionId,
+      anchorText,
+      anchorOffset,
+      updatedAt: Date.now(),
+    };
+    localStorage.setItem(
+      `grip-browser:position:${key}`,
+      JSON.stringify(position),
+    );
+    return position;
+  },
 });
 const imageHydrator = new ReaderImageHydrator(async (url) => {
   // Tests gate only this backend response; the production Blob path and browser PNG decode stay real.
@@ -95,17 +152,52 @@ const imageHydrator = new ReaderImageHydrator(async (url) => {
     fromCache: true,
   };
 });
-await cache.load(identity);
-createRoot(document.getElementById("root")!).render(
-  <GuideReaderPage
-    cache={cache}
-    imageHydrator={imageHydrator}
-    imageCacheControl={new ReaderImageCacheControl()}
-    loadGuideLibrary={async () => entries}
-    onClose={() => undefined}
-    onRepairPositions={async () => ""}
-    onRemoveOffline={async () => ({ filesRemoved: 1, bytesRemoved: 100 })}
-    onSwitchGuide={async () => undefined}
-    performance={new ReaderPerformanceTracker()}
-  />,
-);
+const imageCacheControl = new ReaderImageCacheControl();
+const performance = new ReaderPerformanceTracker();
+const loadGuideLibrary = async () => entries;
+
+function Fixture() {
+  const [route, setRoute] = useState<GuideIdentity>(() => ({
+    ...identity,
+    guideId:
+      new URLSearchParams(location.search).get("guideId") ?? identity.guideId,
+  }));
+  const [open, setOpen] = useState(true);
+  return (
+    <ReaderRoute.Provider value={route}>
+      <div data-fixture-route={route.guideId}>
+        {open ? (
+          <GuideReaderPage
+            key={`${route.appId}:${route.guideId}`}
+            cache={cache}
+            imageHydrator={imageHydrator}
+            imageCacheControl={imageCacheControl}
+            loadGuideLibrary={loadGuideLibrary}
+            onClose={() => setOpen(false)}
+            onRepairPositions={async () => ""}
+            onRemoveOffline={async () => ({
+              filesRemoved: 1,
+              bytesRemoved: 100,
+            })}
+            onSwitchGuide={async (target) => {
+              const url = new URL(location.href);
+              url.searchParams.set("guideId", target.guideId);
+              history.replaceState(null, "", url);
+              setRoute(target);
+            }}
+            performance={performance}
+          />
+        ) : (
+          <main aria-label="本地游戏占位页" style={{ padding: 48 }}>
+            <h1>阅读器已关闭</h1>
+            <button autoFocus onClick={() => setOpen(true)}>
+              继续阅读
+            </button>
+          </main>
+        )}
+      </div>
+    </ReaderRoute.Provider>
+  );
+}
+
+createRoot(document.getElementById("root")!).render(<Fixture />);

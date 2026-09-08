@@ -1,6 +1,8 @@
 import {
   createElement,
+  createContext,
   forwardRef,
+  useContext,
   type ChangeEventHandler,
   type FocusEvent,
   type KeyboardEvent,
@@ -14,6 +16,8 @@ type Props = Record<string, unknown> & { children?: ReactNode };
 const element = (tag: "button" | "div") =>
   forwardRef<HTMLElement, Props>((props, ref) => {
     const dom = { ...props };
+    if (props.onOKActionDescription)
+      dom["data-ok-action"] = props.onOKActionDescription;
     for (const name of Object.keys(dom)) {
       if (
         name.startsWith("onGamepad") ||
@@ -67,6 +71,7 @@ const element = (tag: "button" | "div") =>
         return;
       // F2/F3 stand in for Decky Y/X; they are not physical-controller acceptance evidence.
       const mapping: Record<string, [string, number]> = {
+        Enter: ["onOKButton", GamepadButton.OK],
         F2: ["onOptionsButton", GamepadButton.OPTIONS],
         F3: ["onSecondaryButton", GamepadButton.SECONDARY],
         Escape: ["onCancel", GamepadButton.CANCEL],
@@ -91,7 +96,8 @@ const element = (tag: "button" | "div") =>
 export const Button = element("button");
 export const Focusable = element("div");
 export const Spinner = () => <span role="status">正在处理…</span>;
-export const useParams = () => ({ appId: "1113000", guideId: "3414883877" });
+export const ReaderRoute = createContext({ appId: "", guideId: "" });
+export const useParams = () => useContext(ReaderRoute);
 export const TextField = ({ label, onChange, value, focusOnMount }: Props) => (
   <input
     aria-label={label as string}

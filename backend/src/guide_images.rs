@@ -101,7 +101,6 @@ impl Default for ImageLimits {
     }
 }
 
-#[derive(Clone)]
 struct ImageData {
     mime_type: String,
     body: Vec<u8>,
@@ -118,7 +117,7 @@ struct ValidatedImage {
 
 #[derive(Default)]
 struct MemoryState {
-    entries: HashMap<String, ImageData>,
+    entries: HashMap<String, Arc<ImageData>>,
     order: VecDeque<String>,
     bytes: usize,
     generation: u64,
@@ -126,8 +125,8 @@ struct MemoryState {
 }
 
 impl MemoryState {
-    fn get(&mut self, url: &str) -> Option<ImageData> {
-        let value = self.entries.get(url)?.clone();
+    fn get(&mut self, url: &str) -> Option<Arc<ImageData>> {
+        let value = Arc::clone(self.entries.get(url)?);
         self.touch(url);
         Some(value)
     }
@@ -139,7 +138,7 @@ impl MemoryState {
         self.order.push_back(url.to_owned());
     }
 
-    fn store(&mut self, url: &str, value: ImageData, limit: usize) {
+    fn store(&mut self, url: &str, value: Arc<ImageData>, limit: usize) {
         if let Some(old) = self.entries.remove(url) {
             self.bytes = self.bytes.saturating_sub(old.body.len());
             if let Some(index) = self.order.iter().position(|candidate| candidate == url) {
@@ -324,10 +323,10 @@ impl GuideImageCache {
         );
     }
 
-    fn validate(&self, mime: &str, body: Vec<u8>) -> Result<ImageData, ImageError> {
+    fn validate(&self, mime: &str, body: Vec<u8>) -> Result<Arc<ImageData>, ImageError> {
         #[cfg(test)]
         self.validation_decodes.fetch_add(1, Ordering::Relaxed);
-        validate_image(mime, body, self.limits.max_image_bytes)
+        validate_image(mime, body, self.limits.max_image_bytes).map(Arc::new)
     }
 
     pub fn set_disk_limit(&self, bytes: u64) -> Result<Value, ImageError> {
@@ -485,7 +484,7 @@ impl GuideImageCache {
                 ));
             }
         }
-        self.store_memory_if_current(url, value.clone(), generation);
+        self.store_memory_if_current(url, Arc::clone(&value), generation);
         Ok(Some(if offline {
             json!(true)
         } else {
@@ -545,7 +544,7 @@ impl GuideImageCache {
         })
     }
 
-    fn store_memory_if_current(&self, url: &str, value: ImageData, generation: u64) {
+    fn store_memory_if_current(&self, url: &str, value: Arc<ImageData>, generation: u64) {
         let mut state = lock(&self.state);
         if state.generation == generation && !state.clearing {
             state.store(url, value, self.limits.max_memory_bytes);
@@ -568,7 +567,7 @@ impl GuideImageCache {
             .collect()
     }
 
-    fn read_disk(&self, url: &str, offline_only: bool) -> Option<ImageData> {
+    fn read_disk(&self, url: &str, offline_only: bool) -> Option<Arc<ImageData>> {
         let _disk = lock(&self.disk_lock);
         if !safe_directory(&self.cache_directory) {
             return None;
@@ -584,8 +583,8 @@ impl GuideImageCache {
         None
     }
 
-    fn read_candidate_locked(&self, path: &Path, mime_type: &str) -> Option<ImageData> {
-        let result = (|| -> io::Result<ImageData> {
+    fn read_candidate_locked(&self, path: &Path, mime_type: &str) -> Option<Arc<ImageData>> {
+        let result = (|| -> io::Result<Arc<ImageData>> {
             let (body, read_signature) =
                 read_bounded_regular_file(path, self.limits.max_image_bytes as u64, None)
                     .map_err(|_| io::Error::other("invalid cached image file"))?;
@@ -593,12 +592,12 @@ impl GuideImageCache {
             let known = lock(&self.validated).get(path).copied();
             let value = if let Some(known) = known.filter(|value| value.signature == read_signature)
             {
-                ImageData {
+                Arc::new(ImageData {
                     mime_type: mime_type.to_owned(),
                     body,
                     width: known.width,
                     height: known.height,
-                }
+                })
             } else {
                 self.validate(mime_type, body)
                     .map_err(|_| io::Error::other("invalid cached image content"))?
@@ -1416,6 +1415,55 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod offline_tests {
     use super::*;
+
+    #[test]
+    fn memory_hits_share_the_original_payload_and_clear_drops_only_cache_ownership() {
+        let directory = crate::test_support::TestDirectory::new("unused");
+        let body = include!("../tests/fixtures/static_png.rs").to_vec();
+        let payload_address = body.as_ptr() as usize;
+        let bytes = body.len();
+        let base64 = base64::engine::general_purpose::STANDARD.encode(&body);
+        let body = Mutex::new(Some(body));
+        let cache = GuideImageCache::with_fetcher(
+            directory.0.join("images"),
+            move |_, _, _| Ok(("image/png".into(), lock(&body).take().expect("fetch once"))),
+            ImageLimits {
+                max_disk_bytes: 0,
+                max_memory_bytes: bytes,
+                ..ImageLimits::default()
+            },
+        )
+        .unwrap();
+        let url = "https://images.steamusercontent.com/test.png";
+        let mut expected = json!({
+            "base64": base64,
+            "fromCache": false,
+            "height": 1,
+            "mimeType": "image/png",
+            "width": 1,
+        });
+        assert_eq!(cache.get(url, true).unwrap().unwrap(), expected);
+        let first = lock(&cache.state).get(url).unwrap();
+        assert_eq!(first.body.as_ptr() as usize, payload_address);
+        expected["fromCache"] = json!(true);
+        assert_eq!(cache.get(url, false).unwrap().unwrap(), expected);
+        let second = lock(&cache.state).get(url).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(cache.stats()["memoryBytes"], bytes);
+        assert_eq!(Arc::strong_count(&first), 3);
+
+        let generation = lock(&cache.state).generation;
+        let retained = Arc::downgrade(&first);
+        cache.clear();
+        assert_eq!(Arc::strong_count(&first), 2);
+        assert_eq!(response(&first, true), expected);
+        cache.store_memory_if_current(url, Arc::clone(&first), generation);
+        assert_eq!(cache.stats()["memoryBytes"], 0);
+        assert!(cache.get(url, false).unwrap().is_none());
+        drop(first);
+        drop(second);
+        assert!(retained.upgrade().is_none());
+    }
 
     #[test]
     fn status_memo_skips_unchanged_bytes_and_revalidates_replaced_or_unsafe_files() {

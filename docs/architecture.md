@@ -179,10 +179,14 @@ static PNG/JPEG/GIF/WebP content with bounded encoded bytes and decoded
 dimensions can enter the bounded Rust cache. The image decoder validates actual
 pixels before a download or changed disk file counts as complete; unchanged
 validated signatures reuse the result. Animation checks inspect format structure,
-not arbitrary bytes inside metadata or compressed content. The frontend observes
+not arbitrary bytes inside metadata or compressed content. Rust memory-cache
+access shares an immutable `Arc<ImageData>` payload; Base64 encoding for RPC
+responses remains. The frontend observes
 all images within the bounded guide, selects at most 512 active hydration
 candidates, deduplicates URLs, stages at most 48 distinct requests, and pins
-actually visible blobs. Nearby preloads remain evictable under the existing
+actually visible blobs. Scroll bursts reuse one animation-frame pass and the
+near-viewport image set for geometry, pinning and visible-image actions, rather
+than rescanning all image nodes. Nearby preloads remain evictable under the existing
 decoded-residency LRU. If visible images themselves exceed that budget, a capacity
 control lets the user prioritize one without growing the budget. Clearing the
 image cache synchronously acquires a
@@ -216,6 +220,11 @@ The reader's Y switcher is a cache-only Rust query over the 20 newest
 `reader_positions.json` entries. It joins only validated title, author, section,
 and staleness metadata from the existing guide cache; it never downloads in the
 background, and removing one cached body leaves its reader position intact.
+Its summary LRU has a separate 1 MiB serialized-payload budget outside the 32 MiB
+body LRU and retains no HTML. Safe file-signature checks reuse unchanged summaries;
+changed files are fully revalidated, and staleness is computed at query time.
+Publication, removal and clearing invalidate summaries; an in-flight pre-clear
+validation cannot repopulate them afterward.
 
 For a first-time handoff, the controller uses its native pixel bookmark only to
 probe the still-mounted native Steam DOM and capture the corresponding visible

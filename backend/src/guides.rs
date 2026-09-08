@@ -27,6 +27,7 @@ pub const MAX_IMPORT_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_CACHE_BYTES: u64 = 20 * 1024 * 1024;
 pub const MAX_DISK_CACHE_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_MEMORY_CACHE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_SUMMARY_CACHE_BYTES: usize = 1024 * 1024;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 pub const CACHE_MAX_AGE_MS: u64 = 6 * 60 * 60 * 1_000;
 
@@ -199,11 +200,21 @@ pub struct GuideReader {
     limits: GuideLimits,
     guide_locks: KeyLockPool,
     memo: Mutex<MemoState>,
+    summaries: Mutex<MemoState>,
     disk_lock: Mutex<()>,
     generation: Mutex<u64>,
     prepared: Mutex<HashMap<String, PreparedGuide>>,
     #[cfg(test)]
     fail_publish_sync: std::sync::atomic::AtomicBool,
+    #[cfg(test)]
+    validation_count: AtomicU64,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum CacheRead {
+    Body,
+    UnretainedBody,
+    Summary,
 }
 
 struct PreparedGuide {
@@ -243,11 +254,14 @@ impl GuideReader {
             limits,
             guide_locks: KeyLockPool::default(),
             memo: Mutex::new(MemoState::default()),
+            summaries: Mutex::new(MemoState::default()),
             disk_lock: Mutex::new(()),
             generation: Mutex::new(0),
             prepared: Mutex::new(HashMap::new()),
             #[cfg(test)]
             fail_publish_sync: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            validation_count: AtomicU64::new(0),
         };
         {
             let _disk = lock(&reader.disk_lock);
@@ -574,14 +588,11 @@ impl GuideReader {
         section_id: Option<&str>,
     ) -> Result<Option<Value>, GuideError> {
         validate_guide_id(guide_id)?;
-        let Some(document) = self.read_cache_without_memoizing(guide_id)? else {
+        let Some(document) = self.read_cache_with_memo(guide_id, CacheRead::Summary)? else {
             return Ok(None);
         };
-        let section_title = section_id.and_then(|section_id| {
-            document["sections"].as_array()?.iter().find_map(|section| {
-                (section["id"].as_str() == Some(section_id)).then(|| section["title"].clone())
-            })
-        });
+        let section_title =
+            section_id.and_then(|section_id| document["sectionTitles"].get(section_id).cloned());
         Ok(Some(json!({
             "author": document["author"],
             "fetchedAt": document["fetchedAt"],
@@ -628,6 +639,7 @@ impl GuideReader {
             }
         }
         lock(&self.memo).clear();
+        lock(&self.summaries).clear();
         Ok(json!({
             "bytesRemoved": bytes_removed,
             "filesRemoved": files_removed,
@@ -661,6 +673,7 @@ impl GuideReader {
                     fs::remove_file(path)
                         .map_err(|_| GuideError::cache("cached guide could not be removed"))?;
                     lock(&self.memo).remove(guide_id);
+                    lock(&self.summaries).remove(guide_id);
                     sync_directory(&self.cache_directory).map_err(|_| {
                         GuideError::cache(
                             "cached guide was removed but its directory could not be synced",
@@ -671,6 +684,7 @@ impl GuideReader {
                     (0, 0)
                 };
                 lock(&self.memo).remove(guide_id);
+                lock(&self.summaries).remove(guide_id);
                 prepared.remove(guide_id);
                 // Preserve offline images until the body deletion is durable.
                 let removed_images = images
@@ -780,83 +794,132 @@ impl GuideReader {
     }
 
     fn read_cache(&self, guide_id: &str) -> Result<Option<Value>, GuideError> {
-        self.read_cache_with_memo(guide_id, true)
+        self.read_cache_with_memo(guide_id, CacheRead::Body)
     }
 
     fn read_cache_without_memoizing(&self, guide_id: &str) -> Result<Option<Value>, GuideError> {
-        self.read_cache_with_memo(guide_id, false)
+        self.read_cache_with_memo(guide_id, CacheRead::UnretainedBody)
     }
 
     fn read_cache_with_memo(
         &self,
         guide_id: &str,
-        memoize: bool,
+        mode: CacheRead,
     ) -> Result<Option<Value>, GuideError> {
+        let (memo, limit) = if mode == CacheRead::Summary {
+            (&self.summaries, MAX_SUMMARY_CACHE_BYTES)
+        } else {
+            (&self.memo, self.limits.max_memory_bytes)
+        };
+        let memoize = mode != CacheRead::UnretainedBody;
+        let promote_body = mode == CacheRead::Body;
+        // Check clear's generation without holding the disk lock during HTML validation.
+        let summary_generation = (mode == CacheRead::Summary).then(|| {
+            let _disk = lock(&self.disk_lock);
+            *lock(&self.generation)
+        });
         let path = self.cache_path(guide_id);
         for attempt in 0..2 {
-            let known = lock(&self.memo).signature(guide_id);
+            let known = lock(memo).signature(guide_id).or_else(|| {
+                (mode == CacheRead::Summary)
+                    .then(|| lock(&self.memo).signature(guide_id))
+                    .flatten()
+            });
             let (payload, signature) =
                 match read_bounded_regular_file(&path, MAX_CACHE_BYTES, known) {
                     Ok(value) => value,
                     Err(ReadError::Missing) => {
-                        lock(&self.memo).remove(guide_id);
+                        lock(memo).remove(guide_id);
                         return Ok(None);
                     }
                     Err(ReadError::TooLarge) => {
-                        lock(&self.memo).remove(guide_id);
+                        lock(memo).remove(guide_id);
                         return Err(GuideError::cache("cached guide exceeds the size limit"));
                     }
                     Err(ReadError::Changed) => {
-                        lock(&self.memo).remove(guide_id);
+                        lock(memo).remove(guide_id);
                         if attempt == 0 {
                             continue;
                         }
                         return Err(GuideError::cache("cached guide changed while being read"));
                     }
                     Err(ReadError::Unsafe) => {
-                        lock(&self.memo).remove(guide_id);
+                        lock(memo).remove(guide_id);
                         return Err(GuideError::cache("cached guide could not be read safely"));
                     }
                 };
-            if payload.is_none() {
-                let expected = known.expect("matching signature requires a memo entry");
-                let touched = if memoize {
-                    self.touch_cache_file(&path, signature).unwrap_or(signature)
+            let document = match &payload {
+                None => {
+                    let expected = known.expect("matching signature requires a memo entry");
+                    let touched = if promote_body {
+                        self.touch_cache_file(guide_id, &path, signature)
+                            .unwrap_or(signature)
+                    } else {
+                        signature
+                    };
+                    if let Some(document) =
+                        lock(memo).clone_if_signature(guide_id, expected, touched, memoize)
+                    {
+                        return Ok(Some(document));
+                    }
+                    // A body already validated for this signature can seed the small summary.
+                    let body = (mode == CacheRead::Summary)
+                        .then(|| {
+                            lock(&self.memo).clone_if_signature(guide_id, expected, expected, false)
+                        })
+                        .flatten();
+                    match body {
+                        Some(document) => document,
+                        None if attempt == 0 => continue,
+                        None => {
+                            return Err(GuideError::cache("cached guide changed while being read"));
+                        }
+                    }
+                }
+                Some(payload) => {
+                    let parsed: Value = serde_json::from_slice(payload).map_err(|_| {
+                        lock(memo).remove(guide_id);
+                        GuideError::cache("cached guide could not be read")
+                    })?;
+                    match self.validate_cached_document(guide_id, &parsed) {
+                        Ok(document) => document,
+                        Err(error) => {
+                            lock(memo).remove(guide_id);
+                            return Err(error);
+                        }
+                    }
+                }
+            };
+            let (document, bytes) = if mode == CacheRead::Summary {
+                let document = summary_document(&document);
+                let bytes = serde_json::to_vec(&document)
+                    .expect("validated summary")
+                    .len();
+                (document, bytes)
+            } else {
+                (document, payload.as_ref().unwrap().len())
+            };
+            if memoize {
+                let touched = if promote_body {
+                    self.touch_cache_file(guide_id, &path, signature)
+                        .unwrap_or(signature)
                 } else {
                     signature
                 };
-                if let Some(document) =
-                    lock(&self.memo).clone_if_signature(guide_id, expected, touched, memoize)
+                let _disk = summary_generation.map(|_| lock(&self.disk_lock));
+                if summary_generation
+                    .is_some_and(|generation| generation != *lock(&self.generation))
                 {
                     return Ok(Some(document));
                 }
-                if attempt == 0 {
-                    continue;
-                }
-                return Err(GuideError::cache("cached guide changed while being read"));
-            }
-            let parsed: Value =
-                serde_json::from_slice(payload.as_ref().unwrap()).map_err(|_| {
-                    lock(&self.memo).remove(guide_id);
-                    GuideError::cache("cached guide could not be read")
-                })?;
-            let document = match self.validate_cached_document(guide_id, &parsed) {
-                Ok(document) => document,
-                Err(error) => {
-                    lock(&self.memo).remove(guide_id);
-                    return Err(error);
-                }
-            };
-            if memoize {
-                let touched = self.touch_cache_file(&path, signature).unwrap_or(signature);
-                lock(&self.memo).store(
+                lock(memo).store(
                     guide_id,
                     MemoEntry {
                         signature: touched,
                         document: document.clone(),
-                        bytes: payload.as_ref().unwrap().len(),
+                        bytes,
                     },
-                    self.limits.max_memory_bytes,
+                    limit,
                 );
             }
             return Ok(Some(document));
@@ -865,6 +928,8 @@ impl GuideReader {
     }
 
     fn validate_cached_document(&self, guide_id: &str, value: &Value) -> Result<Value, GuideError> {
+        #[cfg(test)]
+        self.validation_count.fetch_add(1, Ordering::Relaxed);
         let legacy = value["schemaVersion"].as_u64() == Some(1);
         let mut fields = vec![
             "schemaVersion",
@@ -1011,7 +1076,12 @@ impl GuideReader {
         self.cache_directory.join(format!("{guide_id}.json"))
     }
 
-    fn touch_cache_file(&self, path: &Path, expected: FileSignature) -> Option<FileSignature> {
+    fn touch_cache_file(
+        &self,
+        guide_id: &str,
+        path: &Path,
+        expected: FileSignature,
+    ) -> Option<FileSignature> {
         let _disk = lock(&self.disk_lock);
         let file = OpenOptions::new()
             .read(true)
@@ -1026,8 +1096,17 @@ impl GuideReader {
         file.set_times(FileTimes::new().set_accessed(now).set_modified(now))
             .ok()?;
         let touched = file.metadata().ok()?;
-        (touched.is_file() && touched.dev() == metadata.dev() && touched.ino() == metadata.ino())
-            .then(|| signature(&touched))
+        if !touched.is_file() || touched.dev() != metadata.dev() || touched.ino() != metadata.ino()
+        {
+            return None;
+        }
+        let updated = signature(&touched);
+        if let Some(summary) = lock(&self.summaries).entries.get_mut(guide_id) {
+            if summary.signature == expected {
+                summary.signature = updated;
+            }
+        }
+        Some(updated)
     }
 
     fn write_cache(&self, document: &Value, expected_generation: u64) -> Result<(), GuideError> {
@@ -1086,6 +1165,7 @@ impl GuideReader {
         };
         if matches!(replaced, Err(AtomicReplaceError::Durability)) && document["offline"] == true {
             lock(&self.memo).remove(document["guideId"].as_str().unwrap());
+            lock(&self.summaries).remove(document["guideId"].as_str().unwrap());
             let restored = if let Some(backup) = &backup {
                 fs::rename(backup, &cache_path)
             } else {
@@ -1135,6 +1215,7 @@ impl GuideReader {
                 lock(&self.memo).remove(document["guideId"].as_str().unwrap());
             }
         }
+        lock(&self.summaries).remove(document["guideId"].as_str().unwrap());
         self.prune_to_quota_locked(document["guideId"].as_str());
         Ok(())
     }
@@ -1200,6 +1281,7 @@ impl GuideReader {
             if fs::remove_file(&entry.path).is_ok() {
                 total = total.saturating_sub(entry.size);
                 lock(&self.memo).remove(&entry.guide_id);
+                lock(&self.summaries).remove(&entry.guide_id);
             }
         }
         let _ = sync_directory(&self.cache_directory);
@@ -1262,6 +1344,26 @@ fn fetched_at(document: &Value) -> u64 {
     document["fetchedAt"]
         .as_u64()
         .expect("cached documents have a valid timestamp")
+}
+
+fn summary_document(document: &Value) -> Value {
+    let titles: Map<String, Value> = document["sections"]
+        .as_array()
+        .expect("validated guide sections")
+        .iter()
+        .map(|section| {
+            (
+                section["id"].as_str().unwrap().to_owned(),
+                section["title"].clone(),
+            )
+        })
+        .collect();
+    json!({
+        "author": document["author"],
+        "fetchedAt": document["fetchedAt"],
+        "sectionTitles": titles,
+        "title": document["title"],
+    })
 }
 
 fn is_stale(now: u64, fetched_at_ms: u64) -> bool {
@@ -1426,6 +1528,14 @@ mod tests {
     use super::*;
     use crate::test_support::TestDirectory;
 
+    fn summary_fixture(id: &str) -> Value {
+        json!({
+            "author": "author", "fetchedAt": 1, "guideId": id, "schemaVersion": 1,
+            "sections": [{"html": "<p>body</p>", "id": "2", "title": "section"}],
+            "sourceUrl": guide_source_url(id), "title": "title",
+        })
+    }
+
     #[test]
     fn steam_url_policy_matches_the_python_redirect_handler() {
         for safe in [
@@ -1498,25 +1608,211 @@ mod tests {
         let cache_directory = directory.path();
         fs::create_dir(&cache_directory).unwrap();
         let path = cache_directory.join("1.json");
-        let mut document = json!({
-            "author": "author",
-            "fetchedAt": 1,
-            "guideId": "1",
-            "schemaVersion": 1,
-            "sections": [{"html": "<p>body</p>", "id": "2", "title": "section"}],
-            "sourceUrl": "https://steamcommunity.com/sharedfiles/filedetails/?id=1&l=schinese",
-            "title": "title",
-        });
+        let mut document = summary_fixture("1");
         fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
-        let reader = GuideReader::with_fetcher(cache_directory, |_, _, _| unreachable!(), || 1);
+        let now = Arc::new(AtomicU64::new(1));
+        let clock = Arc::clone(&now);
+        let reader = GuideReader::with_fetcher(
+            cache_directory,
+            |_, _, _| unreachable!(),
+            move || clock.load(Ordering::Relaxed),
+        );
 
-        assert!(reader.cached_summary("1", Some("2")).unwrap().is_some());
+        for _ in 0..20 {
+            assert_eq!(
+                reader.cached_summary("1", Some("2")).unwrap().unwrap()["sectionTitle"],
+                "section"
+            );
+        }
+        assert_eq!(reader.validation_count.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            reader.cached_summary("1", Some("3")).unwrap().unwrap()["sectionTitle"],
+            Value::Null
+        );
+        assert_eq!(
+            reader.cached_summary("1", None).unwrap().unwrap()["stale"],
+            false
+        );
+        now.store(1 + CACHE_MAX_AGE_MS, Ordering::Relaxed);
+        assert_eq!(
+            reader.cached_summary("1", None).unwrap().unwrap()["stale"],
+            false
+        );
+        now.store(2 + CACHE_MAX_AGE_MS, Ordering::Relaxed);
+        assert_eq!(
+            reader.cached_summary("1", None).unwrap().unwrap()["stale"],
+            true
+        );
+        assert_eq!(reader.validation_count.load(Ordering::Relaxed), 1);
         assert!(lock(&reader.memo).is_empty());
+        assert!(
+            !lock(&reader.summaries).entries["1"]
+                .document
+                .to_string()
+                .contains("html")
+        );
+
+        document["title"] = json!("other"); // Same-length rewrite must invalidate the signature.
+        fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
+        assert_eq!(
+            reader.cached_summary("1", None).unwrap().unwrap()["title"],
+            "other"
+        );
+        assert_eq!(reader.validation_count.load(Ordering::Relaxed), 2);
+
+        let replacement = path.with_extension("replacement");
+        document["title"] = json!("fresh");
+        fs::write(&replacement, serde_json::to_vec(&document).unwrap()).unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(modified))
+            .unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        assert_eq!(
+            reader.cached_summary("1", None).unwrap().unwrap()["title"],
+            "fresh"
+        );
+        assert_eq!(reader.validation_count.load(Ordering::Relaxed), 3);
 
         document["sections"][0]["html"] = json!("<script>unsafe</script>");
-        fs::write(path, serde_json::to_vec(&document).unwrap()).unwrap();
+        fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
         assert!(reader.cached_summary("1", None).is_err());
         assert!(lock(&reader.memo).is_empty());
+        assert!(lock(&reader.summaries).is_empty());
+        fs::write(&path, serde_json::to_vec(&summary_fixture("1")).unwrap()).unwrap();
+        assert!(reader.cached_summary("1", None).unwrap().is_some());
+        fs::write(&path, b"broken json").unwrap();
+        assert!(reader.cached_summary("1", None).is_err());
+        assert!(lock(&reader.summaries).is_empty());
+        fs::write(&path, serde_json::to_vec(&summary_fixture("1")).unwrap()).unwrap();
+        assert!(reader.cached_summary("1", None).unwrap().is_some());
+        fs::remove_file(&path).unwrap();
+        assert!(reader.cached_summary("1", None).unwrap().is_none());
+        assert!(lock(&reader.summaries).is_empty());
+
+        let outside = directory.0.join("outside.json");
+        let bytes = serde_json::to_vec(&summary_fixture("1")).unwrap();
+        fs::write(&outside, &bytes).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        reader.cached_summary("1", None).unwrap();
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        assert!(reader.cached_summary("1", None).is_err());
+        assert!(lock(&reader.summaries).is_empty());
+        assert_eq!(fs::read(outside).unwrap(), bytes);
+    }
+
+    #[test]
+    fn summary_lru_is_byte_bounded_and_never_retains_html() {
+        let directory = TestDirectory::new("guides");
+        fs::create_dir(directory.path()).unwrap();
+        let reader = GuideReader::with_fetcher(directory.path(), |_, _, _| unreachable!(), || 1);
+        let load = |id: usize, sections: usize| {
+            let id = id.to_string();
+            let mut document = summary_fixture(&id);
+            document["sections"] = json!((1..=sections).map(|section| json!({
+                "id": section.to_string(), "title": "x".repeat(MAX_LABEL_CHARS), "html": "<p>body</p>",
+            })).collect::<Vec<_>>());
+            fs::write(
+                reader.cache_path(&id),
+                serde_json::to_vec(&document).unwrap(),
+            )
+            .unwrap();
+            reader.cached_summary(&id, None).unwrap().unwrap();
+        };
+        load(1, 32);
+        let entry_bytes = lock(&reader.summaries).bytes;
+        let capacity = MAX_SUMMARY_CACHE_BYTES / entry_bytes;
+        assert!(capacity > 1);
+        for id in 2..=capacity {
+            load(id, 32);
+        }
+        reader.cached_summary("1", None).unwrap();
+        load(capacity + 1, 32);
+        {
+            let memo = lock(&reader.summaries);
+            assert!(memo.bytes <= MAX_SUMMARY_CACHE_BYTES);
+            assert!(memo.entries.contains_key("1"));
+            assert!(!memo.entries.contains_key("2"));
+        }
+        load(99, MAX_SECTIONS); // An individually oversized summary is served but not retained.
+        assert!(!lock(&reader.summaries).entries.contains_key("99"));
+        assert!(lock(&reader.summaries).bytes <= MAX_SUMMARY_CACHE_BYTES);
+        assert!(lock(&reader.memo).is_empty());
+    }
+
+    #[test]
+    fn summary_reuses_a_validated_body_and_invalidates_after_publication_removal_and_clear() {
+        let directory = TestDirectory::new("guides");
+        let reader = GuideReader::with_fetcher(directory.path(), |_, _, _| unreachable!(), || 1);
+        let images = GuideImageCache::new(directory.0.join("images"));
+        let mut document = summary_fixture("1");
+        reader.write_cache_unlocked(&document).unwrap();
+        reader.cached_summary("1", None).unwrap();
+        assert_eq!(reader.validation_count.load(Ordering::Relaxed), 0);
+        reader.get_cached("1").unwrap(); // Touching the body LRU does not invalidate its summary.
+        reader.cached_summary("1", None).unwrap();
+        assert_eq!(reader.validation_count.load(Ordering::Relaxed), 0);
+        document["title"] = json!("new");
+        reader.write_cache_unlocked(&document).unwrap();
+        assert!(lock(&reader.summaries).is_empty());
+        assert_eq!(
+            reader.cached_summary("1", None).unwrap().unwrap()["title"],
+            "new"
+        );
+        reader.remove_offline_guide("1", &images).unwrap();
+        assert!(lock(&reader.summaries).is_empty());
+        assert!(reader.cached_summary("1", None).unwrap().is_none());
+        reader.write_cache_unlocked(&document).unwrap();
+        reader.cached_summary("1", None).unwrap();
+        reader.clear_guide_cache().unwrap();
+        assert!(lock(&reader.summaries).is_empty());
+        assert!(lock(&reader.memo).is_empty());
+        assert!(reader.cached_summary("1", None).unwrap().is_none());
+    }
+
+    #[test]
+    fn clear_during_summary_validation_does_not_repopulate_the_summary_memo() {
+        use std::sync::mpsc;
+        use std::thread;
+        let directory = TestDirectory::new("guides");
+        fs::create_dir(directory.path()).unwrap();
+        fs::write(
+            directory.path().join("1.json"),
+            serde_json::to_vec(&summary_fixture("1")).unwrap(),
+        )
+        .unwrap();
+        let (started, ready) = mpsc::channel();
+        let (resume, proceed) = mpsc::channel();
+        let proceed = Mutex::new(proceed);
+        let block = std::sync::atomic::AtomicBool::new(true);
+        let reader = Arc::new(GuideReader::with_fetcher(
+            directory.path(),
+            |_, _, _| unreachable!(),
+            move || {
+                if block.swap(false, Ordering::Relaxed) {
+                    started.send(()).unwrap();
+                    proceed
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                }
+                1
+            },
+        ));
+        let reading = Arc::clone(&reader);
+        let worker = thread::spawn(move || reading.cached_summary("1", None));
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        reader.clear_guide_cache().unwrap();
+        resume.send(()).unwrap();
+        assert!(worker.join().unwrap().unwrap().is_some()); // A validated in-flight snapshot may finish.
+        assert!(lock(&reader.summaries).is_empty());
+        assert!(lock(&reader.memo).is_empty());
+        assert!(reader.cached_summary("1", None).unwrap().is_none());
     }
 
     #[test]

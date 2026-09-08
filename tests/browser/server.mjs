@@ -6,6 +6,19 @@ const server = await createViteServer({
   configFile: false,
   root: fileURLToPath(new URL("./", import.meta.url)),
   cacheDir: `${project}node_modules/.vite/grip-browser`,
+  plugins: [
+    {
+      name: "local-fixture-backend",
+      configureServer(server) {
+        // Fault injection stays at the local backend boundary, never in reader/cache logic.
+        server.middlewares.use((request, response, next) => {
+          if (!request.url?.startsWith("/fixture/")) return next();
+          response.writeHead(204);
+          response.end();
+        });
+      },
+    },
+  ],
   resolve: {
     alias: [
       {

@@ -84,9 +84,12 @@ pnpm run test:browser
 
 Or use an already installed Chrome with `PW_CHANNEL=chrome pnpm run test:browser`.
 The 1280×800 suite renders the real reader components, measures visible card and
-table bounds, and checks search positioning after actual image decoding. It uses
-local fixtures and a thin Decky adapter, not mocked layout/observers. This does
-not validate Steam FocusNav, CEF compatibility, or physical controller input.
+table bounds, and checks search positioning after actual image decoding. It also
+covers guide switching, close/reopen/reload, failed-load and save retries, and
+DOM-work counts for a same-frame scroll burst over 600 images. Backend responses
+and saved positions use local fixtures and a thin Decky adapter; layout,
+observers, decoding and reader interactions remain real. This does not validate
+Steam FocusNav, CEF compatibility, physical controller input, or device network/offline behavior.
 CI installs Chromium and runs the same suite; failures retain screenshots and
 traces in `test-results/browser/`. The browser dependency is development-only.
 
@@ -187,7 +190,8 @@ The short final publication step shows **保存中** and cannot be canceled.
 Large guides mount one bounded section first and append bounded batches
 on later frames; each section has its own parser budget, and text anchors are
 indexed incrementally rather than rescanning the whole article on every save or
-restore.
+restore. Scroll bursts share the existing animation-frame pass and reuse the
+near-viewport image set for visibility, image actions and hydration priority.
 
 The panel records only real, versioned physical-L4 opens. Under **高级选项**, it
 reports the route, cache, first-content-frame, and position-restoration timings,
@@ -232,7 +236,10 @@ are automatically pruned against a 256 MiB disk target; explicitly downloaded
 bodies are pinned until manual deletion, even above that target. Schema-v1
 bodies are conservatively protected on upgrade because they did not record
 whether a user explicitly downloaded them. Opening a body promotes it;
-listing guide summaries does not.
+listing guide summaries does not. Summaries have a separate 1 MiB serialized-payload
+LRU budget, outside the 32 MiB body budget, and retain no HTML. Unchanged file
+signatures reuse summaries; changed files undergo full validation again, while
+staleness is always evaluated against the current time.
 
 Downloads and reader updates first stage a candidate body (up to 32 MiB of
 pending bodies in the backend), then save and verify all referenced images.
@@ -250,6 +257,9 @@ Images live under the guide cache's `images/` directory. Each image is limited
 to 8 MiB and a validated 8192-pixel / 16-megapixel canvas, and the Rust memory
 LRU to 24 MiB. The disk quota defaults to 128 MiB and can be set from 64 MiB to
 8 GiB under **高级选项 → 本地缓存**. The quota is persisted in `images/quota.json`.
+Rust memory-cache hits share the same immutable image payload through `Arc`;
+they no longer copy its bytes on retrieval and reinsertion. RPC responses still
+encode Base64, so this is not a zero-copy path across the Python/frontend bridge.
 Lowering it below the space occupied by offline images is rejected without
 deleting those images. Explicit downloads use `offline-`
 prefixed cache files that survive ordinary LRU eviction and process restarts;

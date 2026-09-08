@@ -1764,6 +1764,107 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(fetchImage).toHaveBeenCalledTimes(rendered.imageUrls.length);
   });
 
+  it("coalesces viewport work, selects images in DOM order and saves before a pending frame", async () => {
+    let intersect!: IntersectionObserverCallback;
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        constructor(callback: IntersectionObserverCallback) {
+          intersect = callback;
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    const guide = guideFixture();
+    guide.sections = [
+      {
+        id: "1",
+        title: "图片",
+        html: '<p>正文</p><img alt="第一张" data-grip-image-url="https://a/1"><img alt="第二张" data-grip-image-url="https://a/1">',
+      },
+    ];
+    const save = vi.fn(
+      async (_key, scrollTop, sectionId, anchorText, anchorOffset) => ({
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+        updatedAt: 2,
+      }),
+    );
+    const cache = new ReaderSessionCache({
+      getCachedGuide: async () => guide,
+      getGuide: async () => guide,
+      getReaderPosition: async () => null,
+      saveReaderPosition: save,
+    });
+    await cache.load(identity);
+    const imageHydrator = new ReaderImageHydrator(
+      async () => ({
+        mimeType: "image/png",
+        base64: "AQID",
+        fromCache: true,
+        width: 96,
+        height: 96,
+      }),
+      1,
+      () => "blob:shared",
+      () => {},
+    );
+    const scroller = await mount(cache, async () => null, 3000, {
+      imageHydrator,
+    });
+    const images = [...scroller.querySelectorAll("img")];
+    const measure = images.map((image) =>
+      vi
+        .spyOn(image, "getBoundingClientRect")
+        .mockReturnValue({ top: 100, bottom: 196 } as DOMRect),
+    );
+    await act(async () => {
+      // IntersectionObserver reports arrival order, not necessarily document order.
+      intersect(
+        [...images].reverse().map((target) => ({
+          target,
+          isIntersecting: true,
+        })) as unknown as IntersectionObserverEntry[],
+        {} as IntersectionObserver,
+      );
+    });
+    await flushFrame();
+    await act(async () => scroller.dispatchEvent(new Event("wheel")));
+    await flushFrame();
+    for (const spy of measure) spy.mockClear();
+    const query = vi.spyOn(
+      scroller.querySelector(".grip-reader-content")!,
+      "querySelectorAll",
+    );
+    await act(async () => {
+      for (let count = 0; count < 100; count++)
+        scroller.dispatchEvent(new Event("scroll"));
+    });
+    expect(measure.map((spy) => spy.mock.calls.length)).toEqual([0, 0]);
+    await flushFrame();
+    expect(measure.map((spy) => spy.mock.calls.length)).toEqual([1, 1]);
+    expect(query).not.toHaveBeenCalled();
+    await act(async () => pressKey(scroller, "Enter"));
+    expect(
+      container!
+        .querySelector('[aria-label="图片全屏查看"] img')
+        ?.getAttribute("alt"),
+    ).toBe("第一张");
+    await act(async () => pressKey(document.activeElement!, "Escape"));
+    await flushFrame();
+    await act(async () => {
+      scroller.scrollTop = 456;
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    expect(animationFrames.size).toBeGreaterThan(0);
+    await unmount();
+    expect(animationFrames.size).toBe(0);
+    expect(save.mock.calls[save.mock.calls.length - 1]?.[1]).toBe(456);
+  });
+
   it("requires a named confirmation for single-guide deletion and preserves the active article", async () => {
     const guide = guideFixture();
     const cache = new ReaderSessionCache({
@@ -1878,6 +1979,7 @@ describe("GuideReaderPage position lifecycle", () => {
       scroller.scrollTop = 234;
       scroller.dispatchEvent(new Event("scroll"));
     });
+    await flushFrame();
     expect(scroller.getAttribute("data-ok-action")).toBe("重试图片");
     expect(buttonNamed("图片读取失败，重试此图")).not.toBeNull();
     await act(async () => {
@@ -2469,6 +2571,7 @@ describe("GuideReaderPage position lifecycle", () => {
 
     searchLayoutShift = 300;
     const savesBeforeLayoutShift = savedScrollTops.length;
+    const observersWhileAligning = resizeCallbacks.size;
     notifyResize();
     expect(scroller.scrollTop).toBe(4_252);
     await act(async () => {
@@ -2496,7 +2599,7 @@ describe("GuideReaderPage position lifecycle", () => {
       vi.advanceTimersByTime(1_800);
     });
     expect(selectedRange.current).toBeNull();
-    expect(resizeCallbacks).toHaveLength(3);
+    expect(resizeCallbacks).toHaveLength(observersWhileAligning);
 
     searchLayoutShift = 500;
     notifyResize();
@@ -2515,23 +2618,23 @@ describe("GuideReaderPage position lifecycle", () => {
     await act(async () => {
       vi.advanceTimersByTime(8_200);
     });
-    expect(resizeCallbacks).toHaveLength(2);
+    expect(resizeCallbacks).toHaveLength(observersWhileAligning - 1);
     searchLayoutShift = 900;
     notifyResize();
     expect(scroller.scrollTop).toBe(4_652);
 
     vi.mocked(window.getSelection).mockReturnValue(null);
     await act(async () => results[1]?.click());
-    expect(resizeCallbacks).toHaveLength(3);
+    expect(resizeCallbacks).toHaveLength(observersWhileAligning);
     await act(async () => {
       vi.advanceTimersByTime(10_000);
     });
-    expect(resizeCallbacks).toHaveLength(2);
+    expect(resizeCallbacks).toHaveLength(observersWhileAligning - 1);
 
     await act(async () => results[0]?.click());
-    expect(resizeCallbacks).toHaveLength(3);
+    expect(resizeCallbacks).toHaveLength(observersWhileAligning);
     await act(async () => scroller.dispatchEvent(new Event("wheel")));
-    expect(resizeCallbacks).toHaveLength(2);
+    expect(resizeCallbacks).toHaveLength(observersWhileAligning - 1);
 
     await act(async () => {
       const setValue = Object.getOwnPropertyDescriptor(

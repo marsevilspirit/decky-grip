@@ -260,6 +260,7 @@ export function GuideReaderPage({
   const visibleImagesRef = useRef<Set<HTMLImageElement>>(new Set());
   const pendingObservedImagesRef = useRef<Set<HTMLImageElement>>(new Set());
   const imageViewportChangeRef = useRef<() => void>(() => undefined);
+  const viewportFrameRef = useRef<number | null>(null);
   const loadedRef = useRef(loaded);
   loadedRef.current = loaded;
   const switchRequestRef = useRef<object | null>(null);
@@ -462,6 +463,44 @@ export function GuideReaderPage({
     }
   }, [identity?.appId, identity?.guideId, performance]);
 
+  const updateVisibleImageRetry = useCallback(() => {
+    let retry: HTMLImageElement | null = null;
+    let ready: HTMLImageElement | null = null;
+    for (const image of visibleImagesRef.current) {
+      if (!image.isConnected) continue;
+      const precedes = (other: HTMLImageElement | null) =>
+        !other ||
+        Boolean(
+          image.compareDocumentPosition(other) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+        );
+      const state = image.dataset.gripImageState;
+      if ((state === "unavailable" || state === "capacity") && precedes(retry))
+        retry = image;
+      if (state === "ready" && precedes(ready)) ready = image;
+    }
+    setVisibleRetryImage(retry);
+    setVisiblePreviewImage(ready);
+  }, []);
+
+  const updateActiveSection = useCallback((viewportTop: number) => {
+    // GuideDocument owns these direct section children; no full-tree query per scroll.
+    const sections = contentRef.current?.children;
+    if (!sections) return;
+    let low = 0;
+    let high = sections.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (sections[middle].getBoundingClientRect().top <= viewportTop + 1)
+        low = middle + 1;
+      else high = middle;
+    }
+    setActiveSectionId(
+      (sections[Math.max(0, low - 1)] as HTMLElement | undefined)?.dataset
+        .guideSectionId ?? null,
+    );
+  }, []);
+
   const hydrateNearImages = useCallback(() => {
     const scroller = scrollerRef.current;
     if (!contentRef.current || !scroller) return;
@@ -508,33 +547,38 @@ export function GuideReaderPage({
     if (!imageCachePausedRef.current) {
       imageHydrator.hydrateImages(candidates);
     }
-  }, [imageHydrator]);
+    updateActiveSection(viewport.top);
+    updateVisibleImageRetry();
+  }, [imageHydrator, updateActiveSection, updateVisibleImageRetry]);
+
+  const scheduleViewport = useCallback(() => {
+    if (viewportFrameRef.current !== null) return;
+    viewportFrameRef.current = requestAnimationFrame(() => {
+      viewportFrameRef.current = null;
+      hydrateNearImages();
+      imageViewportChangeRef.current();
+    });
+  }, [hydrateNearImages]);
 
   useEffect(() => {
+    const cancelViewport = () => {
+      if (viewportFrameRef.current !== null)
+        cancelAnimationFrame(viewportFrameRef.current);
+      viewportFrameRef.current = null;
+    };
     const scroller = scrollerRef.current;
     const content = contentRef.current;
-    if (!scroller || !content) return;
-    let frame: number | null = null;
-    const schedule = () => {
-      if (frame !== null) return;
-      frame = requestAnimationFrame(() => {
-        frame = null;
-        hydrateNearImages();
-        imageViewportChangeRef.current();
-      });
-    };
-    const resize = new ResizeObserver(schedule);
+    if (!scroller || !content) return cancelViewport;
+    const resize = new ResizeObserver(scheduleViewport);
     resize.observe(scroller);
     resize.observe(content);
-    scroller.addEventListener("scroll", schedule);
-    content.addEventListener("load", schedule, true);
+    content.addEventListener("load", scheduleViewport, true);
     return () => {
-      scroller.removeEventListener("scroll", schedule);
-      content.removeEventListener("load", schedule, true);
+      content.removeEventListener("load", scheduleViewport, true);
       resize.disconnect();
-      if (frame !== null) cancelAnimationFrame(frame);
+      cancelViewport();
     };
-  }, [hydrateNearImages, loaded?.guide]);
+  }, [scheduleViewport, loaded?.guide]);
 
   useEffect(() => {
     const synchronize = () => {
@@ -543,7 +587,7 @@ export function GuideReaderPage({
       if (paused) {
         imageHydrator.clear();
       } else {
-        requestAnimationFrame(hydrateNearImages);
+        scheduleViewport();
       }
     };
     const unsubscribe = imageCacheControl.subscribe(synchronize);
@@ -553,7 +597,7 @@ export function GuideReaderPage({
       unsubscribe();
       imageObserverRef.current?.disconnect();
     };
-  }, [hydrateNearImages, imageCacheControl, imageHydrator]);
+  }, [scheduleViewport, imageCacheControl, imageHydrator]);
 
   useEffect(() => {
     imageCacheControl.resume();
@@ -800,61 +844,9 @@ export function GuideReaderPage({
     }
   }, [loaded?.guide, renderedSectionCount]);
 
-  const updateVisibleImageRetry = useCallback(() => {
-    const scroller = scrollerRef.current;
-    const content = contentRef.current;
-    if (!scroller || !content) return;
-    const viewport = scroller.getBoundingClientRect();
-    const image = [
-      ...content.querySelectorAll<HTMLImageElement>(RETRY_IMAGE_SELECTOR),
-    ].find((image) => {
-      const rect = image.getBoundingClientRect();
-      return rect.bottom > viewport.top && rect.top < viewport.bottom;
-    });
-    setVisibleRetryImage(image ?? null);
-    const ready = [
-      ...content.querySelectorAll<HTMLImageElement>(
-        'img[data-grip-image-state="ready"]',
-      ),
-    ].find((image) => {
-      const rect = image.getBoundingClientRect();
-      return rect.bottom > viewport.top && rect.top < viewport.bottom;
-    });
-    setVisiblePreviewImage(ready ?? null);
-  }, []);
-
-  const updateActiveSection = useCallback(() => {
-    const scroller = scrollerRef.current;
-    const content = contentRef.current;
-    if (!scroller || !content) return;
-    const sections = content.querySelectorAll<HTMLElement>(
-      "[data-guide-section-id]",
-    );
-    const top = scroller.getBoundingClientRect().top + 1;
-    let low = 0;
-    let high = sections.length;
-    while (low < high) {
-      const middle = (low + high) >>> 1;
-      if (sections[middle].getBoundingClientRect().top <= top) low = middle + 1;
-      else high = middle;
-    }
-    setActiveSectionId(
-      sections[Math.max(0, low - 1)]?.dataset.guideSectionId ?? null,
-    );
-    updateVisibleImageRetry();
-  }, [updateVisibleImageRetry]);
-
   useLayoutEffect(() => {
-    updateActiveSection();
-  }, [loaded?.guide, renderedSectionCount, updateActiveSection]);
-
-  useEffect(() => {
-    const content = contentRef.current;
-    if (!content) return;
-    const observer = new ResizeObserver(updateActiveSection);
-    observer.observe(content);
-    return () => observer.disconnect();
-  }, [loaded?.guide, updateActiveSection]);
+    scheduleViewport();
+  }, [loaded?.guide, renderedSectionCount, scheduleViewport]);
 
   const showTocTitle = (sectionId: string) => {
     setFocusedTocSection(sectionId);
@@ -1416,7 +1408,7 @@ export function GuideReaderPage({
   );
 
   const onScroll = () => {
-    updateActiveSection();
+    scheduleViewport();
     if (restoringRef.current || loading) {
       return;
     }
@@ -2498,6 +2490,7 @@ export function GuideReaderPage({
             padding: "8px 14px",
             position: "absolute",
             right: 12,
+            zIndex: 2,
           }}
         >
           阅读位置保存失败：{saveError}
