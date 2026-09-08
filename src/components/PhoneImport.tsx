@@ -1,4 +1,4 @@
-import { Button } from "@decky/ui";
+import { DialogButton as Button } from "@decky/ui";
 import { useEffect, useRef, useState } from "react";
 import qrcode from "qrcode-generator";
 

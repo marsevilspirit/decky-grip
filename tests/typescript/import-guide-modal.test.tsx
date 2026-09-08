@@ -13,6 +13,7 @@ vi.mock("../../src/components/PhoneImport", () => ({
     createElement(
       "button",
       {
+        type: "button",
         onClick: () =>
           onLink("https://www.xiaoheihe.cn/app/bbs/link/4aec6fe8edfc"),
       },
@@ -21,9 +22,26 @@ vi.mock("../../src/components/PhoneImport", () => ({
 }));
 
 vi.mock("@decky/ui", () => ({
-  ModalRoot: ({ children }: { children: ReactNode }) =>
-    createElement("div", null, children),
+  ModalRoot: ({
+    children,
+    closeModal,
+  }: {
+    children: ReactNode;
+    closeModal?: () => void;
+  }) =>
+    createElement(
+      "form",
+      {
+        onSubmit: (event) => {
+          event.preventDefault();
+          closeModal?.();
+        },
+      },
+      children,
+    ),
   Button: (props: Record<string, unknown>) => createElement("button", props),
+  DialogButton: (props: Record<string, unknown>) =>
+    createElement("button", { type: "button", ...props }),
   Spinner: () => createElement("span", null, "busy"),
   TextField: ({ label, ...props }: { label: string }) =>
     createElement("input", { "aria-label": label, ...props }),
@@ -93,11 +111,13 @@ it("confirms the game, shows immediate rendering feedback, and waits for the off
   );
   const downloads = new GuideDownloadTasks(save);
   const onOpen = vi.fn(async () => {});
+  const close = vi.fn();
   await act(async () =>
     root.render(
       <ImportGuideModal
         downloads={downloads}
         onOpen={onOpen}
+        closeModal={close}
         games={[{ data: "1113000", label: "女神异闻录4 黄金版" }]}
       />,
     ),
@@ -112,16 +132,19 @@ it("confirms the game, shows immediate rendering feedback, and waits for the off
   );
   expect(host.textContent).toContain("正在渲染文章");
   expect(host.textContent).not.toContain("正文和图片已完整保存");
+  expect(close).not.toHaveBeenCalled();
   await act(async () => button("接收手机链接").click());
   expect(host.querySelector("input")?.value).toContain("249c72219fed");
   expect(host.textContent).toContain("正在渲染文章");
   await act(async () => finish());
   expect(host.textContent).toContain("正文和图片已完整保存");
+  expect(close).not.toHaveBeenCalled();
   await act(async () => button("立即阅读").click());
   expect(onOpen).toHaveBeenCalledWith({
     appId: "1113000",
     guideId: "heybox-249c72219fed",
   });
+  expect(close).toHaveBeenCalledOnce();
 });
 
 it("never labels a partial-image failure successful and does not invent a game association", async () => {
@@ -298,6 +321,7 @@ it("shows opening feedback immediately, prevents duplicate opens, and allows ret
 
 it("shows cancellation immediately and waits for cleanup before allowing another import", async () => {
   let cleanup!: () => void;
+  const close = vi.fn();
   const downloads = new GuideDownloadTasks(
     (_identity, report, signal) =>
       new Promise<void>((_resolve, reject) => {
@@ -310,6 +334,7 @@ it("shows cancellation immediately and waits for cleanup before allowing another
       <ImportGuideModal
         downloads={downloads}
         onOpen={async () => {}}
+        closeModal={close}
         games={[{ data: "1", label: "游戏" }]}
       />,
     ),
@@ -321,10 +346,12 @@ it("shows cancellation immediately and waits for cleanup before allowing another
   expect(button("保存完整图文").disabled).toBe(true);
   expect(button("取消导入").disabled).toBe(true);
   expect(host.querySelector("progress")).toBeNull();
+  expect(close).not.toHaveBeenCalled();
   await act(async () => cleanup());
   expect(host.textContent).toContain("已取消，原有离线版本保留");
   expect(host.textContent).not.toContain("正文和图片已完整保存");
   expect(button("保存完整图文").disabled).toBe(false);
+  expect(close).not.toHaveBeenCalled();
 });
 
 it("does not close a replacement modal after an unmounted reader-open request finishes", async () => {

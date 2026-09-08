@@ -16,6 +16,8 @@ vi.mock("../../src/backend", () => ({
 }));
 vi.mock("@decky/ui", () => ({
   Button: (props: Record<string, unknown>) => createElement("button", props),
+  DialogButton: (props: Record<string, unknown>) =>
+    createElement("button", { type: "button", ...props }),
   Spinner: () => createElement("span", null, "busy"),
 }));
 const session = {
@@ -39,6 +41,41 @@ async function show(onLink = vi.fn()) {
   );
   await act(async () => host.querySelector("button")!.click());
 }
+
+it("keeps the modal open while starting, displaying, and closing phone reception", async () => {
+  let started!: (value: typeof session) => void;
+  vi.mocked(startPhoneImport).mockReturnValue(
+    new Promise((resolve) => {
+      started = resolve;
+    }),
+  );
+  vi.mocked(getPhoneImport).mockResolvedValue({ state: "waiting" });
+  const close = vi.fn();
+  await act(async () =>
+    root.render(
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          close();
+        }}
+      >
+        <PhoneImport disabled={false} onLink={vi.fn()} />
+      </form>,
+    ),
+  );
+  await act(async () => host.querySelector("button")!.click());
+  expect(host.textContent).toContain("正在开启");
+  expect(close).not.toHaveBeenCalled();
+  await act(async () => started(session));
+  expect(host.querySelector("img")?.src).toMatch(/^data:image\/gif;base64,/);
+  expect(host.textContent).toContain("等待手机发送链接");
+  expect(close).not.toHaveBeenCalled();
+  await act(async () => host.querySelector("button")!.click());
+  expect(stopPhoneImport).toHaveBeenCalledExactlyOnceWith(session.id);
+  expect(host.querySelector("img")).toBeNull();
+  expect(host.textContent).toContain("手机接收已关闭");
+  expect(close).not.toHaveBeenCalled();
+});
 
 it("opens only on demand, renders the local QR, and submits text without claiming download success", async () => {
   vi.useFakeTimers();

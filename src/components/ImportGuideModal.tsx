@@ -1,4 +1,9 @@
-import { Button, DropdownItem, ModalRoot, TextField } from "@decky/ui";
+import {
+  DialogButton as Button,
+  DropdownItem,
+  ModalRoot,
+  TextField,
+} from "@decky/ui";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { parseHeyboxUrl } from "../import/heybox";
