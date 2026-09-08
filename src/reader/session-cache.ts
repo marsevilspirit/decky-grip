@@ -26,7 +26,6 @@ export interface ReaderSessionSnapshot {
 
 export interface ReaderSessionLoadOptions {
   forceRefresh?: boolean;
-  revalidate?: boolean;
 }
 
 export function retainGuideForStaleRefresh(
@@ -135,7 +134,7 @@ export class ReaderSessionCache {
     this.activePreloads.delete(guideKey);
     const forceRefresh = options.forceRefresh ?? false;
     const cached = this.snapshots.get(guideKey);
-    if (cached && !forceRefresh && !options.revalidate) {
+    if (cached && !forceRefresh) {
       this.rememberSnapshot(guideKey, cached);
       const staged = this.stagedHandoffs.get(guideKey);
       if (staged && cached.positionWarning === null) {

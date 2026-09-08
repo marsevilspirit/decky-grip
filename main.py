@@ -72,23 +72,9 @@ class Plugin:
                     operation.exception()
             raise cancellation
 
-    @classmethod
-    async def _run_locked_io(
-        cls, lock: asyncio.Lock, function: Callable[..., Any], *args: Any
-    ) -> Any:
-        async with lock:
-            return await cls._run_executor_io(function, *args, wait_on_cancel=True)
-
     async def _run_io(self, function: Callable[..., Any], *args: Any) -> Any:
-        return await self._run_locked_io(self._io_lock, function, *args)
-
-    async def _run_guide_io(
-        self, function: Callable[..., Any], *args: Any, **kwargs: Any
-    ) -> Any:
-        # GuideReader serializes only operations for the same guide id. Keeping
-        # a second global asyncio lock here would let one slow Steam request
-        # delay an unrelated, already-cached guide.
-        return await self._run_executor_io(function, *args, **kwargs)
+        async with self._io_lock:
+            return await self._run_executor_io(function, *args, wait_on_cancel=True)
 
     async def _run_destructive_guide_io(self, method: str, params: dict) -> Any:
         return await self._run_executor_io(
@@ -106,13 +92,13 @@ class Plugin:
     async def _unload(self) -> None:
         self._stop_hotkey()
         self._stop_preloading()
-        await self._stop_sidecar()
+        await self._run_io(self._sidecar.close)
         decky.logger.info("GRIP backend stopped")
 
     async def _uninstall(self) -> None:
         self._stop_hotkey()
         self._stop_preloading()
-        await self._stop_sidecar()
+        await self._run_io(self._sidecar.close)
 
     def _stop_hotkey(self) -> None:
         self._event_loop = None
@@ -123,9 +109,6 @@ class Plugin:
         self._preload_executor = None
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
-
-    async def _stop_sidecar(self) -> None:
-        await self._run_io(self._sidecar.close)
 
     def _handle_sidecar_event(self, name: str, payload: Any) -> None:
         if (
@@ -181,7 +164,8 @@ class Plugin:
         )
 
     async def get_guide(self, guide_id: str, force_refresh: bool = False):
-        return await self._run_guide_io(
+        # Rust serializes each guide; a global bridge lock would block unrelated reads.
+        return await self._run_executor_io(
             self._sidecar.request,
             "guides.get",
             {"guide_id": guide_id, "force_refresh": force_refresh},
@@ -206,7 +190,7 @@ class Plugin:
             return None
 
     async def prepare_guide(self, guide_id: str, force_refresh: bool):
-        return await self._run_guide_io(
+        return await self._run_executor_io(
             self._sidecar.request,
             "guides.prepare",
             {"guide_id": guide_id, "force_refresh": force_refresh},
@@ -224,7 +208,7 @@ class Plugin:
         )
 
     async def get_guide_library(self, app_id: Optional[str]):
-        return await self._run_guide_io(
+        return await self._run_executor_io(
             self._sidecar.request,
             "guides.list",
             {"app_id": app_id},
@@ -232,7 +216,7 @@ class Plugin:
         )
 
     async def get_guide_download_status(self, guide_id: str):
-        return await self._run_guide_io(
+        return await self._run_executor_io(
             self._sidecar.request,
             "guides.download_status",
             {"guide_id": guide_id},
@@ -240,7 +224,7 @@ class Plugin:
         )
 
     async def get_guide_image(self, url: str, allow_download: bool = True):
-        return await self._run_guide_io(
+        return await self._run_executor_io(
             self._sidecar.request,
             "images.get",
             {"url": url, "allow_download": allow_download},
@@ -249,7 +233,7 @@ class Plugin:
 
     async def download_guide_image(self, url: str):
         try:
-            saved = await self._run_guide_io(
+            saved = await self._run_executor_io(
                 self._sidecar.request,
                 "images.download",
                 {"url": url},
@@ -261,11 +245,6 @@ class Plugin:
 
     async def clear_guide_cache(self):
         return await self._run_destructive_guide_io("guides.clear", {})
-
-    async def remove_guide_cache(self, guide_id: str):
-        return await self._run_destructive_guide_io(
-            "guides.remove", {"guide_id": guide_id}
-        )
 
     async def clear_image_cache(self):
         return await self._run_destructive_guide_io("images.clear", {})
@@ -279,7 +258,7 @@ class Plugin:
         return await self._run_destructive_guide_io("images.set_limit", {"bytes": bytes})
 
     async def get_reader_cache_stats(self):
-        return await self._run_guide_io(self._sidecar.request, "reader_cache.stats", {})
+        return await self._run_executor_io(self._sidecar.request, "reader_cache.stats", {})
 
     def _repair_position_stores(self):
         repairs = {}

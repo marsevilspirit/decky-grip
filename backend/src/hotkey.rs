@@ -269,10 +269,7 @@ impl L4HotkeyMonitor {
     }
 
     pub fn status(&self) -> HotkeyStatus {
-        let device = self
-            .shared
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        let device = crate::lock(&self.shared)
             .device
             .as_ref()
             .map(|path| path.to_string_lossy().into_owned());
@@ -402,10 +399,7 @@ fn disconnect(
 }
 
 fn set_device(shared: &Arc<Mutex<SharedState>>, device: Option<PathBuf>) {
-    shared
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .device = device;
+    crate::lock(shared).device = device;
 }
 
 fn wait_for_stop(stop: &Receiver<()>, timeout: Duration) -> bool {

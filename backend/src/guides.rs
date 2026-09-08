@@ -522,22 +522,10 @@ impl GuideReader {
         }))
     }
 
-    pub fn remove_guide_cache(&self, guide_id: &str) -> Result<Value, GuideError> {
-        self.remove_cached_guide(guide_id, None)
-    }
-
     pub fn remove_offline_guide(
         &self,
         guide_id: &str,
         images: &crate::guide_images::GuideImageCache,
-    ) -> Result<Value, GuideError> {
-        self.remove_cached_guide(guide_id, Some(images))
-    }
-
-    fn remove_cached_guide(
-        &self,
-        guide_id: &str,
-        images: Option<&crate::guide_images::GuideImageCache>,
     ) -> Result<Value, GuideError> {
         validate_guide_id(guide_id)?;
         let guide_lock = self.guide_locks.retain(guide_id);
@@ -557,13 +545,10 @@ impl GuideReader {
                 };
                 let mut prepared = lock(&self.prepared);
                 prepared.remove(guide_id);
-                let mut removed_images = json!({"filesRemoved": 0, "bytesRemoved": 0});
-                if let Some(images) = images {
-                    let urls = self.referenced_image_urls_locked(&prepared, Some(guide_id))?;
-                    removed_images = images
-                        .reclaim_unreferenced(&urls, OrphanImages::All)
-                        .map_err(|error| GuideError::cache(error.message()))?;
-                }
+                let urls = self.referenced_image_urls_locked(&prepared, Some(guide_id))?;
+                let removed_images = images
+                    .reclaim_unreferenced(&urls, OrphanImages::All)
+                    .map_err(|error| GuideError::cache(error.message()))?;
                 let (files_removed, bytes_removed) = if let Some(metadata) = metadata {
                     fs::remove_file(path)
                         .map_err(|_| GuideError::cache("cached guide could not be removed"))?;

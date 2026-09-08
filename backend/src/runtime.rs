@@ -1,6 +1,6 @@
 use super::{
     MAX_REQUEST_BYTES, PositionStore, ReaderPositionStore, StoreError, dispatch, empty_params,
-    params_with_fields, protocol_info, request_fields, valid_id,
+    lock, params_with_fields, protocol_info, request_fields, valid_id,
 };
 use crate::guide_html::localized_image_urls;
 use crate::guide_images::{GuideImageCache, ImageError, ImageErrorKind};
@@ -44,10 +44,7 @@ struct GeneralQueue {
 
 impl GeneralQueue {
     fn send(&self, work: Work) -> Result<(), ()> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = lock(&self.state);
         while state.requests.len() >= QUEUE_CAPACITY && !state.closed {
             state = self
                 .space
@@ -63,10 +60,7 @@ impl GeneralQueue {
     }
 
     fn recv(&self) -> Option<(Work, Option<String>, bool)> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = lock(&self.state);
         loop {
             // ponytail: scan at most 64 jobs; index queues only if this fixed bound grows.
             let runnable = state.requests.iter().position(|work| {
@@ -96,10 +90,7 @@ impl GeneralQueue {
     }
 
     fn complete(&self, guide_id: Option<&str>, image_request: bool) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = lock(&self.state);
         if let Some(guide_id) = guide_id {
             state.active_guides.remove(guide_id);
         }
@@ -108,10 +99,7 @@ impl GeneralQueue {
     }
 
     fn close(&self) {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .closed = true;
+        lock(&self.state).closed = true;
         self.ready.notify_all();
         self.space.notify_all();
     }
@@ -151,7 +139,6 @@ fn guide_request_id(work: &Work) -> Option<&str> {
         method,
         "guides.get"
             | "guides.get_cached"
-            | "guides.remove"
             | "guides.remove_offline"
             | "guides.prepare"
             | "guides.commit"
@@ -250,10 +237,7 @@ fn dispatch_general(
         }
         "hotkey.status" => {
             empty_params(params)?;
-            let status = monitor
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .status();
+            let status = lock(monitor).status();
             Ok(json!({
                 "available": status.available,
                 "button": status.button,
@@ -374,7 +358,7 @@ fn dispatch_general(
             empty_params(params)?;
             guides.clear_guide_cache().map_err(RequestError::Guide)
         }
-        "guides.remove" | "guides.remove_offline" => {
+        "guides.remove_offline" => {
             let object = params_with_fields(params, &["guide_id"])?;
             let guide_id =
                 object
@@ -383,15 +367,9 @@ fn dispatch_general(
                     .ok_or(StoreError::Validation(
                         "guide_id must be a positive decimal string",
                     ))?;
-            if method == "guides.remove_offline" {
-                guides
-                    .remove_offline_guide(guide_id, images)
-                    .map_err(RequestError::Guide)
-            } else {
-                guides
-                    .remove_guide_cache(guide_id)
-                    .map_err(RequestError::Guide)
-            }
+            guides
+                .remove_offline_guide(guide_id, images)
+                .map_err(RequestError::Guide)
         }
         "guides.stats" => {
             empty_params(params)?;
@@ -444,9 +422,7 @@ fn dispatch_general(
 }
 
 fn write_message<W: Write>(writer: &Arc<Mutex<&mut W>>, message: &Value) -> io::Result<()> {
-    let mut writer = writer
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut writer = lock(writer);
     serde_json::to_writer(&mut **writer, message)?;
     writer.write_all(b"\n")?;
     writer.flush()
@@ -628,10 +604,7 @@ pub fn serve_with_hotkey_roots(
     )));
     let guides = Arc::new(GuideReader::new(path.with_file_name("guides")));
     let images = Arc::new(GuideImageCache::new(path.with_file_name("images")));
-    monitor
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .start()?;
+    lock(&monitor).start()?;
 
     thread::scope(|scope| {
         let writer = Arc::new(Mutex::new(&mut output));
@@ -740,10 +713,7 @@ pub fn serve_with_hotkey_roots(
             worker_panicked |= worker.join().is_err();
         }
 
-        monitor
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .stop();
+        lock(&monitor).stop();
         event_stop.store(true, Ordering::Release);
         worker_panicked |= event_thread.join().is_err();
 
@@ -1213,7 +1183,7 @@ mod tests {
                 json!({"id": 3, "method": "guides.get_cached", "params": {
                     "guide_id": GUIDE_ID,
                 }}),
-                json!({"id": 4, "method": "guides.remove", "params": {
+                json!({"id": 4, "method": "guides.remove_offline", "params": {
                     "guide_id": GUIDE_ID,
                 }}),
                 json!({"id": 5, "method": "ping"}),

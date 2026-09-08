@@ -389,13 +389,13 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
         result = await asyncio.gather(task, return_exceptions=True)
         self.assertIsInstance(result[0], asyncio.CancelledError)
 
-    async def test_cancelled_cache_delete_waits_for_the_result(self):
+    async def test_cancelled_offline_delete_waits_for_the_result(self):
         plugin = self.plugin()
         started = threading.Event()
         release = threading.Event()
 
         def request(method, params, *, timeout=None):
-            self.assertEqual(method, "guides.remove")
+            self.assertEqual(method, "guides.remove_offline")
             self.assertEqual(params, {"guide_id": "1"})
             self.assertEqual(timeout, RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS)
             started.set()
@@ -403,7 +403,7 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
             return {"filesRemoved": 1}
 
         self.sidecar.request.side_effect = request
-        task = asyncio.create_task(plugin.remove_guide_cache("1"))
+        task = asyncio.create_task(plugin.remove_offline_guide("1"))
         self.assertTrue(await asyncio.to_thread(started.wait, 1))
         task.cancel()
         await asyncio.sleep(0.02)
@@ -423,7 +423,6 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
             "state": "partial", "completed": 13, "total": 61
         }
         self.sidecar.responses["guides.clear"] = {"filesRemoved": 1}
-        self.sidecar.responses["guides.remove"] = {"filesRemoved": 1}
         self.sidecar.responses["guides.remove_offline"] = {"filesRemoved": 3}
         self.sidecar.responses["images.set_limit"] = {"diskLimitBytes": 268435456}
         self.sidecar.responses["images.clear"] = {"filesRemoved": 2}
@@ -452,7 +451,6 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
             {"url": "https://images.steamusercontent.com/a.png"},
             timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
         )
-        self.assertEqual((await plugin.remove_guide_cache("1"))["filesRemoved"], 1)
         self.assertEqual((await plugin.remove_offline_guide("1"))["filesRemoved"], 3)
         self.assertEqual((await plugin.set_image_cache_limit(268435456))["diskLimitBytes"], 268435456)
         self.assertEqual((await plugin.clear_image_cache())["filesRemoved"], 2)
@@ -467,7 +465,6 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
         )
         for method, params in (
             ("guides.clear", {}),
-            ("guides.remove", {"guide_id": "1"}),
             ("guides.remove_offline", {"guide_id": "1"}),
             ("images.set_limit", {"bytes": 268435456}),
             ("images.clear", {}),

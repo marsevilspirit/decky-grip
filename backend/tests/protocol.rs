@@ -534,7 +534,7 @@ fn guide_library_joins_recent_reader_positions_with_cached_metadata() {
     let removed = send_and_read_response(
         &mut input,
         &mut output,
-        &json!({"id": 4, "method": "guides.remove", "params": {"guide_id": "3414883877"}}),
+        &json!({"id": 4, "method": "guides.remove_offline", "params": {"guide_id": "3414883877"}}),
     );
     assert_eq!(removed["result"]["filesRemoved"], 1);
     let after_remove = send_and_read_response(

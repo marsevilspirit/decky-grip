@@ -480,6 +480,7 @@ pub(crate) struct FragmentStats {
     pub(crate) output_bytes: usize,
 }
 
+#[derive(Default)]
 struct FragmentSanitizer {
     parts: Vec<String>,
     stack: Vec<(String, bool)>,
@@ -491,18 +492,6 @@ struct FragmentSanitizer {
 }
 
 impl FragmentSanitizer {
-    fn new() -> Self {
-        Self {
-            parts: Vec::new(),
-            stack: Vec::new(),
-            open_counts: HashMap::new(),
-            drop_depth: 0,
-            node_count: 0,
-            text_chars: 0,
-            output_bytes: 0,
-        }
-    }
-
     fn record_node(&mut self) -> Result<(), GuideHtmlError> {
         self.node_count += 1;
         if self.node_count > MAX_FRAGMENT_NODES {
@@ -691,7 +680,7 @@ impl HtmlSink for FragmentSanitizer {
 pub(crate) fn sanitize_fragment_with_stats(
     fragment: &str,
 ) -> Result<(String, FragmentStats), GuideHtmlError> {
-    HtmlParser::new(FragmentSanitizer::new())
+    HtmlParser::new(FragmentSanitizer::default())
         .parse(fragment)
         .map_err(|error| public_parse_error(error, "guide contains malformed HTML"))?
         .finish()
@@ -923,6 +912,7 @@ struct GuideSection {
     html: String,
 }
 
+#[derive(Default)]
 struct GuidePageParser {
     stack: Vec<String>,
     open_counts: HashMap<String, usize>,
@@ -948,32 +938,6 @@ struct GuidePageParser {
 }
 
 impl GuidePageParser {
-    fn new() -> Self {
-        Self {
-            stack: Vec::new(),
-            open_counts: HashMap::new(),
-            title_depth: None,
-            author_depth: None,
-            section_root_depth: None,
-            section_title_depth: None,
-            section_description_depth: None,
-            title_parts: Vec::new(),
-            author_parts: Vec::new(),
-            title_chars: 0,
-            author_chars: 0,
-            section: None,
-            section_title_parts: Vec::new(),
-            section_title_chars: 0,
-            sanitizer: None,
-            node_count: 0,
-            text_chars: 0,
-            sanitized_html_bytes: 0,
-            title: String::new(),
-            author: String::new(),
-            sections: Vec::new(),
-        }
-    }
-
     fn record_node(&mut self) -> Result<(), GuideHtmlError> {
         self.node_count += 1;
         if self.node_count > MAX_PAGE_NODES {
@@ -1180,7 +1144,7 @@ impl HtmlSink for GuidePageParser {
             } else if self.section_description_depth.is_none() && classes.contains("subSectionDesc")
             {
                 self.section_description_depth = Some(depth);
-                self.sanitizer = Some(FragmentSanitizer::new());
+                self.sanitizer = Some(FragmentSanitizer::default());
             } else if self
                 .section_description_depth
                 .is_some_and(|description_depth| depth > description_depth)
@@ -1275,7 +1239,7 @@ pub fn parse_guide_html(guide_id: &str, source: &str) -> Result<Value, GuideHtml
             "guide_id must be a positive decimal string",
         ));
     }
-    let mut page = HtmlParser::new(GuidePageParser::new())
+    let mut page = HtmlParser::new(GuidePageParser::default())
         .parse(source)
         .map_err(|error| public_parse_error(error, "Steam returned malformed guide HTML"))?;
     page.finish()?;
@@ -1408,8 +1372,8 @@ mod tests {
 
     #[test]
     fn unmatched_end_tags_leave_open_stacks_untouched() {
-        let mut page = GuidePageParser::new();
-        let mut fragment = FragmentSanitizer::new();
+        let mut page = GuidePageParser::default();
+        let mut fragment = FragmentSanitizer::default();
         for _ in 0..64 {
             page.handle_starttag("div", vec![]).unwrap();
             fragment.handle_starttag("div", vec![]).unwrap();

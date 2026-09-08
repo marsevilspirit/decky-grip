@@ -1,6 +1,7 @@
 mod common;
 
 use common::TestDirectory;
+use grip_sidecar::guide_images::GuideImageCache;
 use grip_sidecar::guides::{GuideError, GuideLimits, GuideReader};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -382,7 +383,10 @@ fn offline_updates_publish_only_after_all_images_and_preserve_the_old_version_on
             .is_err()
     );
     assert_eq!(fs::read(&path).unwrap(), committed_bytes);
-    harness.reader.remove_guide_cache(GUIDE_ID).unwrap();
+    harness
+        .reader
+        .remove_offline_guide(GUIDE_ID, &images)
+        .unwrap();
     images.download(new_url).unwrap();
     assert!(
         harness
@@ -562,6 +566,7 @@ fn downloads_then_serves_the_validated_network_inert_cache() {
 #[test]
 fn cache_only_miss_and_special_files_never_download_or_follow_links() {
     let harness = Harness::new();
+    let images = GuideImageCache::new(harness._directory.0.join("images"));
     assert!(harness.reader.get_cached(GUIDE_ID).unwrap().is_none());
     assert_eq!(harness.call_count(), 0);
 
@@ -571,12 +576,22 @@ fn cache_only_miss_and_special_files_never_download_or_follow_links() {
     fs::write(&outside, b"keep").unwrap();
     symlink(&outside, &cache_path).unwrap();
     assert!(harness.reader.get_cached(GUIDE_ID).is_err());
-    assert!(harness.reader.remove_guide_cache(GUIDE_ID).is_err());
+    assert!(
+        harness
+            .reader
+            .remove_offline_guide(GUIDE_ID, &images)
+            .is_err()
+    );
 
     let fifo_path = harness.cache_path(OTHER_GUIDE_ID);
     make_fifo(&fifo_path);
     assert!(harness.reader.get_cached(OTHER_GUIDE_ID).is_err());
-    assert!(harness.reader.remove_guide_cache(OTHER_GUIDE_ID).is_err());
+    assert!(
+        harness
+            .reader
+            .remove_offline_guide(OTHER_GUIDE_ID, &images)
+            .is_err()
+    );
     assert_eq!(harness.call_count(), 0);
 
     let cleared = harness.reader.clear_guide_cache().unwrap();
@@ -608,6 +623,7 @@ fn reads_a_python_v1_cache_without_downloading() {
 #[test]
 fn cached_summary_and_single_remove_reuse_the_validated_cache() {
     let harness = Harness::new();
+    let images = GuideImageCache::new(harness._directory.0.join("images"));
     harness.reader.get(GUIDE_ID, false).unwrap();
     harness.set_body("另一篇指南");
     harness.reader.get(OTHER_GUIDE_ID, false).unwrap();
@@ -629,7 +645,10 @@ fn cached_summary_and_single_remove_reuse_the_validated_cache() {
     );
     assert_eq!(harness.call_count(), 2);
 
-    let removed = harness.reader.remove_guide_cache(GUIDE_ID).unwrap();
+    let removed = harness
+        .reader
+        .remove_offline_guide(GUIDE_ID, &images)
+        .unwrap();
     assert_eq!(removed["filesRemoved"], 1);
     assert!(removed["bytesRemoved"].as_u64().unwrap() > 0);
     assert!(harness.reader.get_cached(GUIDE_ID).unwrap().is_none());
@@ -638,7 +657,10 @@ fn cached_summary_and_single_remove_reuse_the_validated_cache() {
         "另一篇指南"
     );
     assert_eq!(
-        harness.reader.remove_guide_cache(GUIDE_ID).unwrap(),
+        harness
+            .reader
+            .remove_offline_guide(GUIDE_ID, &images)
+            .unwrap(),
         json!({"bytesRemoved": 0, "filesRemoved": 0})
     );
 }
