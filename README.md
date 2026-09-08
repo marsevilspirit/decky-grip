@@ -93,6 +93,45 @@ Steam FocusNav, CEF compatibility, physical controller input, or device network/
 CI installs Chromium and runs the same suite; failures retain screenshots and
 traces in `test-results/browser/`. The browser dependency is development-only.
 
+### Deploying from a Mac or Linux workstation
+
+```bash
+just deploy          # defaults to ssh deck
+just deploy my-deck  # another configured SSH alias
+just package         # build a Deck ZIP locally, without SSH
+```
+
+Install `just`, Docker, `zip`/`unzip`, and the development requirements above;
+deployment also needs Node.js 22+ for its native WebSocket client. Docker must be
+running. Set up key-based `ssh deck`, keep the Deck awake in Gaming Mode, and
+enable CEF debugging in Decky's developer settings. This redeploy command expects
+the existing installation at `/home/deck/homebrew/plugins/decky-grip`.
+
+`just deploy` checks connectivity and Decky first, runs `pnpm run check`, builds
+the current working tree (including uncommitted changes) with the pinned Holo
+Linux x86_64 toolchain, and validates the package. It never ships an old
+`backend/out` binary. Docker layers and the Cargo registry are reused.
+
+The command backs up the existing plugin **and settings**, uploads and verifies
+the ZIP, then opens **Decky's native reinstall confirmation**. Confirm once on
+the Deck. It waits up to three minutes for new GRIP processes, all installed
+file hashes, working RPC/L4 monitoring, preserved guide records, and two stable
+checks. A successful installer response alone is not treated as success.
+
+Packages and receipts are kept under `out/package-*/`. Device rollback archives
+and uploaded ZIPs are kept under
+`/home/deck/.local/share/grip-deployment-backups/deploy-*/`; the command prints
+their exact paths. It does not clear guides or reading positions, restart the
+global Loader, change permissions across `homebrew`, or automatically delete old
+backups. A timeout/disconnect exits with an error and keeps recovery artifacts.
+An installation already confirmed on the Deck may continue after a local
+interruption; check its state before retrying. Physical controller/reading
+acceptance remains separate. The orchestration uses Decky's
+[native local-ZIP installer](https://github.com/SteamDeckHomebrew/decky-loader/blob/v3.2.8/backend/decky_loader/browser.py).
+
+Deployment-script regressions run locally with `pnpm run test:deploy` as part of
+`check`; they never connect to or modify a Steam Deck.
+
 ## Importing public Heybox articles (experimental)
 
 Choose **导入攻略** in GRIP, paste a public Xiaoheihe share link/text, confirm
