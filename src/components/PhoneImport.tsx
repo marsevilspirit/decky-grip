@@ -20,22 +20,33 @@ export function PhoneImport({
   const [session, setSession] = useState<PhoneImportSession | null>(null);
   const [image, setImage] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<"starting" | "stopping" | null>(null);
   const mounted = useRef(true);
   const active = useRef<PhoneImportSession | null>(null);
   const starting = useRef(false);
+  const stopping = useRef<Promise<void> | null>(null);
   const unavailable = useRef(disabled);
   unavailable.current = disabled;
   const receive = useRef(onLink);
   receive.current = onLink;
   const stop = async () => {
+    if (stopping.current) return stopping.current;
     const old = active.current;
     active.current = null;
     if (mounted.current) {
       setSession(null);
       setImage(null);
     }
-    if (old) await stopPhoneImport(old.id);
+    if (!old) return;
+    if (mounted.current) setBusy("stopping");
+    const pending = stopPhoneImport(old.id);
+    stopping.current = pending;
+    try {
+      await pending;
+    } finally {
+      stopping.current = null;
+      if (mounted.current) setBusy(starting.current ? "starting" : null);
+    }
   };
   useEffect(() => {
     mounted.current = true;
@@ -48,6 +59,14 @@ export function PhoneImport({
     if (!session) return;
     let canceled = false;
     let timer: ReturnType<typeof setTimeout>;
+    const expiry = setTimeout(
+      () => {
+        if (canceled || active.current?.id !== session.id) return;
+        setMessage("二维码已失效，请重新开启。");
+        void stop().catch(console.warn);
+      },
+      Math.max(0, session.expiresAt - Date.now()),
+    );
     const poll = async () => {
       try {
         const next = await getPhoneImport(session.id);
@@ -72,15 +91,17 @@ export function PhoneImport({
     return () => {
       canceled = true;
       clearTimeout(timer);
+      clearTimeout(expiry);
     };
   }, [session]);
   useEffect(() => {
     if (disabled) void stop().catch(console.warn);
   }, [disabled]);
   const start = async () => {
-    if (starting.current || disabled) return;
+    if (starting.current || stopping.current || active.current || disabled)
+      return;
     starting.current = true;
-    setBusy(true);
+    setBusy("starting");
     setMessage(null);
     try {
       const next = await startPhoneImport();
@@ -100,21 +121,33 @@ export function PhoneImport({
       await stop().catch(console.warn);
     } finally {
       starting.current = false;
-      if (mounted.current) setBusy(false);
+      if (mounted.current) setBusy(stopping.current ? "stopping" : null);
     }
   };
   return (
     <div style={{ marginBlock: 12 }}>
       <Button
-        disabled={disabled || busy}
+        disabled={disabled || busy !== null}
+        aria-busy={busy !== null}
         onClick={() =>
-          void (session ? stop() : start()).catch((error: unknown) =>
-            setMessage(error instanceof Error ? error.message : String(error)),
-          )
+          void (
+            session
+              ? stop().then(() => {
+                  if (mounted.current) setMessage("手机接收已关闭。");
+                })
+              : start()
+          ).catch((error: unknown) => {
+            if (mounted.current)
+              setMessage(
+                error instanceof Error ? error.message : String(error),
+              );
+          })
         }
       >
         {busy ? (
-          <BusyLabel>正在开启…</BusyLabel>
+          <BusyLabel>
+            {busy === "starting" ? "正在开启…" : "正在关闭…"}
+          </BusyLabel>
         ) : session ? (
           "关闭手机接收"
         ) : (
@@ -126,6 +159,7 @@ export function PhoneImport({
           style={{
             display: "flex",
             alignItems: "center",
+            flexWrap: "wrap",
             gap: 16,
             marginTop: 12,
           }}
@@ -136,10 +170,16 @@ export function PhoneImport({
             style={{ width: 200, height: 200, imageRendering: "pixelated" }}
           />
           <div>
+            <p role="status">等待手机发送链接…</p>
             <p>手机和 Deck 需在同一可信 Wi-Fi，Deck 保持唤醒。</p>
             <p>
-              接收窗口有效 10 分钟，使用局域网
-              HTTP。扫码只传链接；网页渲染和完整下载由 Deck 完成。
+              接收窗口将在{" "}
+              {new Date(session.expiresAt).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              })}{" "}
+              失效，使用局域网 HTTP。扫码只传链接；网页渲染和完整下载由 Deck
+              完成。
             </p>
           </div>
         </div>

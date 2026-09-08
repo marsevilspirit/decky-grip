@@ -70,7 +70,8 @@ export function GripPanel({
     statusStore.getSnapshot,
   );
   const quickAccessVisible = useQuickAccessVisible();
-  const [readerBusy, setReaderBusy] = useState(false);
+  const [opening, setOpening] = useState<"reader" | "import" | null>(null);
+  const readerBusy = opening !== null;
   const [readerError, setReaderError] = useState<string | null>(null);
   const [hotkeyStatus, setHotkeyStatus] = useState<HotkeyStatus | null>(null);
   const [positionBusy, setPositionBusy] = useState<"retry" | "repair" | null>(
@@ -243,14 +244,17 @@ export function GripPanel({
     confirmation.current = modal;
   };
 
-  const runOpen = (): void => {
+  const runOpen = (kind: "reader" | "import"): void => {
+    const action = kind === "import" ? openImport : openReader;
     if (readerBusyRef.current || cacheBusyRef.current || !mounted.current) {
       return;
     }
+    if (!action) return;
     readerBusyRef.current = true;
-    setReaderBusy(true);
+    setOpening(kind);
     setReaderError(null);
-    void openReader()
+    void Promise.resolve()
+      .then(action)
       .catch((error: unknown) => {
         if (mounted.current)
           setReaderError(
@@ -259,7 +263,7 @@ export function GripPanel({
       })
       .finally(() => {
         readerBusyRef.current = false;
-        if (mounted.current) setReaderBusy(false);
+        if (mounted.current) setOpening(null);
       });
   };
 
@@ -295,16 +299,16 @@ export function GripPanel({
         {openImport && (
           <PanelSectionRow>
             <ButtonItem
-              label="导入攻略"
-              layout="below"
-              disabled={cacheBusy}
-              onClick={() =>
-                void openImport().catch((error: unknown) =>
-                  setReaderError(
-                    error instanceof Error ? error.message : String(error),
-                  ),
+              label={
+                opening === "import" ? (
+                  <BusyLabel>正在打开导入窗口…</BusyLabel>
+                ) : (
+                  "导入攻略"
                 )
               }
+              layout="below"
+              disabled={readerBusy || cacheBusy}
+              onClick={() => runOpen("import")}
             >
               从小黑盒分享链接保存完整离线图文
             </ButtonItem>
@@ -314,14 +318,14 @@ export function GripPanel({
           <ButtonItem
             disabled={readerBusy || cacheBusy}
             label={
-              readerBusy ? (
+              opening === "reader" ? (
                 <BusyLabel>正在打开 GRIP 阅读器…</BusyLabel>
               ) : (
                 "继续当前或最近指南"
               )
             }
             layout="below"
-            onClick={runOpen}
+            onClick={() => runOpen("reader")}
           >
             优先继续当前游戏正在查看的指南
           </ButtonItem>

@@ -84,7 +84,7 @@ function errorMessage(error: unknown): string {
 }
 
 function focusWithoutScrolling(element: HTMLElement | null | undefined): void {
-  if (!element) {
+  if (!element || element.closest("[inert], [hidden]")) {
     return;
   }
   try {
@@ -335,7 +335,7 @@ export function GuideReaderPage({
 
   const openGuideSearch = () => {
     const guide = loaded?.guide;
-    if (!guide || loading || refreshPending) {
+    if (!guide || loading) {
       return;
     }
     cancelPendingFocus();
@@ -598,7 +598,7 @@ export function GuideReaderPage({
       pendingGuideSearchJumpRef.current = null;
       stopGuideSearchAlignment();
       clearGuideSearchHighlight();
-      setGuideSearchOpen(false);
+      if (navigationOpen) closeNavigation();
       setGuideSearchQuery("");
       setActiveGuideSearchResultIndex(null);
     }
@@ -1366,7 +1366,8 @@ export function GuideReaderPage({
     for (const event of interactionEvents) {
       scroller.addEventListener(event, onInteraction, true);
     }
-    focusWithoutScrolling(scroller);
+    if (!tocRef.current?.contains(scroller.ownerDocument.activeElement))
+      focusWithoutScrolling(scroller);
 
     return () => {
       stop();
@@ -1754,7 +1755,7 @@ export function GuideReaderPage({
     result: GuideSearchResult,
     index: number,
   ) => {
-    if (loading || refreshPending) {
+    if (loading) {
       return;
     }
     failAndCancelRestore("用户在阅读位置稳定前跳转搜索命中");
@@ -2151,6 +2152,48 @@ export function GuideReaderPage({
             onCancelActionDescription={
               guideSearchOpen ? "返回目录" : "返回正文"
             }
+            onKeyDown={(event) => {
+              if (event.altKey || event.ctrlKey || event.metaKey) return;
+              if (
+                guideSearchOpen &&
+                event.key === "Enter" &&
+                (event.target as HTMLElement).matches("input") &&
+                !event.nativeEvent.isComposing
+              ) {
+                event.preventDefault();
+                event.stopPropagation();
+                if (!event.repeat)
+                  moveGuideSearchResult(event.shiftKey ? -1 : 1);
+              } else if (
+                navigationOpen &&
+                !guideSearchOpen &&
+                event.key === "Tab"
+              ) {
+                const controls = [
+                  ...event.currentTarget.querySelectorAll<HTMLElement>(
+                    "button, [role='button'], [tabindex]",
+                  ),
+                ].filter(
+                  (node) =>
+                    !node.closest("[hidden], [inert]") &&
+                    !node.matches(":disabled, [tabindex='-1']"),
+                );
+                const first = controls[0];
+                const last = controls[controls.length - 1];
+                const edge = event.shiftKey ? first : last;
+                const target = event.shiftKey ? last : first;
+                if (event.target === edge && target) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  target.focus({ preventScroll: true });
+                  target.scrollIntoView({
+                    block: "nearest",
+                    inline: "nearest",
+                    behavior: "auto",
+                  });
+                }
+              }
+            }}
             onGamepadDirection={(event) => {
               const target = event.target as HTMLElement;
               if (
@@ -2251,7 +2294,6 @@ export function GuideReaderPage({
                         aria-label="上一个搜索命中"
                         disabled={
                           loading ||
-                          refreshPending ||
                           activeGuideSearchResultIndex === null ||
                           activeGuideSearchResultIndex === 0
                         }
@@ -2272,7 +2314,6 @@ export function GuideReaderPage({
                         aria-label="下一个搜索命中"
                         disabled={
                           loading ||
-                          refreshPending ||
                           activeGuideSearchResultIndex ===
                             guideSearchResults.length - 1
                         }
@@ -2299,7 +2340,7 @@ export function GuideReaderPage({
                             : undefined
                         }
                         aria-label={`跳转到搜索结果 ${index + 1}：${result.title}`}
-                        disabled={loading || refreshPending}
+                        disabled={loading}
                         key={`${result.kind}:${result.sectionId}:${result.occurrence}`}
                         onClick={() => jumpToGuideSearchResult(result, index)}
                         style={{
@@ -2336,7 +2377,7 @@ export function GuideReaderPage({
             ) : (
               <>
                 <Button
-                  disabled={loading || refreshPending}
+                  disabled={loading}
                   className="grip-reader-control"
                   aria-label="搜索指南正文"
                   onClick={openGuideSearch}
@@ -2416,7 +2457,7 @@ export function GuideReaderPage({
                       }
                       aria-label={`跳转到章节：${section.title}`}
                       data-grip-toc-section={section.id}
-                      disabled={loading || refreshPending}
+                      disabled={loading}
                       key={section.id}
                       onClick={() => jumpToSection(section.id)}
                       onGamepadFocus={() => showTocTitle(section.id)}

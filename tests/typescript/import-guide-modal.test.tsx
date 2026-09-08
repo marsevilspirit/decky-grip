@@ -3,7 +3,10 @@ import { act, createElement, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vitest";
 import { ImportGuideModal } from "../../src/components/ImportGuideModal";
-import { GuideDownloadTasks } from "../../src/reader/download";
+import {
+  GuideDownloadTasks,
+  type GuideImageDownloadProgress,
+} from "../../src/reader/download";
 
 vi.mock("../../src/components/PhoneImport", () => ({
   PhoneImport: ({ onLink }: { onLink: (text: string) => void }) =>
@@ -210,3 +213,174 @@ it.each(["text", "phone", "game"])(
     expect(button("保存完整图文").disabled).toBe(false);
   },
 );
+
+it("shows image progress without implying that zero images or publication means completion", async () => {
+  let report!: (progress: GuideImageDownloadProgress) => void;
+  let finish!: () => void;
+  const downloads = new GuideDownloadTasks(
+    (_identity, onProgress) =>
+      new Promise<void>((resolve) => {
+        report = onProgress;
+        finish = resolve;
+      }),
+  );
+  await act(async () =>
+    root.render(
+      <ImportGuideModal
+        downloads={downloads}
+        onOpen={async () => {}}
+        games={[{ data: "1", label: "游戏" }]}
+      />,
+    ),
+  );
+  await share();
+  await act(async () => button("保存完整图文").click());
+  await act(async () => report({ completed: 0, total: 0 }));
+  expect(host.textContent).toContain("无需下载图片");
+  expect(host.textContent).not.toContain("0/0");
+  expect(host.querySelector("progress")).toBeNull();
+  await act(async () => report({ completed: 2, total: 4 }));
+  expect(host.querySelector("progress")?.value).toBe(2);
+  expect(host.querySelector("progress")?.max).toBe(4);
+  await act(async () => report({ completed: 4, total: 4, publishing: true }));
+  expect(host.textContent).toContain("正在保存完整离线版本");
+  expect(button("取消导入").disabled).toBe(true);
+  expect(host.textContent).not.toContain("正文和图片已完整保存");
+  await act(async () => finish());
+  expect(host.querySelector("progress")).toBeNull();
+  expect(host.textContent).toContain("正文和图片已完整保存");
+});
+
+it("shows opening feedback immediately, prevents duplicate opens, and allows retry after failure", async () => {
+  let reject!: (reason: Error) => void;
+  const onOpen = vi.fn(
+    () =>
+      new Promise<void>((_resolve, fail) => {
+        reject = fail;
+      }),
+  );
+  const close = vi.fn();
+  await act(async () =>
+    root.render(
+      <ImportGuideModal
+        downloads={new GuideDownloadTasks(async () => {})}
+        onOpen={onOpen}
+        closeModal={close}
+        games={[{ data: "1", label: "游戏" }]}
+      />,
+    ),
+  );
+  await share();
+  await act(async () => button("保存完整图文").click());
+  await act(async () => {
+    const read = button("立即阅读");
+    read.click();
+    read.click();
+  });
+  expect(onOpen).toHaveBeenCalledOnce();
+  expect(host.textContent).toContain("正在打开");
+  expect(
+    host.querySelector('button[aria-busy="true"]')?.hasAttribute("disabled"),
+  ).toBe(true);
+  expect(host.querySelector("input")?.disabled).toBe(true);
+  await act(async () => reject(new Error("阅读器暂时不可用")));
+  expect(host.querySelector('[role="alert"]')?.textContent).toBe(
+    "阅读器暂时不可用",
+  );
+  expect(button("立即阅读").disabled).toBe(false);
+  expect(close).not.toHaveBeenCalled();
+  onOpen.mockResolvedValueOnce();
+  await act(async () => button("立即阅读").click());
+  expect(onOpen).toHaveBeenCalledTimes(2);
+  expect(close).toHaveBeenCalledOnce();
+  expect(host.querySelector('[role="alert"]')).toBeNull();
+});
+
+it("shows cancellation immediately and waits for cleanup before allowing another import", async () => {
+  let cleanup!: () => void;
+  const downloads = new GuideDownloadTasks(
+    (_identity, report, signal) =>
+      new Promise<void>((_resolve, reject) => {
+        report({ completed: 1, total: 3 });
+        cleanup = () => reject(signal.reason);
+      }),
+  );
+  await act(async () =>
+    root.render(
+      <ImportGuideModal
+        downloads={downloads}
+        onOpen={async () => {}}
+        games={[{ data: "1", label: "游戏" }]}
+      />,
+    ),
+  );
+  await share();
+  await act(async () => button("保存完整图文").click());
+  await act(async () => button("取消导入").click());
+  expect(host.textContent).toContain("正在取消");
+  expect(button("保存完整图文").disabled).toBe(true);
+  expect(button("取消导入").disabled).toBe(true);
+  expect(host.querySelector("progress")).toBeNull();
+  await act(async () => cleanup());
+  expect(host.textContent).toContain("已取消，原有离线版本保留");
+  expect(host.textContent).not.toContain("正文和图片已完整保存");
+  expect(button("保存完整图文").disabled).toBe(false);
+});
+
+it("does not close a replacement modal after an unmounted reader-open request finishes", async () => {
+  let finish!: () => void;
+  const close = vi.fn();
+  await act(async () =>
+    root.render(
+      <ImportGuideModal
+        downloads={new GuideDownloadTasks(async () => {})}
+        onOpen={() =>
+          new Promise<void>((resolve) => {
+            finish = resolve;
+          })
+        }
+        closeModal={close}
+        games={[{ data: "1", label: "游戏" }]}
+      />,
+    ),
+  );
+  await share();
+  await act(async () => button("保存完整图文").click());
+  await act(async () => button("立即阅读").click());
+  await act(async () => root.unmount());
+  root = createRoot(host);
+  await act(async () => finish());
+  expect(close).not.toHaveBeenCalled();
+});
+
+it("closing the modal leaves an in-progress download running", async () => {
+  let signal!: AbortSignal;
+  let finish!: () => void;
+  const downloads = new GuideDownloadTasks(
+    (_identity, _progress, nextSignal) =>
+      new Promise<void>((resolve) => {
+        signal = nextSignal;
+        finish = resolve;
+      }),
+  );
+  const close = vi.fn();
+  await act(async () =>
+    root.render(
+      <ImportGuideModal
+        downloads={downloads}
+        onOpen={async () => {}}
+        closeModal={close}
+        games={[{ data: "1", label: "游戏" }]}
+      />,
+    ),
+  );
+  await share();
+  await act(async () => button("保存完整图文").click());
+  await act(async () => button("关闭").click());
+  expect(close).toHaveBeenCalledOnce();
+  await act(async () => root.unmount());
+  root = createRoot(host);
+  expect(signal.aborted).toBe(false);
+  await act(async () => finish());
+  expect(downloads.getSnapshot("heybox-249c72219fed")?.phase).toBe("complete");
+});

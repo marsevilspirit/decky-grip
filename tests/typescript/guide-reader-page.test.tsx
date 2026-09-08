@@ -631,8 +631,36 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(
       buttonNamed("更新中…").querySelector('[data-grip-busy="true"]'),
     ).not.toBeNull();
-    expect(buttonNamed("搜索").disabled).toBe(true);
-    expect(buttonNamed("章节 1").disabled).toBe(true);
+    expect(buttonNamed("搜索").disabled).toBe(false);
+    expect(buttonNamed("章节 1").disabled).toBe(false);
+    const oldBody = scroller.querySelector("[data-guide-search-body]");
+    scroller.querySelector<HTMLElement>(
+      '[data-guide-section-id="20"]',
+    )!.getBoundingClientRect = () =>
+      ({ top: 4_000 - scroller.scrollTop }) as DOMRect;
+    await act(async () =>
+      container!
+        .querySelector<HTMLButtonElement>('[data-grip-toc-section="20"]')!
+        .click(),
+    );
+    await flushFrame();
+    expect(scroller.scrollTop).toBe(4_000);
+    await act(async () => buttonNamed("搜索").click());
+    const search = container!.querySelector<HTMLInputElement>("input")!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set?.call(search, "精准命中");
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(buttonNamed("下一个").disabled).toBe(false);
+    await act(async () => buttonNamed("下一个").click());
+    expect(scroller.scrollTop).toBe(3_952);
+    expect(scroller.querySelector("[data-guide-search-body]")).toBe(oldBody);
+    await act(async () => buttonNamed("关闭搜索").click());
+    await act(async () => pressKey(scroller, "Escape"));
+    await flushFrame();
     let work!: Promise<void>;
     await act(async () => {
       work = downloads.start(identity, true);
@@ -1471,6 +1499,25 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(scroller.style.marginRight).toBe(margin);
     expect(scroller.querySelector("[data-guide-search-body]")).toBe(body);
     expect(scroller.scrollTop).toBe(234);
+    const controls = [...toc.querySelectorAll<HTMLButtonElement>("button")];
+    const first = controls[0];
+    const last = controls[controls.length - 1];
+    await act(async () => {
+      last.focus();
+      pressKey(last, "Tab");
+    });
+    expect(document.activeElement).toBe(first);
+    await act(async () =>
+      first.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Tab",
+          shiftKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      ),
+    );
+    expect(document.activeElement).toBe(last);
     await act(async () => pressKey(document.activeElement!, "ArrowLeft"));
     await flushFrame();
     expect(document.activeElement).toBe(scroller);
@@ -2359,6 +2406,35 @@ describe("GuideReaderPage position lifecycle", () => {
     } as unknown as Selection;
     vi.spyOn(window, "getSelection").mockReturnValue(selection);
 
+    await act(async () => {
+      search!.focus();
+      search!.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          isComposing: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(results[0]?.getAttribute("aria-current")).toBeNull();
+    await act(async () => pressKey(search!, "Enter"));
+    expect(results[0]?.getAttribute("aria-current")).toBe("location");
+    await act(async () => pressKey(search!, "Enter"));
+    expect(results[1]?.getAttribute("aria-current")).toBe("location");
+    await act(async () =>
+      search!.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          shiftKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      ),
+    );
+    expect(results[0]?.getAttribute("aria-current")).toBe("location");
+    expect(document.activeElement).toBe(search);
+
     await act(async () => results[0]?.focus());
     await act(async () => results[0]?.click());
 
@@ -2461,11 +2537,23 @@ describe("GuideReaderPage position lifecycle", () => {
     await act(async () => buttonNamed("更新").click());
     await flushMicrotasks();
     const reopenSearch = buttonNamed("搜索");
-    expect(reopenSearch.disabled).toBe(true);
+    expect(reopenSearch.disabled).toBe(false);
     await act(async () => reopenSearch.click());
-    expect(container?.querySelector('[aria-label="指南搜索"]')).toBeNull();
+    expect(container?.querySelector('[aria-label="指南搜索"]')).not.toBeNull();
+    await act(async () =>
+      container!.querySelector<HTMLInputElement>("input")!.focus(),
+    );
 
-    await act(async () => resolveRefresh(guide));
+    await act(async () => resolveRefresh({ ...guide, fetchedAt: 2 }));
     await flushMicrotasks();
+    await flushFrame();
+    expect(container?.querySelector('[aria-label="指南搜索"]')).toBeNull();
+    expect(
+      container
+        ?.querySelector('[aria-label="指南目录"]')
+        ?.getAttribute("data-expanded"),
+    ).toBe("false");
+    expect(document.activeElement).toBe(scroller);
+    expect(document.activeElement?.closest("[inert], [hidden]")).toBeNull();
   });
 });

@@ -1,5 +1,5 @@
 import { Button, DropdownItem, ModalRoot, TextField } from "@decky/ui";
-import { useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 
 import { parseHeyboxUrl } from "../import/heybox";
 import type { GuideDownloadTasks } from "../reader/download";
@@ -27,22 +27,33 @@ export function ImportGuideModal({
   const [appId, setAppId] = useState(games[0]?.data ?? "");
   const [identity, setIdentity] = useState<GuideIdentity | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [opening, setOpening] = useState(false);
+  const mounted = useRef(true);
+  const openingRef = useRef(false);
   const starting = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const task = useSyncExternalStore(downloads.subscribe, () =>
     identity ? downloads.getSnapshot(identity.guideId) : null,
   );
   const busy = task?.phase === "downloading" || task?.phase === "canceling";
+  const locked = busy || opening;
+  const progress = task?.progress;
   const resetFeedback = () => {
     setIdentity(null);
     setError(null);
   };
   const changeLink = (link: string) => {
-    if (starting.current || busy) return;
+    if (starting.current || openingRef.current || busy) return;
     setText(link);
     resetFeedback();
   };
   const start = () => {
-    if (starting.current || busy) return;
+    if (starting.current || openingRef.current || busy) return;
     try {
       const parsed = parseHeyboxUrl(text);
       const next = { appId, guideId: parsed.guideId };
@@ -64,6 +75,22 @@ export function ImportGuideModal({
       setError(cause instanceof Error ? cause.message : String(cause));
     }
   };
+  const open = async () => {
+    if (!identity || openingRef.current) return;
+    openingRef.current = true;
+    setOpening(true);
+    setError(null);
+    try {
+      await onOpen(identity);
+      if (mounted.current) closeModal?.();
+    } catch (cause) {
+      if (mounted.current)
+        setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      openingRef.current = false;
+      if (mounted.current) setOpening(false);
+    }
+  };
   return (
     <ModalRoot closeModal={closeModal} onCancel={closeModal}>
       <div
@@ -81,16 +108,16 @@ export function ImportGuideModal({
         <TextField
           label="分享链接"
           value={text}
-          disabled={busy}
+          disabled={locked}
           onChange={(event) => changeLink(event.target.value)}
         />
-        <PhoneImport disabled={busy} onLink={changeLink} />
+        <PhoneImport disabled={locked} onLink={changeLink} />
         {games.length ? (
           <DropdownItem
             label="保存到游戏"
             selectedOption={appId}
             rgOptions={games}
-            disabled={busy}
+            disabled={locked}
             onChange={(option) => {
               setAppId(String(option.data));
               resetFeedback();
@@ -107,20 +134,32 @@ export function ImportGuideModal({
             <BusyLabel>
               {task.phase === "canceling"
                 ? "正在取消…"
-                : !task.progress
+                : !progress
                   ? "正在渲染文章、收集完整图片…"
-                  : task.progress.publishing
+                  : progress.publishing
                     ? "正在保存完整离线版本…"
-                    : `正在下载图片 ${task.progress.completed}/${task.progress.total}`}
+                    : progress.total === 0
+                      ? "正文已就绪，无需下载图片…"
+                      : `正在下载图片 ${progress.completed}/${progress.total}`}
             </BusyLabel>
           )}
           {task?.phase === "complete" &&
             "正文和图片已完整保存。在游戏内按 Y 即可切换到这篇攻略。"}
           {task?.phase === "canceled" && "已取消，原有离线版本保留。"}
         </div>
+        {task?.phase === "downloading" && progress && progress.total > 0 && (
+          <progress
+            aria-label="图片下载进度"
+            value={progress.completed}
+            max={progress.total}
+            style={{ width: "100%", marginTop: 12, accentColor: "#66c0f4" }}
+          />
+        )}
         {(error || task?.error) && <p role="alert">{error || task?.error}</p>}
-        <div style={{ display: "flex", gap: 12, marginTop: 20 }}>
-          <Button disabled={busy || !appId || !text.trim()} onClick={start}>
+        <div
+          style={{ display: "flex", flexWrap: "wrap", gap: 12, marginTop: 20 }}
+        >
+          <Button disabled={locked || !appId || !text.trim()} onClick={start}>
             {task?.phase === "failed" ? "重试导入" : "保存完整图文"}
           </Button>
           {busy && (
@@ -133,17 +172,11 @@ export function ImportGuideModal({
           )}
           {task?.phase === "complete" && identity && (
             <Button
-              onClick={() => {
-                void onOpen(identity)
-                  .then(() => closeModal?.())
-                  .catch((cause: unknown) =>
-                    setError(
-                      cause instanceof Error ? cause.message : String(cause),
-                    ),
-                  );
-              }}
+              disabled={opening}
+              aria-busy={opening}
+              onClick={() => void open()}
             >
-              立即阅读
+              {opening ? <BusyLabel>正在打开…</BusyLabel> : "立即阅读"}
             </Button>
           )}
           <Button onClick={closeModal}>关闭</Button>

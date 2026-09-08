@@ -291,6 +291,148 @@ describe("full-screen image viewer interaction", () => {
     expect(outerKey).not.toHaveBeenCalled();
   });
 
+  it("uses the same bounded canvas and toolbar navigation for keyboard arrows", () => {
+    render({ image: tall, images: [first, tall] });
+    const outerKey = vi.fn();
+    document.body.addEventListener("keydown", outerKey);
+    expect(key("ArrowDown").defaultPrevented).toBe(true);
+    expect(viewport().scrollTop).toBe(120);
+    key("ArrowUp");
+    expect(viewport().scrollTop).toBe(0);
+    key("ArrowLeft");
+    expect(viewport().scrollLeft).toBe(0);
+    key("+");
+    key("ArrowRight");
+    expect(viewport().scrollLeft).toBe(296);
+    key("0");
+    expect(Number.parseFloat(img().style.height)).toBeCloseTo(568);
+    key("ArrowDown");
+    expect(document.activeElement).toBe(button("适应屏幕"));
+    key("ArrowRight");
+    expect(document.activeElement).toBe(button("返回正文"));
+    key("ArrowRight");
+    expect(document.activeElement).toBe(button("返回正文"));
+    key("ArrowUp");
+    expect(document.activeElement).toBe(viewport());
+    document.body.removeEventListener("keydown", outerKey);
+    expect(outerKey).not.toHaveBeenCalled();
+  });
+
+  it("switches images with PageUp/PageDown, preserves modifier shortcuts and ignores repeats", () => {
+    render({ images: [first, tall] });
+    expect(key("PageUp").defaultPrevented).toBe(true);
+    expect(img().src).toBe(first.src);
+    key("PageDown", { repeat: true });
+    expect(img().src).toBe(first.src);
+    key("PageDown");
+    expect(img().src).toBe(tall.src);
+    expect(img().style.width).toBe("768px");
+    expect(document.activeElement).toBe(viewport());
+    key("PageDown");
+    expect(img().src).toBe(tall.src);
+    key("PageUp");
+    expect(img().src).toBe(first.src);
+    expect(key("+", { ctrlKey: true }).defaultPrevented).toBe(false);
+    expect(img().style.width).toBe("768px");
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("returns focus to the canvas before a focused zoom control becomes disabled", () => {
+    render();
+    button("放大").focus();
+    for (let index = 0; index < 20 && !button("放大").disabled; index++)
+      act(() => button("放大").click());
+    expect(button("放大").disabled).toBe(true);
+    expect(document.activeElement).toBe(viewport());
+    button("缩小").focus();
+    for (let index = 0; index < 40 && !button("缩小").disabled; index++)
+      act(() => button("缩小").click());
+    expect(button("缩小").disabled).toBe(true);
+    expect(document.activeElement).toBe(viewport());
+    key("Tab");
+    expect(document.activeElement).toBe(button("放大"));
+  });
+
+  it("shows drag feedback, tracks only the captured pointer and clamps panning at image edges", () => {
+    render({ image: tall, images: [first, tall] });
+    const capture = vi.fn();
+    viewport().setPointerCapture = capture;
+    viewport().hasPointerCapture = vi.fn(() => true);
+    viewport().releasePointerCapture = vi.fn();
+    const pointer = (type: string, pointerId: number, x: number, y: number) =>
+      act(() =>
+        viewport().dispatchEvent(
+          new PointerEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            pointerId,
+            clientX: x,
+            clientY: y,
+          }),
+        ),
+      );
+    button("适应屏幕").focus();
+    pointer("pointerdown", 1, 200, 400);
+    expect(capture).toHaveBeenCalledWith(1);
+    expect(document.activeElement).toBe(viewport());
+    expect(viewport().dataset.dragging).toBe("true");
+    pointer("pointermove", 2, 200, 0);
+    expect(viewport().scrollTop).toBe(0);
+    pointer("pointerup", 2, 200, 0);
+    expect(viewport().dataset.dragging).toBe("true");
+    pointer("pointermove", 1, -200, -5000);
+    expect(viewport().scrollTop).toBe(1704);
+    expect(viewport().scrollLeft).toBe(0);
+    pointer("pointermove", 1, 200, 1000);
+    expect(viewport().scrollTop).toBe(0);
+    pointer("pointercancel", 1, 200, 1000);
+    expect(viewport().dataset.dragging).toBe("false");
+    pointer("pointermove", 1, 200, 0);
+    expect(viewport().scrollTop).toBe(0);
+    pointer("pointerdown", 3, 200, 400);
+    key("PageUp");
+    expect(img().src).toBe(first.src);
+    expect(viewport().dataset.dragging).toBe("false");
+  });
+
+  it("ends pointer capture before zooming or fitting so the old drag cannot jump the image back", () => {
+    render({ image: tall });
+    viewport().setPointerCapture = vi.fn();
+    viewport().hasPointerCapture = vi.fn(() => true);
+    const release = vi.fn();
+    viewport().releasePointerCapture = release;
+    const pointer = (type: string, y: number) =>
+      act(() =>
+        viewport().dispatchEvent(
+          new PointerEvent(type, {
+            bubbles: true,
+            button: 0,
+            pointerId: 1,
+            clientX: 200,
+            clientY: y,
+          }),
+        ),
+      );
+    viewport().scrollTop = 500;
+    pointer("pointerdown", 400);
+    gamepad(dialog(), "onButtonDown", GamepadButton.BUMPER_RIGHT);
+    expect(viewport().dataset.dragging).toBe("false");
+    expect(release).toHaveBeenCalledExactlyOnceWith(1);
+    const zoomedTop = viewport().scrollTop;
+    expect(zoomedTop).toBeCloseTo(900);
+    pointer("pointermove", 300);
+    expect(viewport().scrollTop).toBe(zoomedTop);
+
+    pointer("pointerdown", 400);
+    gamepad(dialog(), "onSecondaryButton", GamepadButton.SECONDARY);
+    expect(viewport().dataset.dragging).toBe("false");
+    expect(release).toHaveBeenCalledTimes(2);
+    expect(viewport().scrollTop).toBe(0);
+    pointer("pointermove", 300);
+    expect(viewport().scrollTop).toBe(0);
+  });
+
   it("consumes B and Y, ignoring repeated B and keeping Y from switching the guide", () => {
     render();
     gamepad(dialog(), "onCancel", GamepadButton.CANCEL, true);
@@ -346,8 +488,12 @@ describe("full-screen image viewer interaction", () => {
     const css = host.querySelector("style")!.textContent!;
     expect(css).toContain(":focus-visible");
     expect(css).toContain(".grip-image-control:active");
+    expect(css).toContain(".grip-image-control:disabled");
+    expect(css).toContain('data-dragging="true"');
+    expect(css).toContain(".grip-image-viewport:is(:focus-visible, .gpfocus)");
     expect(css).toContain("@media (prefers-reduced-motion: no-preference)");
     expect(css).toMatch(/no-preference[^]*transition:[^]*animation:/);
+    expect(css).toMatch(/no-preference[^]*\.grip-image-feedback[^]*animation:/);
     expect(dialog().textContent).toContain("38%");
     expect(dialog().textContent).toContain("L1 / R1 缩放");
     expect(dialog().textContent).toContain("X 适屏 · B 返回");

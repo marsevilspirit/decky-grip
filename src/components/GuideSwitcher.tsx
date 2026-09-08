@@ -51,6 +51,14 @@ function titleFor(entry: GuideLibraryEntry): string {
   );
 }
 
+function revealChoice(target: HTMLElement | null) {
+  target?.closest("[data-grip-guide-choice]")?.scrollIntoView({
+    block: "nearest",
+    inline: "nearest",
+    behavior: "auto",
+  });
+}
+
 export function GuideSwitcher({
   entries,
   currentGuideId,
@@ -166,9 +174,39 @@ export function GuideSwitcher({
       className="grip-reader-guide-switcher"
       tabIndex={0}
       onCancel={cancel}
+      onFocusCapture={(event) => revealChoice(event.target as HTMLElement)}
       onKeyDown={(event) => {
         if (event.key === "Escape") {
           cancel(event);
+        } else if (
+          !confirming &&
+          !event.altKey &&
+          !event.ctrlKey &&
+          !event.metaKey &&
+          ["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)
+        ) {
+          const target = (event.target as HTMLElement).closest<HTMLElement>(
+            "[data-grip-guide-choice]",
+          );
+          if (!target) return;
+          const choices = [
+            ...(dialogRef.current?.querySelectorAll<HTMLElement>(
+              "[data-grip-guide-choice]",
+            ) ?? []),
+          ];
+          const focused = choices.indexOf(target);
+          if (focused < 0) return;
+          const next =
+            event.key === "Home"
+              ? 0
+              : event.key === "End"
+                ? choices.length - 1
+                : focused + (event.key === "ArrowDown" ? 1 : -1);
+          event.preventDefault();
+          event.stopPropagation();
+          choices[Math.max(0, Math.min(choices.length - 1, next))].focus({
+            preventScroll: true,
+          });
         } else if (event.key === "Tab") {
           const dialog = dialogRef.current;
           if (!dialog) return;
@@ -272,7 +310,10 @@ export function GuideSwitcher({
               onOKActionDescription={
                 current ? "返回阅读" : failed ? "重试打开" : "打开指南"
               }
-              onGamepadFocus={() => setFocusedKey(key)}
+              onGamepadFocus={(event) => {
+                setFocusedKey(key);
+                revealChoice(event.target as HTMLElement);
+              }}
               onGamepadBlur={() => {
                 setFocusedKey((value) => (value === key ? null : value));
                 setPressedKey((value) => (value === key ? null : value));

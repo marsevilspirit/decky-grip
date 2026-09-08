@@ -118,6 +118,8 @@ See [implementation and acceptance notes](docs/heybox-import.md).
 3. Scroll normally in the full-screen reader. Press **Y** to open the current
    game's guide list with focus directly on another guide. Cards keep their
    titles and focus while opening, show errors in place, and retry with **A**.
+   Keyboard users can move between cards with **Up/Down**, jump to the first or
+   last card with **Home/End**, or use **Tab**; focused cards stay visible.
    Press **X** or move right from the article to expand the full chapter directory;
    it overlays the article without changing its width or reading position.
    **B** backs out one layer at a time: search, directory, then the reader.
@@ -130,12 +132,17 @@ See [implementation and acceptance notes](docs/heybox-import.md).
    to switch between loaded images in the current viewport, and direction
    buttons or dragging to pan. Move down at the bottom of the image to reach
    the image controls.
+   On a keyboard, use arrow keys to pan, **+ / -** to zoom, **0** to fit,
+   and **PageUp / PageDown** to switch images. Zooming or fitting ends an active
+   drag so the next pointer movement cannot jump back to the old coordinates.
    Tall images initially fit the reading width and scroll vertically; **适应屏幕**
    still shows the complete image. **B** returns to the unchanged reading position; the viewer reuses the local
    image without downloading it again.
    Choose **搜索** in the directory (or press **Ctrl/Cmd+F**) to find text in
    the current guide, preview matching context, and step
-   through highlighted matches. GRIP saves each guide's visible text and exact
+   through highlighted matches. **Enter / Shift+Enter** in the search field
+   move to the next/previous match without stealing focus or interrupting Chinese
+   input composition. GRIP saves each guide's visible text and exact
    viewport offset independently.
 4. For instant in-game access after that first handoff, map the upper-left
    rear button **L4** to **Scroll Lock** in the game's Steam Input layout. Press
@@ -156,7 +163,9 @@ image LRU. Foreground opens, game changes, cleanup and unload cancel stale
 warming. Legacy pixel-only bookmarks without a known section skip image warming.
 Background preloading never starts a network request. A cache older than six
 hours still opens immediately; use **更新** when you want to fetch the newest
-version. While downloading, that same button becomes **取消更新**, including
+version. The old article remains scrollable, searchable, and navigable while
+the update downloads; publication preserves the latest reading position.
+While downloading, that same button becomes **取消更新**, including
 after you close and reopen the reader. Cancellation stops new image requests,
 waits for the in-flight saves, and keeps the old article and reading position.
 The short final publication step shows **保存中** and cannot be canceled.

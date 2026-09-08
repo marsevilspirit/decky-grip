@@ -137,6 +137,7 @@ describe("GripPanel", () => {
       getCacheStats?: () => Promise<ReaderCacheStats>;
       setImageLimit?: (bytes: number) => Promise<ReaderCacheStats["images"]>;
       openReader?: () => Promise<void>;
+      openImport?: () => Promise<void>;
       repairPositions?: () => Promise<string>;
       retryPositions?: () => Promise<boolean>;
       status?: RuntimeStatusStore;
@@ -161,6 +162,7 @@ describe("GripPanel", () => {
             options.setImageLimit ?? (async () => cacheStats.images)
           }
           openReader={options.openReader ?? (async () => undefined)}
+          openImport={options.openImport}
           performance={new ReaderPerformanceTracker()}
           repairPositions={options.repairPositions ?? (async () => "")}
           retryPositions={options.retryPositions ?? (async () => true)}
@@ -501,6 +503,74 @@ describe("GripPanel", () => {
     expect(panelText()).toContain("打开失败");
     expect(button("继续当前或最近指南").disabled).toBe(false);
   });
+
+  it("immediately acknowledges import opening, prevents duplicate actions and allows a clean retry", async () => {
+    let failOpen!: (error: Error) => void;
+    let finishRetry!: () => void;
+    const openImport = vi
+      .fn()
+      .mockImplementationOnce(
+        () => new Promise<void>((_resolve, reject) => (failOpen = reject)),
+      )
+      .mockImplementationOnce(
+        () => new Promise<void>((resolve) => (finishRetry = resolve)),
+      );
+    const openReader = vi.fn(async () => undefined);
+    await mount({ openImport, openReader });
+    await act(async () => button("高级选项").click());
+    const trigger = button("导入攻略");
+    await act(async () => {
+      trigger.click();
+      trigger.click();
+      button("继续当前或最近指南").click();
+      button("清除图片缓存").click();
+    });
+    const pending = button("正在打开导入窗口");
+    expect(pending).toBe(trigger);
+    expect(pending.disabled).toBe(true);
+    expect(pending.querySelector('[data-grip-busy="true"]')).not.toBeNull();
+    expect(button("继续当前或最近指南").disabled).toBe(true);
+    expect(openImport).toHaveBeenCalledOnce();
+    expect(openReader).not.toHaveBeenCalled();
+    expect(showModal).not.toHaveBeenCalled();
+    await act(async () => failOpen(new Error("读取游戏列表失败")));
+    expect(container?.querySelector('[role="alert"]')?.textContent).toContain(
+      "读取游戏列表失败",
+    );
+    expect(trigger.disabled).toBe(false);
+    await act(async () => trigger.click());
+    expect(container?.querySelector('[role="alert"]')).toBeNull();
+    expect(openImport).toHaveBeenCalledTimes(2);
+    await act(async () => finishRetry());
+    expect(button("导入攻略").disabled).toBe(false);
+    expect(button("继续当前或最近指南").disabled).toBe(false);
+    expect(panelText()).not.toContain("正在打开导入窗口");
+  });
+
+  it.each(["resolve", "reject"])(
+    "ignores an import opening %s after the panel unmounts",
+    async (result) => {
+      let finish!: () => void;
+      let fail!: (error: Error) => void;
+      const openImport = vi.fn(
+        () =>
+          new Promise<void>((resolve, reject) => {
+            finish = resolve;
+            fail = reject;
+          }),
+      );
+      await mount({ openImport });
+      await act(async () => button("导入攻略").click());
+      expect(openImport).toHaveBeenCalledOnce();
+      await act(async () => root?.unmount());
+      root = null;
+      await act(async () => {
+        if (result === "resolve") finish();
+        else fail(new Error("迟到的打开失败"));
+      });
+      expect(container?.childElementCount).toBe(0);
+    },
+  );
 
   it("keeps position repair feedback visible while advanced options are closed", async () => {
     const status = new RuntimeStatusStore("1113000");

@@ -279,6 +279,38 @@ describe("GuideSwitcher", () => {
     );
   });
 
+  it("keeps focused cards visible and supports bounded arrow/Home/End navigation", async () => {
+    await render({
+      entries: Array.from({ length: 20 }, (_, index) =>
+        entry(String(index + 1)),
+      ),
+    });
+    const reveal = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
+    await key(choice("2"), "End");
+    expect(document.activeElement).toBe(choice("20"));
+    expect(reveal).toHaveBeenLastCalledWith({
+      block: "nearest",
+      inline: "nearest",
+      behavior: "auto",
+    });
+    expect(reveal.mock.instances[reveal.mock.instances.length - 1]).toBe(
+      choice("20"),
+    );
+    await key(choice("20"), "ArrowDown");
+    expect(document.activeElement).toBe(choice("20"));
+    await key(choice("20"), "ArrowUp");
+    expect(document.activeElement).toBe(choice("19"));
+    await key(choice("19"), "Home");
+    expect(document.activeElement).toBe(choice("1"));
+    await key(choice("1"), "Tab");
+    expect(document.activeElement).toBe(choice("2"));
+    expect(reveal.mock.instances[reveal.mock.instances.length - 1]).toBe(
+      choice("2"),
+    );
+    expect(props.onChoose).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
   it("requires confirmation, defaults to cancel, and handles B at each level", async () => {
     await render();
     const trigger = button("删除当前指南离线副本");
