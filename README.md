@@ -75,6 +75,21 @@ extractor in `dist/heybox-render.js`. Both must be packaged. Decky's custom-back
 places `backend/out/grip-sidecar` in the packaged plugin's `bin/` directory.
 Python tests use only the standard library.
 
+Local browser layout regressions run separately from `check`:
+
+```bash
+pnpm exec playwright install chromium
+pnpm run test:browser
+```
+
+Or use an already installed Chrome with `PW_CHANNEL=chrome pnpm run test:browser`.
+The 1280×800 suite renders the real reader components, measures visible card and
+table bounds, and checks search positioning after actual image decoding. It uses
+local fixtures and a thin Decky adapter, not mocked layout/observers. This does
+not validate Steam FocusNav, CEF compatibility, or physical controller input.
+CI installs Chromium and runs the same suite; failures retain screenshots and
+traces in `test-results/browser/`. The browser dependency is development-only.
+
 ## Importing public Heybox articles (experimental)
 
 Choose **导入攻略** in GRIP, paste a public Xiaoheihe share link/text, confirm

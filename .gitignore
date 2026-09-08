@@ -4,6 +4,7 @@ out/
 /bin/
 backend/target/
 coverage/
+/test-results/
 .pnpm-store/
 __pycache__/
 *.py[cod]

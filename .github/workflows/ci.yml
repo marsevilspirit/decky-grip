@@ -34,6 +34,20 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run check
 
+      - name: Install browser for layout regression
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Check browser layout
+        run: pnpm run test:browser
+
+      - name: Upload browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-failures-${{ github.sha }}
+          path: test-results/browser/
+          if-no-files-found: ignore
+
       - name: Download Decky CLI
         run: |
           curl -fsSL \

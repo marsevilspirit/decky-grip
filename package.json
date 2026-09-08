@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "test": "pnpm run test:frontend && pnpm run test:backend && pnpm run test:rust",
     "test:frontend": "vitest run tests/typescript",
+    "test:browser": "playwright test --config tests/browser/playwright.config.mjs",
     "test:backend": "python3 -m unittest discover -s tests/python -p 'test_*.py'",
     "test:rust": "cargo test --locked --manifest-path backend/Cargo.toml && GRIP_RUST_SIDECAR=${CARGO_TARGET_DIR:-backend/target}/debug/grip-sidecar python3 -m unittest tests.python.test_rust_sidecar.RustSidecarProcessIntegrationTests",
     "lint:rust": "cargo fmt --manifest-path backend/Cargo.toml -- --check && cargo clippy --locked --manifest-path backend/Cargo.toml --all-targets -- -D warnings",
@@ -39,6 +40,7 @@
   "devDependencies": {
     "@decky/rollup": "1.0.2",
     "@decky/ui": "4.11.0",
+    "@playwright/test": "1.63.0",
     "@rollup/rollup-linux-x64-musl": "4.53.3",
     "@types/react": "19.1.1",
     "@types/react-dom": "19.1.1",

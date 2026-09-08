@@ -30,8 +30,10 @@ import {
 } from "../../src/reader/session-cache";
 import type { DownloadedGuide, ReaderPosition } from "../../src/reader/types";
 import type { GuideIdentity } from "../../src/steam/guide-key";
+import { GamepadButton, gamepadEvent } from "./helpers/decky-gamepad";
 
-vi.mock("@decky/ui", () => {
+vi.mock("@decky/ui", async () => {
+  const { GamepadButton, gamepadRef } = await import("./helpers/decky-gamepad");
   interface MockProps {
     children?: ReactNode;
     [key: string]: unknown;
@@ -89,37 +91,32 @@ vi.mock("@decky/ui", () => {
             stopPropagation: () => event.stopPropagation(),
           });
           if (event.key === "Options" && onOptionsButton) {
-            onOptionsButton({
-              detail: { button: 4, is_repeat: event.repeat, source: 0 },
-              preventDefault: () => event.preventDefault(),
-              stopPropagation: () => event.stopPropagation(),
-            });
+            onOptionsButton(gamepadEvent(GamepadButton.OPTIONS));
           } else if (event.key === "Escape" && onCancel) {
             onCancel(event as unknown as CustomEvent);
           } else if (event.key === "Enter" && onOKButton) {
-            onOKButton({
-              detail: { button: 1, is_repeat: event.repeat, source: 0 },
-              preventDefault: () => event.preventDefault(),
-              stopPropagation: () => event.stopPropagation(),
-            });
+            onOKButton(gamepadEvent(GamepadButton.OK));
           } else if (event.key === "Secondary" && onSecondaryButton) {
-            onSecondaryButton(gamepadEvent(3));
+            onSecondaryButton(gamepadEvent(GamepadButton.SECONDARY));
           } else if (event.key.startsWith("Arrow") && onGamepadDirection) {
             onGamepadDirection(
               gamepadEvent(
-                { ArrowUp: 12, ArrowDown: 13, ArrowLeft: 14, ArrowRight: 15 }[
-                  event.key
-                ] ?? 0,
+                {
+                  ArrowUp: GamepadButton.DIR_UP,
+                  ArrowDown: GamepadButton.DIR_DOWN,
+                  ArrowLeft: GamepadButton.DIR_LEFT,
+                  ArrowRight: GamepadButton.DIR_RIGHT,
+                }[event.key] ?? GamepadButton.INVALID,
               ),
             );
           } else if (event.key === "BumperLeft" && onButtonDown) {
-            onButtonDown(gamepadEvent(9));
+            onButtonDown(gamepadEvent(GamepadButton.BUMPER_LEFT));
           } else if (event.key === "BumperRight" && onButtonDown) {
-            onButtonDown(gamepadEvent(10));
+            onButtonDown(gamepadEvent(GamepadButton.BUMPER_RIGHT));
           } else if (event.key === "TriggerRight" && onButtonDown) {
-            onButtonDown(gamepadEvent(8));
+            onButtonDown(gamepadEvent(GamepadButton.TRIGGER_RIGHT));
           } else if (event.key === "TriggerLeft" && onButtonDown) {
-            onButtonDown(gamepadEvent(7));
+            onButtonDown(gamepadEvent(GamepadButton.TRIGGER_LEFT));
           }
         };
       }
@@ -144,22 +141,17 @@ vi.mock("@decky/ui", () => {
       ]) {
         delete domProps[name];
       }
-      return createElement(tag, { ...domProps, ref }, children);
+      return createElement(
+        tag,
+        { ...domProps, ref: gamepadRef(ref, props) },
+        children,
+      );
     });
 
   return {
     Button: element("button"),
     Focusable: element("div"),
-    GamepadButton: {
-      BUMPER_LEFT: 9,
-      BUMPER_RIGHT: 10,
-      TRIGGER_LEFT: 7,
-      TRIGGER_RIGHT: 8,
-      DIR_DOWN: 13,
-      DIR_UP: 12,
-      DIR_LEFT: 14,
-      DIR_RIGHT: 15,
-    },
+    GamepadButton,
     Spinner: () => createElement("span"),
     TextField: ({ label, onChange, value }: MockProps) =>
       createElement("input", {
@@ -1548,12 +1540,31 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(container!.querySelector('[aria-label="指南搜索"]')).not.toBeNull();
     expect(scroller.style.marginRight).toBe(margin);
     expect(scroller.hasAttribute("inert")).toBe(false);
+    const search = container!.querySelector<HTMLInputElement>("input")!;
+    await act(async () => {
+      search.focus();
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )!.set!.call(search, "章节");
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(toc.getAttribute("role")).toBe("search");
+    const result = toc.querySelector<HTMLElement>(
+      '[aria-label^="跳转到搜索结果"]',
+    )!;
+    await act(async () => result.focus());
+    expect(document.activeElement).toBe(result);
+    expect(toc.getAttribute("role")).toBe("search");
+    expect(scroller.hasAttribute("inert")).toBe(false);
     await act(async () =>
-      pressKey(container!.querySelector("input")!, "Escape"),
+      result.dispatchEvent(gamepadEvent("onCancel", GamepadButton.CANCEL)),
     );
     await flushFrame();
     expect(container!.querySelector('[aria-label="指南搜索"]')).toBeNull();
     expect(toc.getAttribute("data-expanded")).toBe("true");
+    expect(toc.getAttribute("role")).toBe("dialog");
+    expect(scroller.hasAttribute("inert")).toBe(true);
     expect(close).not.toHaveBeenCalled();
     await act(async () => {
       document.activeElement!.dispatchEvent(
@@ -1567,9 +1578,15 @@ describe("GuideReaderPage position lifecycle", () => {
     });
     expect(toc.getAttribute("data-expanded")).toBe("true");
     expect(close).not.toHaveBeenCalled();
-    await act(async () => pressKey(document.activeElement!, "Escape"));
+    await act(async () =>
+      document.activeElement!.dispatchEvent(
+        gamepadEvent("onCancel", GamepadButton.CANCEL),
+      ),
+    );
     await flushFrame();
     expect(document.activeElement).toBe(scroller);
+    expect(toc.getAttribute("role")).toBe("navigation");
+    expect(scroller.hasAttribute("inert")).toBe(false);
     expect(close).not.toHaveBeenCalled();
     await act(async () => pressKey(scroller, "Escape"));
     expect(close).toHaveBeenCalledOnce();

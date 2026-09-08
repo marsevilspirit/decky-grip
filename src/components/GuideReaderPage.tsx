@@ -186,7 +186,11 @@ export function GuideReaderPage({
   >(null);
   const [guideSwitcherOpen, setGuideSwitcherOpen] = useState(false);
   const [offlineRemoved, setOfflineRemoved] = useState(false);
-  const [navigationOpen, setNavigationOpen] = useState(false);
+  const [navigationMode, setNavigationMode] = useState<
+    "collapsed" | "toc" | "search"
+  >("collapsed");
+  const navigationOpen = navigationMode !== "collapsed";
+  const guideSearchOpen = navigationMode === "search";
   const [previewImage, setPreviewImage] = useState<ReaderPreviewImage | null>(
     null,
   );
@@ -202,7 +206,6 @@ export function GuideReaderPage({
   );
   const [guideSwitcherRevision, setGuideSwitcherRevision] = useState(0);
   const [switchPending, setSwitchPending] = useState<string | null>(null);
-  const [guideSearchOpen, setGuideSearchOpen] = useState(false);
   const [guideSearchQuery, setGuideSearchQuery] = useState("");
   const [activeSectionId, setActiveSectionId] = useState<string | null>(
     initialSnapshot?.position?.sectionId ??
@@ -317,8 +320,7 @@ export function GuideReaderPage({
       return;
     }
     cancelPendingFocus();
-    setGuideSearchOpen(false);
-    setNavigationOpen(false);
+    setNavigationMode("collapsed");
     hideTocTitle();
     setGuideSwitcherOpen(true);
   };
@@ -348,13 +350,16 @@ export function GuideReaderPage({
       };
     }
     hideTocTitle();
-    setNavigationOpen(true);
-    setGuideSearchOpen(true);
+    setNavigationMode("search");
+  };
+
+  const expandNavigation = () => {
+    setNavigationMode((mode) => (mode === "collapsed" ? "toc" : mode));
   };
 
   const openNavigation = () => {
     if (!loaded || loading) return;
-    setNavigationOpen(true);
+    expandNavigation();
     scheduleFocus(() => {
       const chapters = tocRef.current?.querySelectorAll<HTMLElement>(
         "[data-grip-toc-section]",
@@ -369,14 +374,13 @@ export function GuideReaderPage({
   };
 
   const closeNavigation = () => {
-    setNavigationOpen(false);
-    setGuideSearchOpen(false);
+    setNavigationMode("collapsed");
     hideTocTitle();
     scheduleFocus(() => focusWithoutScrolling(scrollerRef.current));
   };
 
   const closeGuideSearch = () => {
-    setGuideSearchOpen(false);
+    setNavigationMode("toc");
     scheduleFocus(() => {
       focusWithoutScrolling(
         guideSearchButtonRef.current ?? scrollerRef.current,
@@ -615,8 +619,7 @@ export function GuideReaderPage({
 
   useEffect(() => {
     setOfflineRemoved(false);
-    setNavigationOpen(false);
-    setGuideSearchOpen(false);
+    setNavigationMode("collapsed");
     setGuideSwitcherOpen(false);
     setPreviewImage(null);
   }, [identity?.appId, identity?.guideId]);
@@ -855,7 +858,7 @@ export function GuideReaderPage({
 
   const showTocTitle = (sectionId: string) => {
     setFocusedTocSection(sectionId);
-    setNavigationOpen(true);
+    expandNavigation();
   };
 
   useEffect(() => {
@@ -2041,8 +2044,8 @@ export function GuideReaderPage({
         >
           <Focusable
             aria-label="指南正文"
-            aria-hidden={(navigationOpen && !guideSearchOpen) || undefined}
-            inert={navigationOpen && !guideSearchOpen ? true : undefined}
+            aria-hidden={navigationMode === "toc" || undefined}
+            inert={navigationMode === "toc" ? true : undefined}
             ref={scrollerRef}
             flow-children="none"
             onButtonDown={onReaderButton}
@@ -2129,11 +2132,11 @@ export function GuideReaderPage({
           </Focusable>
           <Focusable
             aria-label={guideSearchOpen ? "指南搜索" : "指南目录"}
-            aria-modal={(navigationOpen && !guideSearchOpen) || undefined}
+            aria-modal={navigationMode === "toc" || undefined}
             data-expanded={navigationOpen ? "true" : "false"}
             className="grip-reader-toc"
             onFocusCapture={(event) => {
-              setNavigationOpen(true);
+              expandNavigation();
               const target = (event.target as HTMLElement).closest<HTMLElement>(
                 "[data-grip-toc-section]",
               );
@@ -2164,11 +2167,7 @@ export function GuideReaderPage({
                 event.stopPropagation();
                 if (!event.repeat)
                   moveGuideSearchResult(event.shiftKey ? -1 : 1);
-              } else if (
-                navigationOpen &&
-                !guideSearchOpen &&
-                event.key === "Tab"
-              ) {
+              } else if (navigationMode === "toc" && event.key === "Tab") {
                 const controls = [
                   ...event.currentTarget.querySelectorAll<HTMLElement>(
                     "button, [role='button'], [tabindex]",
@@ -2220,7 +2219,7 @@ export function GuideReaderPage({
               padding: navigationOpen ? "16px 14px 72px" : "18px 6px 64px",
             }}
           >
-            {navigationOpen && !guideSearchOpen && (
+            {navigationMode === "toc" && (
               <div style={{ marginBottom: 14 }}>
                 <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 6 }}>
                   章节目录

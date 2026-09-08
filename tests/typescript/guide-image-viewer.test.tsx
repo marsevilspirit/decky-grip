@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { GamepadButton, type GamepadEvent } from "@decky/ui";
+import { GamepadButton } from "@decky/ui";
 import { act, type ComponentProps, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,13 +9,11 @@ import {
   GuideImageViewer,
   type ReaderPreviewImage,
 } from "../../src/components/GuideImageViewer";
-
-const mock = vi.hoisted(() => ({
-  props: new WeakMap<HTMLElement, Record<string, unknown>>(),
-}));
+import { gamepadEvent, type GamepadHandler } from "./helpers/decky-gamepad";
 
 vi.mock("@decky/ui", async () => {
   const { createElement, forwardRef } = await import("react");
+  const { GamepadButton, gamepadRef } = await import("./helpers/decky-gamepad");
   const element = (tag: "button" | "div") =>
     forwardRef<HTMLElement, Record<string, unknown>>((props, ref) => {
       const domProps = { ...props };
@@ -42,11 +40,7 @@ vi.mock("@decky/ui", async () => {
         tag,
         {
           ...domProps,
-          ref: (node: HTMLElement | null) => {
-            if (node) mock.props.set(node, props);
-            if (typeof ref === "function") ref(node);
-            else if (ref) ref.current = node;
-          },
+          ref: gamepadRef(ref, props),
         },
         props.children as ReactNode,
       );
@@ -54,20 +48,7 @@ vi.mock("@decky/ui", async () => {
   return {
     Button: element("button"),
     Focusable: element("div"),
-    GamepadButton: {
-      OK: 1,
-      CANCEL: 2,
-      SECONDARY: 3,
-      OPTIONS: 4,
-      BUMPER_LEFT: 5,
-      BUMPER_RIGHT: 6,
-      TRIGGER_LEFT: 7,
-      TRIGGER_RIGHT: 8,
-      DIR_UP: 9,
-      DIR_DOWN: 10,
-      DIR_LEFT: 11,
-      DIR_RIGHT: 12,
-    },
+    GamepadButton,
   };
 });
 
@@ -113,23 +94,14 @@ describe("full-screen image viewer interaction", () => {
   };
   const gamepad = (
     element: HTMLElement,
-    handler: string,
+    handler: GamepadHandler,
     value: GamepadButton,
     repeat = false,
   ) => {
-    const event = {
-      detail: { button: value, is_repeat: repeat, source: 0 },
-      currentTarget: element,
-      preventDefault: vi.fn(),
-      stopPropagation: vi.fn(),
-    };
-    const callback = mock.props.get(element)?.[handler];
-    expect(callback).toBeTypeOf("function");
-    act(() =>
-      (callback as (event: GamepadEvent) => void)(
-        event as unknown as GamepadEvent,
-      ),
-    );
+    const event = gamepadEvent(handler, value, repeat);
+    vi.spyOn(event, "preventDefault");
+    vi.spyOn(event, "stopPropagation");
+    act(() => element.dispatchEvent(event));
     return event;
   };
   const key = (value: string, options: KeyboardEventInit = {}) => {
@@ -435,15 +407,27 @@ describe("full-screen image viewer interaction", () => {
 
   it("consumes B and Y, ignoring repeated B and keeping Y from switching the guide", () => {
     render();
-    gamepad(dialog(), "onCancel", GamepadButton.CANCEL, true);
+    const escaped = vi.fn();
+    host.addEventListener("onCancel", escaped);
+    host.addEventListener("onOptionsButton", escaped);
+    const source = button("放大");
+    // The child has no B/Y handler: the event must bubble to the viewer,
+    // whose stopPropagation keeps it away from the reader outside the modal.
+    gamepad(source, "onCancel", GamepadButton.CANCEL, true);
     expect(onClose).not.toHaveBeenCalled();
-    const cancel = gamepad(dialog(), "onCancel", GamepadButton.CANCEL);
+    const cancel = gamepad(source, "onCancel", GamepadButton.CANCEL);
+    expect(cancel.target).toBe(source);
+    expect(cancel.defaultPrevented).toBe(true);
     expect(cancel.preventDefault).toHaveBeenCalledOnce();
     expect(cancel.stopPropagation).toHaveBeenCalledOnce();
     expect(onClose).toHaveBeenCalledOnce();
-    const options = gamepad(dialog(), "onOptionsButton", GamepadButton.OPTIONS);
+    const options = gamepad(source, "onOptionsButton", GamepadButton.OPTIONS);
+    expect(options.defaultPrevented).toBe(true);
     expect(options.stopPropagation).toHaveBeenCalledOnce();
     expect(onClose).toHaveBeenCalledOnce();
+    expect(escaped).not.toHaveBeenCalled();
+    host.removeEventListener("onCancel", escaped);
+    host.removeEventListener("onOptionsButton", escaped);
   });
 
   it("keeps keyboard focus within the viewer, skips disabled controls and needs no image list", () => {

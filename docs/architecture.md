@@ -47,6 +47,9 @@ Keep these invariants when moving code:
   image nodes. Its style node stays outside the indexed content container.
 - Restoration, incremental section mounting and focus still share the Page's
   lifecycle. Do not split them into hooks that merely exchange mutable refs.
+- Reader navigation has one state: `collapsed`, `toc`, or `search`. Focus can
+  expand a collapsed directory but must not replace an active search. The
+  article is inert only for the modal directory or a covering viewer/switcher.
 - Public RPC signatures, cache schemas and hardware hotkeys are unchanged by
   this refactor. Validation is local; no device deployment is implied.
 

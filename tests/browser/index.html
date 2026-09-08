@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>GRIP browser layout regression</title>
+    <style>
+      html,
+      body,
+      #root {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+      }
+      body {
+        font-family: sans-serif;
+        background: #0d141c;
+        color: #dcdedf;
+      }
+      button,
+      input {
+        font: inherit;
+      }
+      button {
+        border: 0;
+        border-radius: 4px;
+        padding: 8px;
+        cursor: pointer;
+      }
+      button:disabled {
+        cursor: default;
+      }
+      input {
+        box-sizing: border-box;
+        width: 100%;
+        padding: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/fixture.tsx"></script>
+  </body>
+</html>

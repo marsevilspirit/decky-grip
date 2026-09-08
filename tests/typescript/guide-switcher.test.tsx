@@ -10,7 +10,8 @@ import {
   type GuideSwitcherProps,
 } from "../../src/components/GuideSwitcher";
 
-vi.mock("@decky/ui", () => {
+vi.mock("@decky/ui", async () => {
+  const { GamepadButton, gamepadRef } = await import("./helpers/decky-gamepad");
   type GamepadHandler = (event: {
     detail: { button: number; is_repeat: boolean; source: number };
     preventDefault(): void;
@@ -49,7 +50,11 @@ vi.mock("@decky/ui", () => {
       dom["data-ok-action"] = dom.onOKActionDescription;
       delete dom.onOKActionDescription;
       const gamepad = (event: KeyboardEvent) => ({
-        detail: { button: 1, is_repeat: event.repeat, source: 0 },
+        detail: {
+          button: GamepadButton.OK,
+          is_repeat: event.repeat,
+          source: 0,
+        },
         preventDefault: () => event.preventDefault(),
         stopPropagation: () => event.stopPropagation(),
       });
@@ -57,7 +62,7 @@ vi.mock("@decky/ui", () => {
         tag,
         {
           ...dom,
-          ref,
+          ref: gamepadRef(ref, props),
           onFocus: onGamepadFocus,
           onBlur: onGamepadBlur,
           onKeyDown: (event: KeyboardEvent) => {
@@ -65,7 +70,7 @@ vi.mock("@decky/ui", () => {
             if (event.defaultPrevented) return;
             if (event.key === "GamepadCancel") {
               const cancel = gamepad(event);
-              cancel.detail.button = 2;
+              cancel.detail.button = GamepadButton.CANCEL;
               onCancel?.(cancel);
             }
             if (event.key === "Enter") {
@@ -83,7 +88,7 @@ vi.mock("@decky/ui", () => {
   return {
     Button: element("button"),
     Focusable: element("div"),
-    GamepadButton: { OK: 1 },
+    GamepadButton,
     Spinner: () => createElement("span"),
   };
 });
