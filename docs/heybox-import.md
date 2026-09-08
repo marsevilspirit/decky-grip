@@ -9,7 +9,7 @@ claimed.
 1. Paste share text, or explicitly enable the phone inbox and scan its QR.
 2. Confirm the Steam game on the Deck. Phone receipt only fills the input.
 3. Create one temporary Steam BrowserView with a unique fragment marker.
-   The Python bridge attaches only to that exact page on local CEF port 8080.
+   The Rust sidecar attaches only to that exact page on local CEF port 8080.
    It never enables remote debugging or navigates an existing user tab.
 4. The bundled DOM extractor waits for the article and every body image URL,
    removes game/product cards and non-article content, and preserves chapters.
@@ -87,7 +87,7 @@ It uses HTTP on a trusted LAN and requires working `.local` resolution.
   button acceptance. Neither the article nor its image bytes enter the repository.
 - Rust tests exercise the actual import RPC, exact 4 MiB body boundary, image
   completeness, retained old content, source restrictions and independent history.
-- Python tests cover marked-page isolation, local CDP/response limits and cleanup;
+- Rust tests cover marked-page isolation, local CDP/response limits and cleanup;
   loopback HTTP tests cover inbox auth/origin, expiry, concurrency and port release.
 - Bridge regressions cover imported publication followed by association under
   the existing I/O lock, validation/publication/association errors, cancellation,
@@ -101,6 +101,25 @@ It uses HTTP on a trusted LAN and requires working `.local` resolution.
 - `pnpm run check` passed after the local import optimizations: 305 frontend tests, 57 Python
   tests (one conditional skip, separately covered by the real sidecar process
   integration test), 104 Rust tests, formatting, type checks, Clippy and build.
+
+## Rust migration (local, 2026-09-08)
+
+CEF capture, the LAN inbox, import-session lifetime, publication/game association,
+and combined store repair now run in Rust. The three old Python import modules
+were removed. Production Python is 747 lines instead of 1,212 (counting comments
+and blank lines); it retains Decky callbacks, public RPC adaptation and process
+transport. The DOM extractor stays TypeScript because it executes inside CEF.
+
+The existing cache transaction is reused. Capture cancellation is ordered after
+the request write, including executor-queue cancellation and submission failure.
+Phone-start cancellation finishes exact-session cleanup before a retry. Rust
+tests use random loopback ports for HTTP/WebSocket transport checks, and the real
+sidecar protocol test covers publication, preserved bookmarks and closed imports.
+
+`pnpm run check` passed: 314 frontend tests, 42 Python tests (one conditional skip,
+then its real-sidecar integration passed separately), 136 Rust tests, formatting,
+type checking, Clippy and build. No Steam Deck connection or deployment was made;
+this migration is not a device-speed benchmark.
 
 ## Deferred device checks (outside this iteration)
 

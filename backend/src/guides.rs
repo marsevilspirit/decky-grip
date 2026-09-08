@@ -80,7 +80,7 @@ impl GuideError {
         Self::new(GuideErrorKind::Parse, source.to_string())
     }
 
-    fn cache(message: impl Into<String>) -> Self {
+    pub(crate) fn cache(message: impl Into<String>) -> Self {
         Self::new(GuideErrorKind::Cache, message)
     }
 }

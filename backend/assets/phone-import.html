@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>发送指南到 GRIP</title
+  ><style nonce="NONCE">
+    body {
+      font: 17px system-ui;
+      background: #142434;
+      color: #fff;
+      margin: 24px;
+      max-width: 640px;
+    }
+    textarea,
+    button {
+      box-sizing: border-box;
+      width: 100%;
+      font: inherit;
+      border-radius: 8px;
+      padding: 12px;
+    }
+    textarea {
+      min-height: 180px;
+      margin: 12px 0;
+    }
+    button {
+      background: #66c0f4;
+      color: #101b24;
+      border: 0;
+    }
+    p {
+      line-height: 1.5;
+    }
+    button:disabled {
+      opacity: 0.5;
+    }
+  </style>
+  <h1>发送指南到 Steam Deck</h1>
+  <p>粘贴小黑盒分享文字。这里只发送链接，仍需在 Deck 上确认并保存。</p>
+  <label for="text">分享文字或链接</label
+  ><textarea id="text" maxlength="8000"></textarea>
+  <button id="send" type="button">发送到 Deck</button>
+  <p id="status" role="status"></p>
+  <script nonce="NONCE">
+    const token = location.hash.slice(1);
+    history.replaceState(null, "", location.pathname);
+    const button = document.getElementById("send"),
+      status = document.getElementById("status");
+    if (!token) {
+      button.disabled = true;
+      status.textContent = "请扫描 Deck 上的完整二维码";
+    }
+    button.onclick = async () => {
+      button.disabled = true;
+      status.textContent = "正在发送…";
+      try {
+        const response = await fetch("/submit", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-GRIP-Token": token,
+          },
+          body: JSON.stringify({ text: document.getElementById("text").value }),
+        });
+        status.textContent = await response.text();
+        button.disabled =
+          response.ok || response.status === 409 || response.status === 410;
+      } catch (_) {
+        status.textContent =
+          "连接失败，请确认手机与 Deck 在同一可信局域网，并重新扫码";
+        button.disabled = false;
+      }
+    };
+  </script>
+</html>

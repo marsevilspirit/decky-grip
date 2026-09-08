@@ -277,6 +277,19 @@ for line in sys.stdin:
         self.assertEqual(events[0][0], "grip_hotkey")
         self.assertEqual(events[0][1]["sequence"], 1)
 
+    def test_send_callback_runs_once_before_waiting_for_the_response(self):
+        self.write_sidecar(MULTIPLEX_SIDECAR)
+        client = self.start()
+        sent = threading.Event()
+        on_sent = mock.Mock(side_effect=sent.set)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(client.request, "test.echo", {"value": 1}, on_sent=on_sent)
+            self.assertTrue(sent.wait(1))
+            self.assertFalse(first.done())
+            self.assertEqual(client.request("test.echo", {"value": 2}), {"value": 2})
+            self.assertEqual(first.result(timeout=1), {"value": 1})
+        on_sent.assert_called_once_with()
+
     def test_one_timeout_does_not_replace_or_stop_the_sidecar(self):
         self.write_sidecar(LATE_RESPONSE_SIDECAR)
         client = self.start()
@@ -307,17 +320,19 @@ for line in sys.stdin:
 
     def test_write_lock_timeout_does_not_send_or_stop_the_sidecar(self):
         client = self.start()
+        on_sent = mock.Mock()
         with ThreadPoolExecutor(max_workers=1) as executor:
             client._write_lock.acquire()
             started = time.monotonic()
             try:
-                request = executor.submit(client.request, "positions.snapshot", {}, timeout=0.05)
+                request = executor.submit(client.request, "positions.snapshot", {}, timeout=0.05, on_sent=on_sent)
                 with self.assertRaisesRegex(RustSidecarError, "timed out"):
                     request.result(timeout=1)
                 self.assertLess(time.monotonic() - started, 0.5)
             finally:
                 client._write_lock.release()
         self.assertFalse(client._pending)
+        on_sent.assert_not_called()
         self.assertEqual(client.request("positions.snapshot", {}), {})
 
     def test_pipe_backpressure_times_out_and_close_interrupts_writes(self):

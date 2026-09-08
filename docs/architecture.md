@@ -6,21 +6,35 @@ The frontend entry point wires features to Decky. Source selection, offline
 transactions, document rendering, and temporary import resources have separate
 owners; there is no provider registry or dependency-injection framework.
 
-| Responsibility                              | Owner                                       | Boundary                                                                                                                                                         |
-| ------------------------------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Decky registration and feature coordination | `src/index.tsx`                             | Connects routes, status, caches and game lifecycle; shows user-facing notifications.                                                                             |
-| Download source selection                   | `src/guide-download.ts`                     | Chooses Steam preparation or public Heybox capture; knows which commit persists game association. No UI state.                                                   |
-| Offline transaction and download jobs       | `src/reader/download.ts`                    | Prepare → save every image → commit/discard; owns cancellation, progress and shared job lifetime. No Steam or Decky API imports.                                 |
-| Platform/browser access                     | `src/steam/`                                | `import-browser.ts` owns one temporary Steam browser page; `src/import/heybox.ts` reads and sanitizes public article DOM without Steam APIs.                     |
-| Reader interaction / document presentation  | `GuideReaderPage.tsx` / `GuideDocument.tsx` | Page owns focus, restoration, search and hydration scheduling. Document receives the validated guide, visible section count and content ref; it performs no I/O. |
-| Decky RPC and backend lifetime              | `main.py`                                   | Keeps public RPC names and serialized publication/association. It closes temporary sessions before the Rust sidecar.                                             |
-| Temporary import sessions                   | `py_modules/import_sessions.py`             | Owns capture tasks, the opt-in phone inbox and their cancellation/close lifecycle; reuses the bridge's executor helper.                                          |
-| Validation and durable storage              | `backend/src/`                              | Rust revalidates untrusted input, enforces cache budgets and atomically replaces files.                                                                          |
+| Responsibility                              | Owner                                                | Boundary                                                                                                                                                         |
+| ------------------------------------------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Decky registration and feature coordination | `src/index.tsx`                                      | Connects routes, status, caches and game lifecycle; shows user-facing notifications.                                                                             |
+| Download source selection                   | `src/guide-download.ts`                              | Chooses Steam preparation or public Heybox capture; knows which commit persists game association. No UI state.                                                   |
+| Offline transaction and download jobs       | `src/reader/download.ts`                             | Prepare → save every image → commit/discard; owns cancellation, progress and shared job lifetime. No Steam or Decky API imports.                                 |
+| Platform/browser access                     | `src/steam/`                                         | `import-browser.ts` owns one temporary Steam browser page; `src/import/heybox.ts` reads and sanitizes public article DOM without Steam APIs.                     |
+| Reader interaction / document presentation  | `GuideReaderPage.tsx` / `GuideDocument.tsx`          | Page owns focus, restoration, search and hydration scheduling. Document receives the validated guide, visible section count and content ref; it performs no I/O. |
+| Decky RPC and backend lifetime              | `main.py` / `py_modules/rust_sidecar.py`             | Adapts public RPC names, events, cancellation and process lifetime. Import business logic stays in Rust.                                                         |
+| Temporary import sessions                   | `backend/src/import_sessions.rs`                     | Owns reserved/running captures and the opt-in phone inbox; cancels queued work and closes active transports before shutdown.                                     |
+| CEF capture / phone inbox                   | `backend/src/heybox_renderer.rs` / `phone_import.rs` | Fixed marked-page CDP capture and bounded opt-in HTTP inbox. No provider framework; uses existing cache transactions after capture.                              |
+| Validation and durable storage              | `backend/src/`                                       | Rust revalidates untrusted input, enforces cache budgets and atomically replaces files.                                                                          |
 
 The download call path is `index.tsx → guide-download.ts → reader/download.ts
 → backend.ts → main.py → Rust`. Heybox preparation also uses the isolated
 Steam browser and bundled DOM extractor; downloaded articles never need that
 browser to be read.
+
+The Rust runtime reserves captures when their RPC arrives, before worker dispatch,
+so cancellation also covers queued captures. Images and captures share at most
+three of four general workers, leaving a slot for foreground and cancellation
+requests. Storage keeps its separate worker. The phone inbox starts only on an
+explicit RPC and owns all its accepted sockets. Graceful shutdown cancels captures
+and closes the listener/clients before draining the remaining queue.
+
+`guides.commit_import` validates the game key and position store before publishing
+the complete offline guide. It then updates recent-access time under the existing
+position-file lock, retaining the latest scroll and anchor even if another save
+arrived during publication. An association failure after publication is an error
+with an explicit partial-success message, not a cross-file atomic transaction.
 
 Keep these invariants when moving code:
 

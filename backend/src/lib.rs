@@ -12,7 +12,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub mod guide_html;
 pub mod guide_images;
 pub mod guides;
+mod heybox_renderer;
 pub mod hotkey;
+mod import_sessions;
+mod phone_import;
 mod reader_positions;
 mod runtime;
 
@@ -141,6 +144,17 @@ enum StoreError {
     Storage(&'static str),
     Durability(&'static str),
     Protocol(&'static str),
+}
+
+impl StoreError {
+    fn message(&self) -> &'static str {
+        match self {
+            Self::Validation(message)
+            | Self::Storage(message)
+            | Self::Durability(message)
+            | Self::Protocol(message) => message,
+        }
+    }
 }
 
 struct PositionStore {
@@ -686,6 +700,20 @@ fn dispatch(
             empty_params(params)?;
             store.repair()
         }
+        "positions.repair_all" => {
+            empty_params(params)?;
+            Ok([
+                ("positions".to_owned(), store.repair()),
+                ("readerPositions".to_owned(), reader_store.repair()),
+            ]
+            .into_iter()
+            .map(|(name, result)| {
+                (name, result.unwrap_or_else(|error| {
+                json!({"repaired": false, "backup": null, "error": error.message()})
+            }))
+            })
+            .collect())
+        }
         "reader_positions.get" => reader_store.get(guide_key_param(params)?),
         "reader_positions.save" => {
             let object = params_with_fields(
@@ -762,6 +790,54 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn repair_all_validates_once_and_repairs_stores_independently() {
+        for primary_fails in [true, false] {
+            let directory = TestDirectory::new("positions.json");
+            let blocked = directory.0.join("not-a-file");
+            fs::create_dir(&blocked).unwrap();
+            let valid = directory.path();
+            let corrupt = b"broken original bytes";
+            fs::write(&valid, corrupt).unwrap();
+            let (primary, reader) = if primary_fails {
+                (blocked.clone(), valid.clone())
+            } else {
+                (valid.clone(), blocked.clone())
+            };
+            let store = PositionStore::new(primary);
+            let reader_store = ReaderPositionStore::new(reader);
+            assert!(
+                dispatch(
+                    &store,
+                    &reader_store,
+                    "positions.repair_all",
+                    Some(&json!({"extra": true}))
+                )
+                .is_err()
+            );
+            assert_eq!(fs::read(&valid).unwrap(), corrupt);
+            let result = dispatch(&store, &reader_store, "positions.repair_all", None).unwrap();
+            let (failed, repaired) = if primary_fails {
+                ("positions", "readerPositions")
+            } else {
+                ("readerPositions", "positions")
+            };
+            assert_eq!(result[failed]["repaired"], false);
+            assert_eq!(result[failed]["backup"], Value::Null);
+            assert!(
+                result[failed]["error"]
+                    .as_str()
+                    .is_some_and(|error| !error.is_empty())
+            );
+            assert_eq!(result[repaired]["repaired"], true);
+            assert_eq!(
+                fs::read(result[repaired]["backup"].as_str().unwrap()).unwrap(),
+                corrupt
+            );
+            assert!(blocked.is_dir());
+        }
+    }
 
     #[test]
     fn round_trip_matches_python_schema_and_permissions() {

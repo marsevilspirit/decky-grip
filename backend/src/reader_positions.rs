@@ -37,6 +37,19 @@ pub(super) struct ReaderHistoryEntry {
 }
 
 impl ReaderDocument {
+    fn next_updated_at_ms(&self) -> Result<u64, StoreError> {
+        Ok(self
+            .positions
+            .values()
+            .map(|position| position.updated_at_ms)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .filter(|value| *value <= JAVASCRIPT_MAX_SAFE_INTEGER)
+            .ok_or(StoreError::Validation("updated_at_ms is invalid"))?
+            .max(reader_now_ms()?))
+    }
+
     fn from_bytes(payload: &[u8]) -> Result<Self, StoreError> {
         let value: Value = serde_json::from_slice(payload)
             .map_err(|_| StoreError::Storage("reader_positions.json could not be read"))?;
@@ -178,6 +191,32 @@ impl ReaderPositionStore {
             .unwrap_or(Value::Null))
     }
 
+    /// Associate a published guide without overwriting a concurrently saved reading position.
+    pub(super) fn touch(&self, guide_key: &str) -> Result<Value, StoreError> {
+        validate_guide_key(guide_key)?;
+        let _lock = acquire_store_lock(&self.path)
+            .map_err(|_| StoreError::Storage("could not lock reader_positions.json"))?;
+        let mut document = self.read_document()?;
+        let updated_at_ms = document.next_updated_at_ms()?;
+        let position = document
+            .positions
+            .entry(guide_key.to_owned())
+            .or_insert(ReaderPosition {
+                scroll_top: 0.0,
+                section_id: None,
+                anchor_text: None,
+                anchor_offset: 0.0,
+                updated_at_ms,
+            });
+        position.updated_at_ms = updated_at_ms;
+        let result = reader_position_value(position);
+        if document.positions.len() > MAX_POSITIONS {
+            return Err(StoreError::Storage("reader position limit reached"));
+        }
+        self.write_atomic(&document)?;
+        Ok(result)
+    }
+
     pub(super) fn recent(
         &self,
         app_id: Option<&str>,
@@ -247,16 +286,7 @@ impl ReaderPositionStore {
         let _lock = acquire_store_lock(&self.path)
             .map_err(|_| StoreError::Storage("could not lock reader_positions.json"))?;
         let mut document = self.read_document()?;
-        let updated_at_ms = document
-            .positions
-            .values()
-            .map(|position| position.updated_at_ms)
-            .max()
-            .unwrap_or(0)
-            .checked_add(1)
-            .filter(|value| *value <= JAVASCRIPT_MAX_SAFE_INTEGER)
-            .ok_or(StoreError::Validation("updated_at_ms is invalid"))?
-            .max(reader_now_ms()?);
+        let updated_at_ms = document.next_updated_at_ms()?;
         let position = ReaderPosition {
             scroll_top,
             section_id,
@@ -446,6 +476,125 @@ mod tests {
         assert_eq!(replacement["anchor_text"], Value::Null);
         let document: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
         assert_eq!(document["schema_version"], 1);
+    }
+
+    #[test]
+    fn touching_imported_guides_creates_associations_and_preserves_existing_anchors() {
+        let directory = TestDirectory::new("reader_positions.json");
+        let store = ReaderPositionStore::new(directory.path());
+        let guide_key = "1113000:heybox-249c72219fed";
+        let created = store.touch(guide_key).unwrap();
+        assert_eq!(created["scroll_top"], 0.0);
+        assert_eq!(created["section_id"], Value::Null);
+        assert_eq!(created["anchor_text"], Value::Null);
+        assert_eq!(created["anchor_offset"], 0.0);
+        assert_eq!(store.get(guide_key).unwrap(), created);
+
+        let saved = store
+            .save(
+                guide_key,
+                &json!(4040.25),
+                &json!("section-7"),
+                &json!("去河堤下方与老人对话"),
+                &json!(-17.5),
+            )
+            .unwrap();
+        let other_game = store.touch("2:heybox-249c72219fed").unwrap();
+        let mut touched = store.touch(guide_key).unwrap();
+        assert!(touched["updated_at_ms"].as_u64() > other_game["updated_at_ms"].as_u64());
+        assert_eq!(store.recent(None, 1).unwrap()[0].app_id, "1113000");
+        assert_eq!(store.get("2:heybox-249c72219fed").unwrap(), other_game);
+        touched["updated_at_ms"] = saved["updated_at_ms"].clone();
+        assert_eq!(touched, saved);
+    }
+
+    #[test]
+    fn touching_waits_for_the_writer_and_preserves_its_latest_position() {
+        let directory = TestDirectory::new("reader_positions.json");
+        let path = directory.path();
+        let store = ReaderPositionStore::new(path.clone());
+        let guide_key = "1:heybox-249c72219fed";
+        store.touch(guide_key).unwrap();
+        let writer_lock = acquire_store_lock(&path).unwrap();
+        let (started_sender, started_receiver) = mpsc::channel();
+        let (result_sender, result_receiver) = mpsc::channel();
+        let toucher = thread::spawn(move || {
+            started_sender.send(()).unwrap();
+            result_sender
+                .send(ReaderPositionStore::new(path).touch(guide_key))
+                .unwrap();
+        });
+        started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert!(
+            result_receiver
+                .recv_timeout(Duration::from_millis(50))
+                .is_err()
+        );
+
+        let mut document = store.read_document().unwrap();
+        let saved = ReaderPosition {
+            scroll_top: 911.5,
+            section_id: Some("latest-section".into()),
+            anchor_text: Some("刚保存的新位置".into()),
+            anchor_offset: -5.0,
+            updated_at_ms: JAVASCRIPT_MAX_SAFE_INTEGER - 1,
+        };
+        document.positions.insert(guide_key.into(), saved.clone());
+        store.write_atomic(&document).unwrap();
+        drop(writer_lock);
+
+        let touched = result_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("touch did not resume after the writer unlocked")
+            .unwrap();
+        toucher.join().unwrap();
+        let mut expected = reader_position_value(&saved);
+        expected["updated_at_ms"] = json!(JAVASCRIPT_MAX_SAFE_INTEGER);
+        assert_eq!(touched, expected);
+        assert_eq!(store.get(guide_key).unwrap(), expected);
+    }
+
+    #[test]
+    fn touching_rejects_invalid_full_or_corrupt_stores_without_overwriting_them() {
+        let directory = TestDirectory::new("reader_positions.json");
+        let path = directory.path();
+        let store = ReaderPositionStore::new(path.clone());
+        assert!(matches!(store.touch("bad"), Err(StoreError::Validation(_))));
+        assert!(!path.exists());
+
+        let mut document = ReaderDocument::default();
+        for guide in 1..=MAX_POSITIONS {
+            document.positions.insert(
+                format!("1:{guide}"),
+                ReaderPosition {
+                    scroll_top: 1.0,
+                    section_id: None,
+                    anchor_text: None,
+                    anchor_offset: 0.0,
+                    updated_at_ms: 1,
+                },
+            );
+        }
+        store.write_atomic(&document).unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(matches!(
+            store.touch("1:heybox-249c72219fed"),
+            Err(StoreError::Storage("reader position limit reached"))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(store.touch("1:1").is_ok());
+
+        document.positions.get_mut("1:1").unwrap().updated_at_ms = JAVASCRIPT_MAX_SAFE_INTEGER;
+        store.write_atomic(&document).unwrap();
+        let before = fs::read(&path).unwrap();
+        assert!(matches!(store.touch("1:1"), Err(StoreError::Validation(_))));
+        assert_eq!(fs::read(&path).unwrap(), before);
+
+        fs::write(&path, b"broken").unwrap();
+        assert!(matches!(store.touch("1:1"), Err(StoreError::Storage(_))));
+        assert_eq!(fs::read(&path).unwrap(), b"broken");
     }
 
     #[test]

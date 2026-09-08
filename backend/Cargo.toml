@@ -7,11 +7,15 @@ publish = false
 
 [dependencies]
 base64 = "0.22"
+getrandom = "0.2"
 html-escape = "0.2"
+httparse = "1"
 # 0.25.10 raises MSRV; enable only the formats accepted by the offline cache.
 image = { version = "=0.25.9", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 libc = "0.2"
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 sha2 = "0.10"
+subtle = "2"
+tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 url = "2"

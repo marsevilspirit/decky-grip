@@ -275,6 +275,7 @@ class RustSidecar:
         params: Dict[str, Any],
         *,
         timeout: Optional[float] = None,
+        on_sent: Optional[Callable[[], None]] = None,
     ) -> Any:
         deadline = time.monotonic() + (
             self.RESPONSE_TIMEOUT_SECONDS if timeout is None else timeout
@@ -311,6 +312,8 @@ class RustSidecar:
         try:
             try:
                 self._write_request(payload, deadline)
+                if on_sent is not None:
+                    on_sent()
             except FutureTimeoutError:
                 raise
             except (OSError, ValueError):

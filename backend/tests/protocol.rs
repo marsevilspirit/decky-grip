@@ -52,12 +52,31 @@ fn browser_import_and_reader_history_round_trip_without_relaxing_native_position
         call("guides.get_cached", json!({"guide_id": id}))["result"],
         Value::Null
     );
+    for app_id in [json!(null), json!(1113000), json!("0"), json!("../1")] {
+        let rejected = call(
+            "guides.commit_import",
+            json!({"guide_id": id, "token": prepared["result"]["token"], "app_id": app_id}),
+        );
+        assert_eq!(rejected["error"]["kind"], "validation", "{rejected}");
+        assert_eq!(
+            call("guides.get_cached", json!({"guide_id": id}))["result"],
+            Value::Null
+        );
+    }
     assert_eq!(
         call(
-            "guides.commit",
-            json!({"guide_id": id, "token": prepared["result"]["token"]})
+            "guides.commit_import",
+            json!({"guide_id": id, "token": prepared["result"]["token"], "app_id": "1113000"})
         )["ok"],
         true
+    );
+    assert_eq!(
+        call("guides.list", json!({"app_id": "1113000"}))["result"][0]["guideId"],
+        id
+    );
+    assert_eq!(
+        call("reader_positions.get", json!({"guide_key": key}))["result"]["scroll_top"],
+        0.0
     );
     assert_eq!(
         call("guides.download_status", json!({"guide_id": id}))["result"]["state"],
@@ -91,6 +110,24 @@ fn browser_import_and_reader_history_round_trip_without_relaxing_native_position
     let library = call("guides.list", json!({"app_id": "1113000"}));
     assert_eq!(library["result"][0]["guideId"], id);
     assert_eq!(library["result"][0]["cache"]["title"], "Article");
+    let bookmark = call("reader_positions.get", json!({"guide_key": key}))["result"].clone();
+    let replacement = json!({"guideId": id, "title": "Updated", "author": "Author", "sourceUrl": "https://www.xiaoheihe.cn/app/bbs/link/8a79701fa858",
+        "sections": [{"id": "1", "title": "正文", "html": "<p>Updated content</p>"}], "imageUrls": []});
+    let prepared = call("guides.prepare_import", json!({"guide": replacement}));
+    assert_eq!(
+        call(
+            "guides.commit_import",
+            json!({"guide_id": id, "token": prepared["result"]["token"], "app_id": "1113000"})
+        )["ok"],
+        true
+    );
+    let updated = call("reader_positions.get", json!({"guide_key": key}))["result"].clone();
+    for field in ["scroll_top", "section_id", "anchor_text", "anchor_offset"] {
+        assert_eq!(updated[field], bookmark[field]);
+    }
+    assert!(
+        updated["updated_at_ms"].as_u64().unwrap() > bookmark["updated_at_ms"].as_u64().unwrap()
+    );
     assert_eq!(
         call("positions.snapshot", json!({}))["result"]["1113000:123"]["scroll_top"],
         99.0
@@ -103,6 +140,39 @@ fn browser_import_and_reader_history_round_trip_without_relaxing_native_position
         call("reader_positions.get", json!({"guide_key": key}))["result"]["scroll_top"],
         50.0
     );
+    assert_eq!(
+        call("imports.phone_get", json!({"session_id": "missing"}))["result"],
+        json!({"state": "expired"})
+    );
+    assert_eq!(
+        call("imports.phone_stop", json!({"session_id": 1}))["error"]["kind"],
+        "validation"
+    );
+    assert_eq!(
+        call("imports.shutdown", json!({"unexpected": true}))["error"]["kind"],
+        "protocol"
+    );
+    assert_eq!(
+        call(
+            "imports.capture",
+            json!({"source_url": "http://example.invalid", "marker": "a".repeat(32)})
+        )["ok"],
+        false
+    );
+    assert_eq!(call("imports.shutdown", json!({}))["ok"], true);
+    // Closed resources cannot start listeners or attach to the local CEF endpoint.
+    assert!(
+        call("imports.phone_start", json!({}))["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("卸载")
+    );
+    assert!(call("imports.capture", json!({"source_url": "https://www.xiaoheihe.cn/app/bbs/link/249c72219fed", "marker": "a".repeat(32)}))["error"]["message"].as_str().unwrap().contains("卸载"));
+    assert_eq!(
+        call("imports.cancel_capture", json!({"marker": "a".repeat(32)}))["ok"],
+        true
+    );
+    assert_eq!(call("imports.shutdown", json!({}))["ok"], true);
     drop(input);
     assert!(child.wait().unwrap().success());
 }

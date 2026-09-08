@@ -18,8 +18,9 @@ restore it when the guide is opened again.
 
 - **TypeScript/React** integrates with Decky and Steam's Gamepad UI.
 - A resident **Rust sidecar** owns positions, public-guide download and
-  sanitization, body/image caches, and physical L4 input. The Python Decky bridge
-  also handles temporary browser capture and the opt-in LAN link inbox.
+  sanitization, body/image caches, physical L4 input, temporary CEF article
+  capture, and the opt-in LAN link inbox. Python only adapts Decky lifecycle,
+  events and RPC transport to this sidecar.
 - **GRIP Reader** renders the validated Rust response in a dedicated Decky
   route.
 - In GRIP Reader, images never load directly from the web. The backend validates,

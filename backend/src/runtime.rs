@@ -6,6 +6,7 @@ use crate::guide_html::localized_image_urls;
 use crate::guide_images::{GuideImageCache, ImageError, ImageErrorKind};
 use crate::guides::{GuideError, GuideErrorKind, GuideReader};
 use crate::hotkey::{HotkeyEvent, L4HotkeyMonitor};
+use crate::import_sessions::{CaptureJob, ImportSessions};
 use serde_json::{Value, json};
 use std::collections::{HashSet, VecDeque};
 use std::io::{self, BufRead, Read, Write};
@@ -17,7 +18,7 @@ use std::thread;
 use std::time::Duration;
 
 const QUEUE_CAPACITY: usize = 64;
-// The reader can issue three image RPCs at once; keep one slot for foreground work.
+// Images and CEF captures share three slots; keep one for foreground/cancel work.
 const GENERAL_WORKERS: usize = 4;
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const GUIDE_LIBRARY_LIMIT: usize = 20;
@@ -25,6 +26,7 @@ const MAX_IMPORT_REQUEST_BYTES: usize = crate::guides::MAX_IMPORT_BYTES + MAX_RE
 
 enum Work {
     Request(Value),
+    Capture(Value, CaptureJob),
     Ready(Value),
 }
 
@@ -32,7 +34,7 @@ enum Work {
 struct GeneralState {
     requests: VecDeque<Work>,
     active_guides: HashSet<String>,
-    active_images: usize,
+    active_background: usize,
     closed: bool,
 }
 
@@ -65,20 +67,20 @@ impl GeneralQueue {
         loop {
             // ponytail: scan at most 64 jobs; index queues only if this fixed bound grows.
             let runnable = state.requests.iter().position(|work| {
-                (!is_image_request(work) || state.active_images < GENERAL_WORKERS - 1)
+                (!is_background_request(work) || state.active_background < GENERAL_WORKERS - 1)
                     && guide_request_id(work)
                         .is_none_or(|guide_id| !state.active_guides.contains(guide_id))
             });
             if let Some(index) = runnable {
                 let work = state.requests.remove(index).expect("request index exists");
                 let guide_id = guide_request_id(&work).map(str::to_owned);
-                let image_request = is_image_request(&work);
-                state.active_images += usize::from(image_request);
+                let background_request = is_background_request(&work);
+                state.active_background += usize::from(background_request);
                 if let Some(guide_id) = &guide_id {
                     state.active_guides.insert(guide_id.clone());
                 }
                 self.space.notify_one();
-                return Some((work, guide_id, image_request));
+                return Some((work, guide_id, background_request));
             }
             if state.closed && state.requests.is_empty() {
                 return None;
@@ -90,12 +92,12 @@ impl GeneralQueue {
         }
     }
 
-    fn complete(&self, guide_id: Option<&str>, image_request: bool) {
+    fn complete(&self, guide_id: Option<&str>, background_request: bool) {
         let mut state = lock(&self.state);
         if let Some(guide_id) = guide_id {
             state.active_guides.remove(guide_id);
         }
-        state.active_images -= usize::from(image_request);
+        state.active_background -= usize::from(background_request);
         self.ready.notify_all();
     }
 
@@ -109,7 +111,7 @@ impl GeneralQueue {
 struct GeneralLease<'a> {
     queue: &'a GeneralQueue,
     guide_id: Option<String>,
-    image_request: bool,
+    background_request: bool,
 }
 
 struct GeneralServices {
@@ -117,17 +119,19 @@ struct GeneralServices {
     guides: Arc<GuideReader>,
     images: Arc<GuideImageCache>,
     reader_store: ReaderPositionStore,
+    imports: Arc<ImportSessions>,
 }
 
 impl Drop for GeneralLease<'_> {
     fn drop(&mut self) {
         self.queue
-            .complete(self.guide_id.as_deref(), self.image_request);
+            .complete(self.guide_id.as_deref(), self.background_request);
     }
 }
 
-fn is_image_request(work: &Work) -> bool {
-    matches!(work, Work::Request(request) if request_fields(request)
+fn is_background_request(work: &Work) -> bool {
+    matches!(work, Work::Capture(..))
+        || matches!(work, Work::Request(request) if request_fields(request)
         .is_ok_and(|(method, _)| matches!(method, "images.get" | "images.download" | "guides.download_status")))
 }
 
@@ -146,6 +150,7 @@ fn guide_request_id(work: &Work) -> Option<&str> {
             | "guides.remove_offline"
             | "guides.prepare"
             | "guides.commit"
+            | "guides.commit_import"
             | "guides.discard"
     ) {
         return None;
@@ -278,8 +283,13 @@ fn dispatch_general(
                     .map_err(RequestError::Guide)
             }
         }
-        "guides.commit" | "guides.discard" => {
-            let object = params_with_fields(params, &["guide_id", "token"])?;
+        "guides.commit" | "guides.commit_import" | "guides.discard" => {
+            let fields: &[&str] = if method == "guides.commit_import" {
+                &["guide_id", "token", "app_id"]
+            } else {
+                &["guide_id", "token"]
+            };
+            let object = params_with_fields(params, fields)?;
             let guide_id = object["guide_id"].as_str().ok_or(StoreError::Validation(
                 "guide_id must be a positive decimal string",
             ))?;
@@ -289,7 +299,26 @@ fn dispatch_general(
                 .ok_or(StoreError::Validation(
                     "token must be a nonempty string of at most 128 bytes",
                 ))?;
-            if method == "guides.commit" {
+            if method == "guides.commit_import" {
+                let app_id = object["app_id"].as_str().filter(|id| valid_id(id)).ok_or(
+                    StoreError::Validation("app_id must be a positive decimal string"),
+                )?;
+                let guide_key = format!("{app_id}:{guide_id}");
+                crate::validate_reader_guide_key(&guide_key)?;
+                // Reject invalid/corrupt association storage before publishing. The
+                // final touch reads again under flock, preserving concurrent scrolls.
+                reader_store.get(&guide_key)?;
+                let guide = guides
+                    .commit(guide_id, token, images)
+                    .map_err(RequestError::Guide)?;
+                reader_store.touch(&guide_key).map_err(|error| {
+                    RequestError::Guide(GuideError::cache(format!(
+                        "图文已保存，但游戏关联记录保存失败，请重试导入：{}",
+                        error.message()
+                    )))
+                })?;
+                Ok(guide)
+            } else if method == "guides.commit" {
                 guides
                     .commit(guide_id, token, images)
                     .map_err(RequestError::Guide)
@@ -476,6 +505,7 @@ fn store_worker<W: Write>(
                 dispatch(&store, &reader_store, method, params).map_err(RequestError::Store)
             }),
             Work::Ready(response) => response,
+            Work::Capture(..) => unreachable!("captures use the general queue"),
         };
         if !write_or_stop(&writer, &response, &errors, &failed) {
             break;
@@ -494,19 +524,22 @@ fn general_worker<W: Write>(
         if failed.load(Ordering::Acquire) {
             break;
         }
-        let Some((work, guide_id, image_request)) = requests.recv() else {
+        let Some((work, guide_id, background_request)) = requests.recv() else {
             break;
         };
         let lease = GeneralLease {
             queue: &requests,
             guide_id,
-            image_request,
+            background_request,
         };
         if failed.load(Ordering::Acquire) {
             break;
         }
         let response = match work {
             Work::Request(request) => response_for_request(&request, |method, params| {
+                if method.starts_with("imports.") {
+                    return dispatch_imports(&services.imports, method, params);
+                }
                 dispatch_general(
                     &services.monitor,
                     &services.guides,
@@ -516,6 +549,9 @@ fn general_worker<W: Write>(
                     params,
                 )
             }),
+            Work::Capture(request, capture) => {
+                response_for_request(&request, |_, _| capture.run().map_err(RequestError::Guide))
+            }
             Work::Ready(response) => response,
         };
         let written = write_or_stop(&writer, &response, &errors, &failed);
@@ -566,7 +602,70 @@ fn forward_events<W: Write>(
     }
 }
 
-fn queue_request(line: &[u8], stores: &SyncSender<Work>, general: &GeneralQueue) -> io::Result<()> {
+fn dispatch_imports(
+    imports: &ImportSessions,
+    method: &str,
+    params: Option<&Value>,
+) -> Result<Value, RequestError> {
+    match method {
+        "imports.phone_start" | "imports.shutdown" => {
+            empty_params(params)?;
+            if method == "imports.phone_start" {
+                imports.start_phone().map_err(RequestError::Guide)
+            } else {
+                imports.shutdown();
+                Ok(Value::Null)
+            }
+        }
+        "imports.phone_get" | "imports.phone_stop" | "imports.cancel_capture" => {
+            let field = if method == "imports.cancel_capture" {
+                "marker"
+            } else {
+                "session_id"
+            };
+            let object = params_with_fields(params, &[field])?;
+            let id = object[field]
+                .as_str()
+                .filter(|id| !id.is_empty() && id.len() <= 64)
+                .ok_or(StoreError::Validation("invalid import session identifier"))?;
+            match method {
+                "imports.phone_get" => Ok(imports.get_phone(id)),
+                "imports.phone_stop" => {
+                    imports.stop_phone(id);
+                    Ok(Value::Null)
+                }
+                _ => {
+                    imports.cancel_capture(id);
+                    Ok(Value::Null)
+                }
+            }
+        }
+        _ => Err(StoreError::Protocol("unknown import method").into()),
+    }
+}
+
+fn reserve_capture(
+    imports: &Arc<ImportSessions>,
+    params: Option<&Value>,
+) -> Result<CaptureJob, RequestError> {
+    let object = params_with_fields(params, &["source_url", "marker"])?;
+    let source_url = object["source_url"]
+        .as_str()
+        .ok_or(StoreError::Validation("source_url must be a string"))?;
+    let marker = object["marker"]
+        .as_str()
+        .ok_or(StoreError::Validation("marker must be a string"))?;
+    imports
+        .reserve_capture(source_url, marker)
+        .map_err(RequestError::Guide)
+}
+
+fn queue_request(
+    line: &[u8],
+    stores: &SyncSender<Work>,
+    general: &GeneralQueue,
+    imports: &Arc<ImportSessions>,
+) -> io::Result<()> {
     let request = match serde_json::from_slice::<Value>(line) {
         Ok(request) => request,
         Err(_) => {
@@ -580,8 +679,16 @@ fn queue_request(line: &[u8], stores: &SyncSender<Work>, general: &GeneralQueue)
             .send(Work::Request(request))
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "storage worker stopped"))
     } else {
+        let work = if let Ok(("imports.capture", params)) = request_fields(&request) {
+            match reserve_capture(imports, params) {
+                Ok(capture) => Work::Capture(request, capture),
+                Err(error) => Work::Ready(error_response(request["id"].clone(), error)),
+            }
+        } else {
+            Work::Request(request)
+        };
         general
-            .send(Work::Request(request))
+            .send(work)
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "general worker stopped"))
     }
 }
@@ -624,6 +731,7 @@ pub fn serve_with_hotkey_roots(
         let (store_requests, store_receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
         let general_requests = Arc::new(GeneralQueue::default());
         let general_services = Arc::new(GeneralServices {
+            imports: Arc::new(ImportSessions::default()),
             monitor: Arc::clone(&monitor),
             guides: Arc::clone(&guides),
             images: Arc::clone(&images),
@@ -722,13 +830,19 @@ pub fn serve_with_hotkey_roots(
                 ));
                 break;
             }
-            if let Err(error) = queue_request(&line, &store_requests, &general_requests) {
+            if let Err(error) = queue_request(
+                &line,
+                &store_requests,
+                &general_requests,
+                &general_services.imports,
+            ) {
                 result = Err(error);
                 break;
             }
         }
 
         drop(store_requests);
+        general_services.imports.shutdown();
         general_requests.close();
         let mut worker_panicked = store_thread.join().is_err();
         for worker in general_threads {
@@ -816,11 +930,112 @@ mod tests {
         images: Arc<GuideImageCache>,
     ) -> Arc<GeneralServices> {
         Arc::new(GeneralServices {
+            imports: Arc::new(ImportSessions::default()),
             monitor,
             guides,
             images,
             reader_store: ReaderPositionStore::new(root.join("reader_positions.json")),
         })
+    }
+
+    #[test]
+    fn capture_queue_reserves_before_cancel_and_leaves_foreground_capacity() {
+        let imports = Arc::new(ImportSessions::default());
+        let queue = GeneralQueue::default();
+        let (stores, _receiver) = mpsc::sync_channel(1);
+        for id in 1..=4 {
+            let request = json!({"id": id, "method": "imports.capture", "params": {
+                "source_url": "https://www.xiaoheihe.cn/app/bbs/link/249c72219fed", "marker": format!("{id:032x}")
+            }});
+            queue_request(
+                &serde_json::to_vec(&request).unwrap(),
+                &stores,
+                &queue,
+                &imports,
+            )
+            .unwrap();
+        }
+        queue
+            .send(Work::Request(json!({"id": 5, "method": "ping"})))
+            .unwrap();
+        let mut active = Vec::new();
+        for _ in 0..3 {
+            let (work, guide, background) = queue.recv().unwrap();
+            assert!(matches!(work, Work::Capture(..)) && background && guide.is_none());
+            active.push(work);
+        }
+        let (work, _, background) = queue.recv().unwrap();
+        assert!(matches!(work, Work::Request(request) if request["id"] == 5));
+        assert!(!background);
+        imports.cancel_capture(&format!("{:032x}", 4));
+        queue.complete(None, true);
+        let (work, _, background) = queue.recv().unwrap();
+        assert!(background);
+        let Work::Capture(_, capture) = work else {
+            panic!("queued capture")
+        };
+        assert!(capture.run().unwrap_err().message().contains("取消"));
+        imports.shutdown();
+        for work in active {
+            let Work::Capture(_, capture) = work else {
+                unreachable!()
+            };
+            assert!(capture.run().is_err());
+        }
+    }
+
+    #[test]
+    fn imported_commit_reports_association_failure_after_complete_publication() {
+        let directory = crate::test_support::TestDirectory::new("reader_positions.json");
+        let guides = Arc::new(GuideReader::with_fetcher(
+            directory.0.join("guides"),
+            |_, _, _| panic!("import never fetches Steam"),
+            || 1,
+        ));
+        let images = empty_images();
+        let (events, _receiver) = mpsc::channel();
+        let (device, sysfs, proc_root) = missing_roots();
+        let monitor = Arc::new(Mutex::new(L4HotkeyMonitor::new(
+            events, device, sysfs, proc_root,
+        )));
+        let reader_store = ReaderPositionStore::new(directory.path());
+        let call = |method: &str, params: Value| {
+            response_for_request(
+                &json!({"id": 1, "method": method, "params": params}),
+                |method, params| {
+                    dispatch_general(&monitor, &guides, &images, &reader_store, method, params)
+                },
+            )
+        };
+        let id = "heybox-249c72219fed";
+        let guide = json!({"guideId": id, "title": "Imported", "author": "Author", "sourceUrl": "https://www.xiaoheihe.cn/app/bbs/link/249c72219fed",
+            "sections": [{"id": "1", "title": "正文", "html": "<p>Complete text-only article</p>"}], "imageUrls": []});
+        let prepared = call("guides.prepare_import", json!({"guide": guide}));
+        assert_eq!(prepared["ok"], true);
+        let params =
+            json!({"guide_id": id, "token": prepared["result"]["token"], "app_id": "1113000"});
+        std::fs::write(directory.path(), b"corrupt").unwrap();
+        assert_eq!(
+            call("guides.commit_import", params.clone())["error"]["kind"],
+            "storage"
+        );
+        assert!(guides.get_cached(id).unwrap().is_none());
+        // A valid, full store passes preflight but cannot add another game entry.
+        let positions: serde_json::Map<_, _> = (1..=crate::MAX_POSITIONS).map(|id| (format!("1:{id}"), json!({"scroll_top": 0, "section_id": null, "anchor_text": null, "anchor_offset": 0, "updated_at_ms": 1}))).collect();
+        let bytes =
+            serde_json::to_vec(&json!({"schema_version": 1, "positions": positions})).unwrap();
+        std::fs::write(directory.path(), &bytes).unwrap();
+        let response = call("guides.commit_import", params);
+        assert_eq!(response["ok"], false, "{response}");
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("图文已保存，但游戏关联记录保存失败"),
+            "{response}"
+        );
+        assert_eq!(guides.get_cached(id).unwrap().unwrap()["offline"], true);
+        assert_eq!(std::fs::read(directory.path()).unwrap(), bytes);
     }
 
     #[test]

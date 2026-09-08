@@ -27,7 +27,6 @@ fake_decky.logger = _TestLogger()
 sys.modules["decky"] = fake_decky
 
 import main as plugin_main  # noqa: E402
-import import_sessions  # noqa: E402
 from rust_sidecar import RustSidecar, RustSidecarError  # noqa: E402
 
 
@@ -35,9 +34,11 @@ def make_sidecar():
     sidecar = mock.Mock()
     sidecar.responses = {
         "positions.snapshot": {},
-        "positions.repair": {"repaired": False, "backup": None},
+        "positions.repair_all": {
+            "positions": {"repaired": False, "backup": None},
+            "readerPositions": {"repaired": False, "backup": None},
+        },
         "reader_positions.get": None,
-        "reader_positions.repair": {"repaired": False, "backup": None},
         "guides.list": [],
         "hotkey.status": {
             "available": False,
@@ -48,6 +49,8 @@ def make_sidecar():
     }
 
     def request(method, _params, **_kwargs):
+        if _kwargs.get("on_sent") is not None:
+            _kwargs["on_sent"]()
         response = sidecar.responses.get(method)
         if isinstance(response, Exception):
             raise response
@@ -183,7 +186,7 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
         }
         self.sidecar.responses["reader_positions.get"] = saved
         self.sidecar.responses["reader_positions.save"] = saved
-        self.sidecar.responses["positions.repair"] = {
+        self.sidecar.responses["positions.repair_all"]["positions"] = {
             "repaired": True,
             "backup": "/tmp/positions.bak",
         }
@@ -206,25 +209,17 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(repairs["positions"]["repaired"])
         self.assertFalse(repairs["readerPositions"]["repaired"])
 
-    async def test_store_repair_attempts_every_store_after_failures(self):
+    async def test_store_repair_forwards_the_combined_rust_result(self):
         plugin = self.plugin()
-        self.sidecar.responses["reader_positions.repair"] = RustSidecarError(
-            "reader unavailable"
-        )
+        self.sidecar.responses["positions.repair_all"]["readerPositions"] = {
+            "repaired": False, "backup": None, "error": "reader unavailable",
+        }
 
         repairs = await plugin.repair_position_stores()
 
         self.assertFalse(repairs["positions"]["repaired"])
         self.assertEqual(repairs["readerPositions"]["error"], "reader unavailable")
-        repair_calls = [
-            call.args[0]
-            for call in self.sidecar.request.call_args_list
-            if call.args[0].endswith(".repair")
-        ]
-        self.assertEqual(
-            repair_calls,
-            ["positions.repair", "reader_positions.repair"],
-        )
+        self.sidecar.request.assert_called_once_with("positions.repair_all", {})
 
     async def test_position_io_remains_serialized_when_cancelled(self):
         plugin = self.plugin()
@@ -262,6 +257,8 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
         release = threading.Event()
 
         def request(method, _params, **_kwargs):
+            if method == "imports.shutdown":
+                return None
             self.assertEqual(method, "positions.snapshot")
             started.set()
             release.wait(timeout=2)
@@ -480,54 +477,112 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_rendered_import_uses_fixed_capture_and_existing_prepared_transaction(self):
         plugin = self.plugin()
         guide = {"guideId": "heybox-249c72219fed", "sourceUrl": "https://www.xiaoheihe.cn/app/bbs/link/249c72219fed"}
-        with mock.patch.object(import_sessions, "capture_heybox", new=mock.AsyncMock(return_value=guide)) as capture:
-            self.assertEqual(await plugin.capture_heybox(guide["sourceUrl"], "a" * 32), guide)
-            capture.assert_awaited_once_with(guide["sourceUrl"], "a" * 32)
+        self.sidecar.responses["imports.capture"] = guide
+        self.assertEqual(await plugin.capture_heybox(guide["sourceUrl"], "a" * 32), guide)
+        self.sidecar.request.assert_called_once_with(
+            "imports.capture", {"source_url": guide["sourceUrl"], "marker": "a" * 32},
+            timeout=130, on_sent=mock.ANY,
+        )
+        self.assertFalse(plugin._capture_sends)
         self.sidecar.responses["guides.prepare_import"] = {"token": "import", "guide": guide}
         self.assertEqual((await plugin.prepare_imported_guide(guide))["token"], "import")
         self.sidecar.request.assert_called_with("guides.prepare_import", {"guide": guide}, timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS)
 
     async def test_cancel_capture_and_unload_stop_only_live_owned_work(self):
         plugin = self.plugin()
-        started = asyncio.Event()
+        started, release = threading.Event(), threading.Event()
 
-        async def pending_capture(*_args):
-            started.set()
-            await asyncio.Event().wait()
+        def request(method, _params, **kwargs):
+            if method == "imports.capture":
+                kwargs["on_sent"]()
+                started.set()
+                if not release.wait(2):
+                    raise TimeoutError("test release timed out")
+                raise RustSidecarError("capture canceled", kind="download")
+            release.set()
 
-        with mock.patch.object(import_sessions, "capture_heybox", side_effect=pending_capture):
-            task = asyncio.create_task(plugin.capture_heybox("source", "a" * 32))
-            await started.wait()
-            with self.assertRaisesRegex(ValueError, "正在使用"):
-                await plugin.capture_heybox("source", "a" * 32)
-            await plugin.cancel_heybox_capture("b" * 32)
-            self.assertFalse(task.done())
-            await plugin.cancel_heybox_capture("a" * 32)
-            with self.assertRaises(asyncio.CancelledError):
-                await task
+        self.sidecar.request.side_effect = request
+        for shutdown in (False, True):
             started.clear()
+            release.clear()
             task = asyncio.create_task(plugin.capture_heybox("source", "a" * 32))
-            await started.wait()
-            await plugin._unload()
-            with self.assertRaises(asyncio.CancelledError):
-                await task
+            try:
+                self.assertTrue(await asyncio.to_thread(started.wait, 2))
+                with self.assertRaisesRegex(ValueError, "正在使用"):
+                    await plugin.capture_heybox("source", "a" * 32)
+                await plugin.cancel_heybox_capture("b" * 32)
+                self.assertFalse(task.done())
+                if shutdown:
+                    await plugin._unload()
+                else:
+                    await plugin.cancel_heybox_capture("a" * 32)
+                with self.assertRaisesRegex(RustSidecarError, "canceled"):
+                    await task
+            finally:
+                release.set()
+        self.assertFalse(plugin._capture_sends)
 
-    async def test_phone_pairing_late_close_cannot_stop_a_new_session(self):
+    async def test_phone_pairing_forwards_exact_session_ids_to_rust(self):
         plugin = self.plugin()
-        first, second = mock.Mock(id="first"), mock.Mock(id="second")
-        first.start.return_value = {"id": "first"}
-        second.start.return_value = {"id": "second"}
-        second.snapshot.return_value = {"state": "waiting"}
-        with mock.patch.object(import_sessions, "PhoneImportSession", side_effect=[first, second]):
-            await plugin.start_phone_import()
-            await plugin.start_phone_import()
-            first.stop.assert_called_once()
-            await plugin.stop_phone_import("first")
-            second.stop.assert_not_called()
-            self.assertEqual(await plugin.get_phone_import("first"), {"state": "expired"})
-            self.assertEqual(await plugin.get_phone_import("second"), {"state": "waiting"})
-            await plugin._unload()
-            second.stop.assert_called_once()
+        self.sidecar.responses["imports.phone_start"] = {"id": "second", "url": "http://deck.local/#token", "expiresAt": 600}
+        self.sidecar.responses["imports.phone_get"] = {"state": "waiting"}
+        self.assertEqual((await plugin.start_phone_import())["id"], "second")
+        await plugin.stop_phone_import("first")
+        self.assertEqual(await plugin.get_phone_import("second"), {"state": "waiting"})
+        self.assertEqual(self.sidecar.request.call_args_list, [
+            mock.call("imports.phone_start", {}),
+            mock.call("imports.phone_stop", {"session_id": "first"}),
+            mock.call("imports.phone_get", {"session_id": "second"}),
+        ])
+
+    async def test_capture_cancellation_waits_for_queued_request_write_or_failure(self):
+        for explicit, fail_write in ((True, False), (False, False), (False, True)):
+            with self.subTest(explicit=explicit, fail_write=fail_write):
+                plugin = self.plugin()
+                queued, start_worker = asyncio.Event(), asyncio.Event()
+                finish_capture = threading.Event()
+                calls = []
+                run_io = plugin._run_executor_io
+
+                async def queued_io(function, *args, **kwargs):
+                    if not queued.is_set():
+                        queued.set()
+                        await start_worker.wait()
+                    return await run_io(function, *args, **kwargs)
+
+                def request(method, _params, **kwargs):
+                    calls.append(method)
+                    if method == "imports.capture":
+                        if fail_write:
+                            raise ValueError("write failed")
+                        kwargs["on_sent"]()
+                        if not finish_capture.wait(2):
+                            raise TimeoutError("test release timed out")
+                        raise RustSidecarError("canceled")
+                    finish_capture.set()
+
+                self.sidecar.request.side_effect = request
+                with mock.patch.object(plugin, "_run_executor_io", side_effect=queued_io):
+                    capture = asyncio.create_task(plugin.capture_heybox("source", "a" * 32))
+                    await queued.wait()
+                    if explicit:
+                        cancellation = asyncio.create_task(plugin.cancel_heybox_capture("a" * 32))
+                    else:
+                        capture.cancel()
+                        cancellation = capture
+                    await asyncio.sleep(0)
+                    self.assertFalse(cancellation.done())
+                    self.assertFalse(calls)
+                    if not explicit:
+                        capture.cancel()  # Cleanup must survive another cancellation.
+                    start_worker.set()
+                    try:
+                        results = await asyncio.wait_for(asyncio.gather(capture, cancellation, return_exceptions=True), 2)
+                        self.assertIsInstance(results[0], RustSidecarError if explicit else asyncio.CancelledError)
+                        self.assertEqual(calls, ["imports.capture", "imports.cancel_capture"])
+                        self.assertFalse(plugin._capture_sends)
+                    finally:
+                        finish_capture.set()
 
     async def test_unload_rejects_new_receivers_and_captures_before_sidecar_closes(self):
         plugin = self.plugin()
@@ -542,80 +597,103 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
         try:
             await asyncio.to_thread(closing.wait, 2)
             self.assertTrue(closing.is_set())
-            with mock.patch.object(import_sessions, "PhoneImportSession") as start:
-                with self.assertRaisesRegex(RuntimeError, "卸载"):
-                    await plugin.start_phone_import()
-                start.assert_not_called()
-            with mock.patch.object(import_sessions, "capture_heybox") as capture:
-                with self.assertRaisesRegex(RuntimeError, "卸载"):
-                    await plugin.capture_heybox("source", "a" * 32)
-                capture.assert_not_called()
+            with self.assertRaisesRegex(RuntimeError, "卸载"):
+                await plugin.start_phone_import()
+            with self.assertRaisesRegex(RuntimeError, "卸载"):
+                await plugin.capture_heybox("source", "a" * 32)
+            self.sidecar.request.assert_called_once_with("imports.shutdown", {})
         finally:
             release.set()
             await task
         self.assertEqual(await plugin.get_phone_import("closed"), {"state": "expired"})
 
+    async def test_capture_submit_failure_releases_a_waiting_cancel(self):
+        plugin = self.plugin()
+        queued, fail_submission = asyncio.Event(), asyncio.Event()
+        run_io = plugin._run_executor_io
+
+        async def failing_executor(function, *args, **kwargs):
+            if args[0] == "imports.capture":
+                queued.set()
+                await fail_submission.wait()
+                raise RuntimeError("executor closed")
+            return await run_io(function, *args, **kwargs)
+
+        with mock.patch.object(plugin, "_run_executor_io", side_effect=failing_executor):
+            capture = asyncio.create_task(plugin.capture_heybox("source", "a" * 32))
+            await queued.wait()
+            cancel = asyncio.create_task(plugin.cancel_heybox_capture("a" * 32))
+            await asyncio.sleep(0)
+            self.assertFalse(cancel.done())
+            fail_submission.set()
+            results = await asyncio.wait_for(asyncio.gather(capture, cancel, return_exceptions=True), 1)
+        self.assertIsInstance(results[0], RuntimeError)
+        self.assertIsNone(results[1])
+        self.assertFalse(plugin._capture_sends)
+        self.sidecar.request.assert_called_once_with("imports.cancel_capture", {"marker": "a" * 32})
+
     async def test_canceled_phone_start_waits_for_cleanup_before_allowing_retry(self):
         plugin = self.plugin()
         started, release = threading.Event(), threading.Event()
-        first, second = mock.Mock(id="first"), mock.Mock(id="second")
+        calls = []
 
-        def slow_start():
-            started.set()
-            if not release.wait(2):
-                raise TimeoutError("test release timed out")
-            return {"id": "first"}
+        def request(method, params, **_kwargs):
+            calls.append((method, params))
+            if method == "imports.phone_start":
+                if not started.is_set():
+                    started.set()
+                    if not release.wait(2):
+                        raise TimeoutError("test release timed out")
+                    return {"id": "first"}
+                return {"id": "second"}
 
-        first.start.side_effect = slow_start
-        second.start.return_value = {"id": "second"}
-        with mock.patch.object(import_sessions, "PhoneImportSession", side_effect=[first, second]):
-            task = asyncio.create_task(plugin.start_phone_import())
-            try:
-                self.assertTrue(await asyncio.to_thread(started.wait, 2))
-                task.cancel()
-                await asyncio.sleep(0)
-                self.assertFalse(task.done())
-                first.stop.assert_not_called()
-            finally:
-                release.set()
-            with self.assertRaises(asyncio.CancelledError):
-                await task
-            first.stop.assert_called_once_with()
-            self.assertEqual(await plugin.get_phone_import("first"), {"state": "expired"})
-            self.assertEqual(await plugin.start_phone_import(), {"id": "second"})
-            await plugin.stop_phone_import("second")
-            second.stop.assert_called_once_with()
+        self.sidecar.request.side_effect = request
+        task = asyncio.create_task(plugin.start_phone_import())
+        try:
+            self.assertTrue(await asyncio.to_thread(started.wait, 2))
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            self.assertFalse(task.done())
+            retry = asyncio.create_task(plugin.start_phone_import())
+            await asyncio.sleep(0)
+            self.assertFalse(retry.done())
+            self.assertEqual(calls, [("imports.phone_start", {})])
+            self.assertNotIn(("imports.phone_stop", {"session_id": "first"}), calls)
+        finally:
+            release.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(await retry, {"id": "second"})
+        self.assertEqual(calls, [
+            ("imports.phone_start", {}),
+            ("imports.phone_stop", {"session_id": "first"}),
+            ("imports.phone_start", {}),
+        ])
+        self.assertNotIn(("imports.phone_stop", {"session_id": "second"}), calls)
 
     async def test_unload_and_uninstall_keep_import_resources_ahead_of_sidecar_shutdown(self):
-        for method in ("_unload", "_uninstall"):
-            with self.subTest(method=method):
+        for method, fail in (("_unload", False), ("_uninstall", False), ("_unload", True)):
+            with self.subTest(method=method, fail=fail):
                 plugin = self.plugin()
                 events = []
-                started = asyncio.Event()
+                def request(name, _params):
+                    events.append(name)
+                    if fail:
+                        raise RustSidecarError("shutdown failed")
 
-                async def capture(*_args):
-                    started.set()
-                    try:
-                        await asyncio.Event().wait()
-                    finally:
-                        events.append("capture")
-
-                phone = mock.Mock(id="phone")
-                phone.stop.side_effect = lambda: events.append("phone")
+                self.sidecar.request.side_effect = request
                 self.sidecar.close.side_effect = lambda: events.append("sidecar")
                 with (
-                    mock.patch.object(import_sessions, "capture_heybox", side_effect=capture),
-                    mock.patch.object(import_sessions, "PhoneImportSession", return_value=phone),
                     mock.patch.object(plugin, "_stop_hotkey", side_effect=lambda: events.append("hotkey")),
                     mock.patch.object(plugin, "_stop_preloading", side_effect=lambda: events.append("preload")),
                 ):
-                    await plugin.start_phone_import()
-                    task = asyncio.create_task(plugin.capture_heybox("source", "a" * 32))
-                    await started.wait()
-                    await getattr(plugin, method)()
-                    with self.assertRaises(asyncio.CancelledError):
-                        await task
-                self.assertEqual(events, ["capture", "phone", "hotkey", "preload", "sidecar"])
+                    if fail:
+                        with self.assertRaisesRegex(RustSidecarError, "shutdown failed"):
+                            await getattr(plugin, method)()
+                    else:
+                        await getattr(plugin, method)()
+                self.assertEqual(events, ["imports.shutdown", "hotkey", "preload", "sidecar"])
 
     async def test_offline_transaction_and_structured_image_errors(self):
         plugin = self.plugin()
@@ -635,46 +713,27 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
             self.sidecar.responses["images.download"] = RustSidecarError("image error", kind=kind)
             self.assertEqual(await plugin.download_guide_image("https://images.steamusercontent.com/a.png"), {"saved": False, "kind": kind, "error": "image error"})
 
-    async def test_import_commit_associates_only_after_publication_and_preserves_position(self):
+    async def test_import_commit_uses_one_rust_rpc(self):
         plugin = self.plugin()
         guide_id = "heybox-249c72219fed"
         guide = {"guideId": guide_id, "title": "Imported"}
-        self.sidecar.responses["guides.commit"] = guide
-        for stored in (None, {
-            "scroll_top": 420,
-            "section_id": "3",
-            "anchor_text": "正文锚点",
-            "anchor_offset": 12,
-            "updated_at_ms": 100,
-        }):
-            with self.subTest(stored=stored):
-                self.sidecar.responses["reader_positions.get"] = stored
-                self.sidecar.request.reset_mock()
-                self.assertIs(await plugin.commit_imported_guide(guide_id, "candidate", "1113000"), guide)
-                position = stored or {"scroll_top": 0, "section_id": None, "anchor_text": None, "anchor_offset": 0}
-                self.assertEqual(self.sidecar.request.call_args_list, [
-                    mock.call("reader_positions.get", {"guide_key": f"1113000:{guide_id}"}),
-                    mock.call("guides.commit", {"guide_id": guide_id, "token": "candidate"}, timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS),
-                    mock.call("reader_positions.save", {
-                        "guide_key": f"1113000:{guide_id}",
-                        **{key: position[key] for key in ("scroll_top", "section_id", "anchor_text", "anchor_offset")},
-                    }),
-                ])
+        self.sidecar.responses["guides.commit_import"] = guide
+        self.assertIs(await plugin.commit_imported_guide(guide_id, "candidate", "1113000"), guide)
+        self.sidecar.request.assert_called_once_with(
+            "guides.commit_import", {"guide_id": guide_id, "token": "candidate", "app_id": "1113000"},
+            timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
+        )
 
     async def test_import_commit_validation_and_publication_failures_never_report_success(self):
         plugin = self.plugin()
-        methods = ["reader_positions.get", "guides.commit", "reader_positions.save"]
-        for failed in methods:
-            with self.subTest(failed=failed):
-                self.sidecar.responses.update({method: None for method in methods})
-                self.sidecar.responses[failed] = RustSidecarError("deliberate failure")
+        for error in (ValueError("invalid AppID"), RustSidecarError("publication failed"), RustSidecarError("association failed")):
+            with self.subTest(error=error):
+                self.sidecar.responses["guides.commit_import"] = error
                 self.sidecar.request.reset_mock()
-                with self.assertRaisesRegex(RuntimeError, "游戏关联记录保存失败" if failed == methods[-1] else "deliberate failure"):
+                with self.assertRaises(type(error)) as raised:
                     await plugin.commit_imported_guide("heybox-249c72219fed", "candidate", "1113000")
-                self.assertEqual(
-                    [call.args[0] for call in self.sidecar.request.call_args_list],
-                    methods[:methods.index(failed) + 1],
-                )
+                self.assertIs(raised.exception, error)
+                self.assertEqual(self.sidecar.request.call_count, 1)
 
     async def test_unload_and_cancellation_wait_for_import_association_and_reject_queued_commits(self):
         for cancel in (False, True):
@@ -686,7 +745,7 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
 
                 def request(method, _params, **_kwargs):
                     calls.append(method)
-                    if method == "guides.commit":
+                    if method == "guides.commit_import":
                         publishing.set()
                         if not release.wait(2):
                             raise TimeoutError("test release timed out")
@@ -717,7 +776,7 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsInstance(results[1], RuntimeError)
                 self.assertIn("卸载", str(results[1]))
                 self.assertIsNone(results[2])
-                self.assertEqual(calls, ["reader_positions.get", "guides.commit", "reader_positions.save", "close"])
+                self.assertEqual(calls, ["guides.commit_import", "imports.shutdown", "close"])
 
 
 if __name__ == "__main__":

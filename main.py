@@ -9,7 +9,6 @@ from typing import Any, Callable, Optional
 import decky
 
 from rust_sidecar import RustSidecar, RustSidecarError
-from import_sessions import ImportSessions
 
 
 class _ExecutorUnavailable(RuntimeError):
@@ -26,7 +25,7 @@ class Plugin:
             decky.logger,
         )
         self._io_lock = asyncio.Lock()
-        self._import_sessions = ImportSessions(self._run_executor_io)
+        self._capture_sends: dict[str, asyncio.Future] = {}
         self._closing = False
         self._preload_executor: Optional[concurrent.futures.ThreadPoolExecutor] = (
             concurrent.futures.ThreadPoolExecutor(
@@ -93,19 +92,19 @@ class Plugin:
         decky.logger.info("GRIP backend ready")
 
     async def _unload(self) -> None:
-        self._closing = True
-        await self._import_sessions.close()
-        self._stop_hotkey()
-        self._stop_preloading()
-        await self._run_io(self._sidecar.close)
+        await self._uninstall()
         decky.logger.info("GRIP backend stopped")
 
     async def _uninstall(self) -> None:
         self._closing = True
-        await self._import_sessions.close()
-        self._stop_hotkey()
-        self._stop_preloading()
-        await self._run_io(self._sidecar.close)
+        try:
+            await self._run_executor_io(
+                self._sidecar.request, "imports.shutdown", {}, wait_on_cancel=True
+            )
+        finally:
+            self._stop_hotkey()
+            self._stop_preloading()
+            await self._run_io(self._sidecar.close)
 
     def _stop_hotkey(self) -> None:
         self._event_loop = None
@@ -205,19 +204,90 @@ class Plugin:
         )
 
     async def capture_heybox(self, source_url: str, marker: str):
-        return await self._import_sessions.capture(source_url, marker)
+        if self._closing:
+            raise RuntimeError("插件正在卸载，无法导入指南")
+        if not isinstance(marker, str):
+            raise ValueError("无效的导入标记")
+        if marker in self._capture_sends:
+            raise ValueError("导入标记正在使用")
+        loop = asyncio.get_running_loop()
+        sent = loop.create_future()
+        self._capture_sends[marker] = sent
+
+        def mark_sent():
+            if not sent.done():
+                sent.set_result(None)
+
+        # Shield the queued worker: cancel must not overtake its request write.
+        operation = asyncio.create_task(self._run_executor_io(
+            self._sidecar.request, "imports.capture", {"source_url": source_url, "marker": marker},
+            timeout=130, on_sent=lambda: loop.call_soon_threadsafe(mark_sent),
+        ))
+        # A failed executor submission or write must also release the barrier.
+        operation.add_done_callback(lambda _task: mark_sent())
+        try:
+            return await asyncio.shield(operation)
+        except asyncio.CancelledError:
+            try:
+                await self._finish_task(asyncio.create_task(self.cancel_heybox_capture(marker)))
+            except Exception:
+                pass  # Transport failure also settles the pending capture.
+            try:
+                await self._finish_task(operation)
+            except Exception:
+                pass
+            raise
+        finally:
+            self._capture_sends.pop(marker, None)
+
+    @staticmethod
+    async def _finish_task(task: asyncio.Task):
+        # A second cancel must not interrupt cleanup of a request already sent.
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        return task.result()
 
     async def cancel_heybox_capture(self, marker: str):
-        await self._import_sessions.cancel_capture(marker)
+        sent = self._capture_sends.get(marker)
+        if sent is not None:
+            await asyncio.shield(sent)
+            await self._run_executor_io(
+                self._sidecar.request, "imports.cancel_capture", {"marker": marker},
+                wait_on_cancel=True,
+            )
 
     async def start_phone_import(self):
-        return await self._import_sessions.start_phone()
+        async with self._io_lock:
+            if self._closing:
+                raise RuntimeError("插件正在卸载，无法接收手机指南")
+            operation = asyncio.create_task(self._run_executor_io(
+                self._sidecar.request, "imports.phone_start", {}
+            ))
+            try:
+                return await asyncio.shield(operation)
+            except asyncio.CancelledError:
+                try:
+                    session = await self._finish_task(operation)
+                    await self._finish_task(asyncio.create_task(self.stop_phone_import(session["id"])))
+                except Exception:
+                    pass
+                raise
 
     async def get_phone_import(self, session_id: str):
-        return await self._import_sessions.get_phone(session_id)
+        if self._closing:
+            return {"state": "expired"}
+        return await self._run_executor_io(
+            self._sidecar.request, "imports.phone_get", {"session_id": session_id}
+        )
 
     async def stop_phone_import(self, session_id: str):
-        await self._import_sessions.stop_phone(session_id)
+        await self._run_executor_io(
+            self._sidecar.request, "imports.phone_stop", {"session_id": session_id},
+            wait_on_cancel=True,
+        )
 
     async def prepare_imported_guide(self, guide: dict):
         return await self._run_executor_io(
@@ -239,36 +309,11 @@ class Plugin:
         # Keep publication and its game association ahead of sidecar shutdown.
         if self._closing:
             raise RuntimeError("插件正在卸载，无法保存导入指南")
-        guide_key = f"{app_id}:{guide_id}"
-        position = self._sidecar.request(
-            "reader_positions.get", {"guide_key": guide_key}
-        ) or {
-            "scroll_top": 0,
-            "section_id": None,
-            "anchor_text": None,
-            "anchor_offset": 0,
-        }
-        guide = self._sidecar.request(
-            "guides.commit",
-            {"guide_id": guide_id, "token": token},
+        return self._sidecar.request(
+            "guides.commit_import",
+            {"guide_id": guide_id, "token": token, "app_id": app_id},
             timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
         )
-        try:
-            self._sidecar.request(
-                "reader_positions.save",
-                {
-                    "guide_key": guide_key,
-                    "scroll_top": position["scroll_top"],
-                    "section_id": position["section_id"],
-                    "anchor_text": position["anchor_text"],
-                    "anchor_offset": position["anchor_offset"],
-                },
-            )
-        except Exception as error:
-            raise RuntimeError(
-                f"图文已保存，但游戏关联记录保存失败，请重试导入：{error}"
-            ) from error
-        return guide
 
     async def discard_guide(self, guide_id: str, token: str):
         return await self._run_destructive_guide_io(
@@ -328,24 +373,8 @@ class Plugin:
     async def get_reader_cache_stats(self):
         return await self._run_executor_io(self._sidecar.request, "reader_cache.stats", {})
 
-    def _repair_position_stores(self):
-        repairs = {}
-        for name, method in (
-            ("positions", "positions.repair"),
-            ("readerPositions", "reader_positions.repair"),
-        ):
-            try:
-                repairs[name] = self._sidecar.request(method, {})
-            except Exception as error:
-                repairs[name] = {
-                    "repaired": False,
-                    "backup": None,
-                    "error": str(error) or type(error).__name__,
-                }
-        return repairs
-
     async def repair_position_stores(self):
-        return await self._run_io(self._repair_position_stores)
+        return await self._run_io(self._sidecar.request, "positions.repair_all", {})
 
     @staticmethod
     def _reader_position_for_frontend(position):
