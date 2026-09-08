@@ -430,8 +430,10 @@ impl GuideReader {
                 urls.extend(document_image_urls(&document)?);
             }
         }
-        for candidate in prepared.values() {
-            urls.extend(document_image_urls(&candidate.document)?);
+        for (id, candidate) in prepared {
+            if Some(id.as_str()) != excluding {
+                urls.extend(document_image_urls(&candidate.document)?);
+            }
         }
         Ok(urls)
     }
@@ -544,14 +546,11 @@ impl GuideReader {
                     }
                 };
                 let mut prepared = lock(&self.prepared);
-                prepared.remove(guide_id);
                 let urls = self.referenced_image_urls_locked(&prepared, Some(guide_id))?;
-                let removed_images = images
-                    .reclaim_unreferenced(&urls, OrphanImages::All)
-                    .map_err(|error| GuideError::cache(error.message()))?;
                 let (files_removed, bytes_removed) = if let Some(metadata) = metadata {
                     fs::remove_file(path)
                         .map_err(|_| GuideError::cache("cached guide could not be removed"))?;
+                    lock(&self.memo).remove(guide_id);
                     sync_directory(&self.cache_directory).map_err(|_| {
                         GuideError::cache(
                             "cached guide was removed but its directory could not be synced",
@@ -562,6 +561,11 @@ impl GuideReader {
                     (0, 0)
                 };
                 lock(&self.memo).remove(guide_id);
+                prepared.remove(guide_id);
+                // Preserve offline images until the body deletion is durable.
+                let removed_images = images
+                    .reclaim_unreferenced(&urls, OrphanImages::All)
+                    .map_err(|error| GuideError::cache(error.message()))?;
                 Ok(json!({
                     "bytesRemoved": bytes_removed + removed_images["bytesRemoved"].as_u64().unwrap_or(0),
                     "filesRemoved": files_removed + removed_images["filesRemoved"].as_u64().unwrap_or(0),

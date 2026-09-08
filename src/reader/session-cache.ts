@@ -252,16 +252,18 @@ export class ReaderSessionCache {
     position: CapturedReaderPosition | null,
   ): Promise<ReaderPosition> {
     const guideKey = makeGuideKey(identity);
-    const latestPosition = this.snapshots.get(guideKey)?.position ?? position;
+    const cachedPosition = this.snapshots.get(guideKey)?.position;
     const saved = this.queuePositionSave(
       identity,
-      latestPosition ?? {
-        scrollTop: 0,
-        sectionId: null,
-        anchorText: null,
-        anchorOffset: 0,
-      },
+      cachedPosition ??
+        position ?? {
+          scrollTop: 0,
+          sectionId: null,
+          anchorText: null,
+          anchorOffset: 0,
+        },
       this.accessOperation,
+      !cachedPosition,
     );
     this.accessOperation = saved.then(
       () => undefined,
@@ -274,6 +276,7 @@ export class ReaderSessionCache {
     identity: GuideIdentity,
     position: CapturedReaderPosition,
     before?: Promise<void>,
+    readStoredPosition = false,
   ): Promise<ReaderPosition> {
     const guideKey = makeGuideKey(identity);
     const generation = this.generation;
@@ -297,7 +300,7 @@ export class ReaderSessionCache {
     state.pending += 1;
     const optimisticPosition = stagedReaderPosition(position);
     const cached = this.snapshots.get(guideKey);
-    if (cached) {
+    if (cached && !readStoredPosition) {
       this.rememberSnapshot(guideKey, {
         ...cached,
         position: optimisticPosition,
@@ -306,6 +309,13 @@ export class ReaderSessionCache {
     return this.enqueuePositionOperation(guideKey, async () => {
       if (before) {
         await before;
+      }
+      if (readStoredPosition) {
+        // Resolve cold-cache access inside the save queue so it cannot replay
+        // an old bookmark over a scroll saved while a download was finishing.
+        const stored = await this.backend.getReaderPosition(guideKey);
+        state.confirmed = stored;
+        position = stored ?? position;
       }
       return this.persistPosition(
         guideKey,

@@ -143,13 +143,18 @@ describe("ReaderSessionCache", () => {
   });
 
   it("records reader access even when the position did not change", async () => {
-    const injected = backend();
+    const injected = backend({
+      getReaderPosition: vi.fn(async (key) =>
+        key === guideKey ? readerPosition(120) : null,
+      ),
+    });
     const cache = new ReaderSessionCache(injected);
     const loaded = await cache.load(identity);
     const firstOpen = { appId: identity.appId, guideId: "3414883878" };
     const handoff = capturedPosition(333);
 
     await cache.rememberAccess(identity, loaded.position);
+    expect(injected.getReaderPosition).toHaveBeenCalledTimes(1);
     await cache.rememberAccess(firstOpen, handoff);
 
     expect(injected.saveReaderPosition).toHaveBeenNthCalledWith(
@@ -170,6 +175,83 @@ describe("ReaderSessionCache", () => {
     );
   });
 
+  it.each(["pending", "complete"] as const)(
+    "keeps a newer %s save when recording a download without a warm snapshot",
+    async (savePhase) => {
+      const newSave = deferred<ReaderPosition>();
+      let stored = readerPosition(100);
+      const injected = backend({
+        getReaderPosition: vi.fn(async () => stored),
+        saveReaderPosition: vi
+          .fn<ReaderSessionBackend["saveReaderPosition"]>()
+          .mockImplementationOnce(async () => {
+            stored = await newSave.promise;
+            return stored;
+          })
+          .mockImplementation(async (_key, scrollTop) =>
+            readerPosition(scrollTop, 302),
+          ),
+      });
+      const cache = new ReaderSessionCache(injected);
+      await cache.load(identity);
+      // Removing the offline copy clears the session cache, not the mounted reader.
+      cache.clear();
+      const oldHandoff = capturedPosition(100);
+      const saving = cache.savePosition(identity, capturedPosition(777));
+      if (savePhase === "complete") {
+        newSave.resolve(readerPosition(777, 301));
+        await saving;
+      }
+      const recordingDownload = cache.rememberAccess(identity, oldHandoff);
+      await Promise.resolve();
+      if (savePhase === "pending") {
+        expect(injected.getReaderPosition).toHaveBeenCalledTimes(1);
+        newSave.resolve(readerPosition(777, 301));
+      }
+      await Promise.all([saving, recordingDownload]);
+
+      expect(
+        vi.mocked(injected.saveReaderPosition).mock.calls.map(([, top]) => top),
+      ).toEqual([777, 777]);
+    },
+  );
+
+  it("keeps a cold stored bookmark instead of the native handoff when recording a download", async () => {
+    const injected = backend();
+    const cache = new ReaderSessionCache(injected);
+
+    await cache.rememberAccess(identity, capturedPosition(999));
+
+    expect(injected.getReaderPosition).toHaveBeenCalledWith(guideKey);
+    expect(injected.getGuide).not.toHaveBeenCalled();
+    expect(injected.saveReaderPosition).toHaveBeenCalledWith(
+      guideKey,
+      120,
+      "10",
+      "Text",
+      12,
+    );
+  });
+
+  it.each([false, true])(
+    "does not overwrite an unreadable bookmark when recording a download (loaded: %s)",
+    async (loaded) => {
+      const failure = new Error("position store unreadable");
+      const injected = backend({
+        getReaderPosition: vi.fn(async () => {
+          throw failure;
+        }),
+      });
+      const cache = new ReaderSessionCache(injected);
+      if (loaded) await cache.load(identity);
+
+      await expect(cache.rememberAccess(identity, null)).rejects.toBe(failure);
+
+      expect(injected.saveReaderPosition).not.toHaveBeenCalled();
+      expect(cache.peek(identity)?.position ?? null).toBeNull();
+    },
+  );
+
   it("persists reader access in open order across different guides", async () => {
     const firstSave = deferred<ReaderPosition>();
     const secondIdentity = { appId: identity.appId, guideId: "3414883878" };
@@ -180,11 +262,16 @@ describe("ReaderSessionCache", () => {
         ? firstSave.promise
         : Promise.resolve(readerPosition(scrollTop, 302)),
     );
-    const cache = new ReaderSessionCache(backend({ saveReaderPosition }));
+    const cache = new ReaderSessionCache(
+      backend({
+        saveReaderPosition,
+        getReaderPosition: vi.fn(async () => null),
+      }),
+    );
 
     const first = cache.rememberAccess(identity, null);
     const second = cache.rememberAccess(secondIdentity, null);
-    await Promise.resolve();
+    await vi.waitFor(() => expect(saveReaderPosition).toHaveBeenCalledTimes(1));
 
     expect(saveReaderPosition).toHaveBeenCalledTimes(1);
     expect(saveReaderPosition).toHaveBeenLastCalledWith(
@@ -207,35 +294,39 @@ describe("ReaderSessionCache", () => {
     );
   });
 
-  it("reserves access before a newer position save for the same guide", async () => {
-    const blocker = { appId: "222", guideId: "20" };
-    const blockerKey = `${blocker.appId}:${blocker.guideId}`;
-    const blockedSave = deferred<ReaderPosition>();
-    const saveReaderPosition = vi.fn<
-      ReaderSessionBackend["saveReaderPosition"]
-    >((key, scrollTop) =>
-      key === blockerKey
-        ? blockedSave.promise
-        : Promise.resolve(readerPosition(scrollTop, 302)),
-    );
-    const cache = new ReaderSessionCache(backend({ saveReaderPosition }));
-    const loaded = await cache.load(identity);
+  it.each([false, true])(
+    "reserves access before a newer position save for the same guide (cold: %s)",
+    async (cold) => {
+      const blocker = { appId: "222", guideId: "20" };
+      const blockerKey = `${blocker.appId}:${blocker.guideId}`;
+      const blockedSave = deferred<ReaderPosition>();
+      const saveReaderPosition = vi.fn<
+        ReaderSessionBackend["saveReaderPosition"]
+      >((key, scrollTop) =>
+        key === blockerKey
+          ? blockedSave.promise
+          : Promise.resolve(readerPosition(scrollTop, 302)),
+      );
+      const cache = new ReaderSessionCache(backend({ saveReaderPosition }));
+      const loaded = await cache.load(identity);
+      if (cold) cache.clear();
 
-    const blocking = cache.rememberAccess(blocker, null);
-    const staleAccess = cache.rememberAccess(identity, loaded.position);
-    const latestSave = cache.savePosition(identity, capturedPosition(800));
-    await Promise.resolve();
+      const blocking = cache.rememberAccess(blocker, null);
+      const staleAccess = cache.rememberAccess(identity, loaded.position);
+      const latestSave = cache.savePosition(identity, capturedPosition(800));
+      await Promise.resolve();
 
-    blockedSave.resolve(readerPosition(0, 301));
-    await Promise.all([blocking, staleAccess, latestSave]);
+      blockedSave.resolve(readerPosition(0, 301));
+      await Promise.all([blocking, staleAccess, latestSave]);
 
-    expect(
-      saveReaderPosition.mock.calls
-        .filter(([key]) => key === guideKey)
-        .map(([, scrollTop]) => scrollTop),
-    ).toEqual([120, 800]);
-    expect(cache.peek(identity)?.position?.scrollTop).toBe(800);
-  });
+      expect(
+        saveReaderPosition.mock.calls
+          .filter(([key]) => key === guideKey)
+          .map(([, scrollTop]) => scrollTop),
+      ).toEqual([120, 800]);
+      if (!cold) expect(cache.peek(identity)?.position?.scrollTop).toBe(800);
+    },
+  );
 
   it("coalesces concurrent loads for the same guide key", async () => {
     const pendingGuide = deferred<DownloadedGuide>();

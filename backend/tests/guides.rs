@@ -58,6 +58,29 @@ fn deleting_one_offline_guide_preserves_shared_images_and_positions() {
     for url in &urls {
         images.download(url).unwrap();
     }
+    for id in ["1", "2"] {
+        let pending = guides.prepare(id, false, &images).unwrap();
+        guides
+            .commit(id, pending["token"].as_str().unwrap(), &images)
+            .unwrap();
+    }
+    let pending = guides.prepare("1", false, &images).unwrap();
+    let target = directory.0.join("guides/1.json");
+    let original = fs::read(&target).unwrap();
+    if unsafe { libc::geteuid() } != 0 {
+        let body_directory = directory.0.join("guides");
+        fs::set_permissions(&body_directory, fs::Permissions::from_mode(0o500)).unwrap();
+        let deletion = guides.remove_offline_guide("1", &images);
+        fs::set_permissions(&body_directory, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(deletion.is_err());
+        assert_eq!(fs::read(&target).unwrap(), original);
+        for url in &urls {
+            assert!(
+                images.is_downloaded(url).unwrap(),
+                "failed deletion lost {url}"
+            );
+        }
+    }
     let positions = directory.0.join("reader_positions.json");
     fs::write(&positions, b"keep this exact history").unwrap();
     // Corrupt sibling cache: fail before deleting any possibly shared data.
@@ -75,6 +98,10 @@ fn deleting_one_offline_guide_preserves_shared_images_and_positions() {
     assert_eq!(fs::read(&outside).unwrap(), body);
     fs::remove_file(&sibling).unwrap();
     fs::write(sibling, body).unwrap();
+    // A failed deletion must not consume the same guide's prepared update.
+    guides
+        .commit("1", pending["token"].as_str().unwrap(), &images)
+        .unwrap();
     assert_eq!(
         guides.remove_offline_guide("1", &images).unwrap()["filesRemoved"],
         2
@@ -86,10 +113,23 @@ fn deleting_one_offline_guide_preserves_shared_images_and_positions() {
     assert!(images.get(&urls[1], false).unwrap().is_none());
     assert!(images.is_downloaded(&urls[2]).unwrap());
     assert_eq!(fs::read(positions).unwrap(), b"keep this exact history");
+    let mut remaining_files = 3;
+    if unsafe { libc::geteuid() } != 0 {
+        let image_directory = directory.0.join("images");
+        fs::set_permissions(&image_directory, fs::Permissions::from_mode(0o500)).unwrap();
+        let deletion = guides.remove_offline_guide("2", &images);
+        fs::set_permissions(&image_directory, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(deletion.is_err());
+        // The body is gone even if image cleanup fails; do not retain its memo.
+        assert_eq!(guides.cache_stats().unwrap()["memoryEntries"], 0);
+        assert!(guides.get_cached("2").unwrap().is_none());
+        remaining_files = 2;
+    }
     assert_eq!(
         guides.remove_offline_guide("2", &images).unwrap()["filesRemoved"],
-        3
+        remaining_files
     );
+    assert_eq!(images.stats()["files"], 0);
 }
 
 #[test]

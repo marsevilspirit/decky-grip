@@ -430,12 +430,7 @@ export default definePlugin(() => {
       readerCache.acceptOfflineGuide(guide);
       if (mounted) {
         try {
-          // A native-page download may have no warm reader, but must retain its saved bookmark.
-          const position =
-            readerCache.peek(identity)?.position ??
-            (await getReaderPosition(makeGuideKey(identity))) ??
-            handoff;
-          await readerCache.rememberAccess(identity, position);
+          await readerCache.rememberAccess(identity, handoff);
         } catch (error: unknown) {
           toaster.toast({
             title: "GRIP：图文已下载，阅读记录保存失败",
