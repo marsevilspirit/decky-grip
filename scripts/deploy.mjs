@@ -8,7 +8,6 @@ import { buildPackage, run } from "./package.mjs";
 
 const HOMEBREW = "/home/deck/homebrew";
 const PLUGIN = `${HOMEBREW}/plugins/decky-grip`;
-const BACKUPS = "/home/deck/.local/share/grip-deployment-backups";
 export const SSH_OPTIONS = [
   "-o",
   "BatchMode=yes",
@@ -138,6 +137,13 @@ export function verifyInstalled(output, files, previousPids) {
   return pids;
 }
 
+export function verifySettings(before, after) {
+  const paths = new Set(after.split("\0"));
+  for (const path of before.split("\0").filter(Boolean)) {
+    if (!paths.has(path)) throw new Error(`设置文件丢失：${path}`);
+  }
+}
+
 const RPC_CHECK = `Promise.all([
   DeckyBackend.call("loader/call_plugin_method", "GRIP", "get_hotkey_status"),
   DeckyBackend.call("loader/call_plugin_method", "GRIP", "get_guide_library", null)
@@ -176,7 +182,7 @@ test "$(uname -m)" = x86_64
 systemctl is-active --quiet plugin_loader
 test -d ${quote(PLUGIN)} && test ! -L ${quote(PLUGIN)}
 test -d ${quote(`${HOMEBREW}/settings/decky-grip`)}
-command -v tar >/dev/null; command -v unzip >/dev/null; command -v sha256sum >/dev/null`);
+command -v find >/dev/null; command -v unzip >/dev/null; command -v sha256sum >/dev/null`);
     // Reserve an ephemeral loopback port. SSH fails closed if it is taken in between.
     const server = createServer();
     await new Promise((resolve, reject) => {
@@ -217,36 +223,25 @@ command -v tar >/dev/null; command -v unzip >/dev/null; command -v sha256sum >/d
     const pkg = await buildPackage({ signal });
     signal.throwIfAborted();
     const remoteDir = (
-      await ssh(
-        `umask 077; mkdir -p ${quote(BACKUPS)} && mktemp -d ${quote(`${BACKUPS}/deploy-XXXXXXXX`)}`,
-      )
+      await ssh("umask 077; mktemp -d /tmp/grip-deploy-XXXXXXXX")
     ).trim();
-    if (
-      !new RegExp(
-        `^${BACKUPS.replaceAll(".", "\\.")}/deploy-[a-zA-Z0-9]+$`,
-      ).test(remoteDir)
-    )
+    if (!/^\/tmp\/grip-deploy-[a-zA-Z0-9]{8}$/.test(remoteDir))
       throw new Error("设备返回了意外的部署目录，停止安装。");
     const remoteZip = `${remoteDir}/grip.zip`;
-    const backup = `${remoteDir}/before.tar.gz`;
     receipt = {
       host,
       archive: pkg.archive,
       sha256: pkg.sha256,
       files: pkg.files,
       remoteZip,
-      backup,
       state: "preparing",
     };
     receiptPath = join(pkg.directory, "deployment.json");
     await writeFile(receiptPath, JSON.stringify(receipt, null, 2));
-    console.log(`备份旧插件和设置：${backup}`);
-    await ssh(
-      `set -eu
-tar -czf ${quote(backup)} -C ${quote(HOMEBREW)} plugins/decky-grip settings/decky-grip
-tar -tzf ${quote(backup)} >/dev/null`,
-      300_000,
-    );
+    console.log("不创建回滚备份；保留并校验现有指南和设置。");
+    const snapshotSettings = () =>
+      ssh(`find ${quote(`${HOMEBREW}/settings/decky-grip`)} -print0`);
+    const settingsBefore = await snapshotSettings();
     await run("scp", [...SSH_OPTIONS, pkg.archive, `${host}:${remoteZip}`], {
       signal,
       timeout: 60_000,
@@ -309,27 +304,32 @@ sha256sum ${Object.keys(pkg.files)
       !receipt.startup.includes("GRIP backend ready")
     )
       throw new Error("未找到新后端的两条 ready 日志，请检查 Decky 日志。");
-    // Reader bookmarks can legitimately advance while the user reads. Never restore
-    // a backup automatically; only check that all backed-up settings files remain.
-    await ssh(
-      `set -eu
-tar -tzf ${quote(backup)} | while IFS= read -r entry; do
-  case "$entry" in settings/decky-grip/*) test -e ${quote(HOMEBREW)}/"$entry" || { printf 'Missing: %s\n' "$entry"; exit 1; };; esac
-done`,
-      120_000,
-    );
+    // Bookmarks can advance while reading; compare path inventories, not contents.
+    verifySettings(settingsBefore, await snapshotSettings());
     receipt.state = "verified";
     receipt.verified = verified;
+    // Do not clean in finally: Decky may still be reading the ZIP after a timeout.
+    try {
+      await ssh(`rm -- ${quote(remoteZip)} && rmdir -- ${quote(remoteDir)}`);
+      receipt.remoteZipRemoved = true;
+    } catch (error) {
+      receipt.cleanupError = error.message;
+      console.warn(
+        `部署验收通过，但临时包清理失败：${remoteZip}（${error.message}）`,
+      );
+    }
     console.log(
-      `部署完成：GRIP ${pkg.version}，文件、接口及两次稳定进程检查通过。\n回滚备份：${backup}\n部署记录：${receiptPath}\n实体按键和阅读体验仍需在 Deck 上确认。`,
+      `部署完成：GRIP ${pkg.version}，文件、接口及两次稳定进程检查通过。\n未创建回滚备份${receipt.remoteZipRemoved ? "，临时安装包已清理" : "，临时目录尚未清理完成"}。\n部署记录：${receiptPath}\n实体按键和阅读体验仍需在 Deck 上确认。`,
     );
   } catch (error) {
     if (receipt) {
       receipt.state = "failed";
       receipt.error = error.message;
     }
-    if (receipt?.backup)
-      console.error(`未确认部署成功；请保留并检查备份：${receipt.backup}`);
+    if (receipt?.remoteZip && !receipt.remoteZipRemoved)
+      console.error(
+        `部署未完成；本次没有回滚备份。请先检查 Decky 安装状态，再清理临时包：${receipt.remoteZip}`,
+      );
     throw error;
   } finally {
     tunnel?.kill("SIGTERM");

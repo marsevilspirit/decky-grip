@@ -14,7 +14,6 @@ import {
   resolveGuideForReaderOpen,
 } from "../../src/reader/recent-guide";
 import { RuntimeStatusStore } from "../../src/runtime-status";
-import { shortSectionTitle } from "../../src/reader/toc-title";
 
 interface FakeAnchorText extends Partial<Text> {
   contentBottom: number;
@@ -402,17 +401,5 @@ describe("GRIP Reader helpers", () => {
         current,
       ),
     ).toEqual([current, sameGame]);
-  });
-
-  it("keeps short month headings and limits long headings to four characters", () => {
-    expect(shortSectionTitle("四月")).toBe("四月");
-    expect(shortSectionTitle("十一月")).toBe("十一月");
-    expect(shortSectionTitle("十二月二十四日以后")).toBe("十二月二");
-  });
-
-  it("removes the shared appendix prefix before shortening headings", () => {
-    expect(shortSectionTitle("附录：女皇社群需求推荐")).toBe("女皇社群");
-    expect(shortSectionTitle("附录：人格面具合体表")).toBe("人格面具");
-    expect(shortSectionTitle("附录：隐藏人格面具一览")).toBe("隐藏人格");
   });
 });

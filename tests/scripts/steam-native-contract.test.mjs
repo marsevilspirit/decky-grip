@@ -236,6 +236,107 @@ test("installed Valve components retain the GRIP native UI contracts", async (t)
   );
 
   await t.test(
+    "Marquee defaults to playing and uses native pause/reset classes, not focus context",
+    () => {
+      const code = nativeFunction(bundle.source, ".Marquee,");
+      assert.ok(code.includes("--fade-length"));
+      const context = { window: {} };
+      const [jsx] = symbols(code, /\b([$\w]+)\.jsxs\b/);
+      context[jsx] = { jsx: element, jsxs: element };
+      const [react] = symbols(code, /\b([$\w]+)\.useState\b/);
+      let stateIndex = 0;
+      context[react] = {
+        // Supply measured width state only; do not simulate focus or animation.
+        useState: () => [stateIndex++ === 0 ? 100 : 300, () => {}],
+        useRef: (current) => ({ current }),
+        useCallback: (callback) => callback,
+        useEffect: () => {},
+      };
+      const [styles] = symbols(code, /\b([$\w]+)\.Container\b/);
+      context[styles] = new Proxy({}, { get: (_, name) => name });
+      bind(
+        context,
+        symbols(code, /\(0,([$\w]+)\.([$\w]+)\)\([$\w]+\.Container,/),
+        classNames,
+      );
+      bind(
+        context,
+        symbols(
+          code,
+          /\{bVisible:[$\w]+,ref:[$\w]+\}=\(0,([$\w]+)\.([$\w]+)\)\(\)/,
+        ),
+        () => ({ bVisible: true, ref: () => {} }),
+      );
+      bind(
+        context,
+        symbols(
+          code,
+          /\},[$\w]+=\(0,([$\w]+)\.([$\w]+)\)\([$\w]+\),[$\w]+=\(0,/,
+        ),
+        (callback) => callback,
+      );
+      bind(
+        context,
+        symbols(
+          code,
+          /[$\w]+=\(0,([$\w]+)\.([$\w]+)\)\([$\w]+,[$\w]+\);return/,
+        ),
+        (ref) => ref,
+      );
+      bind(
+        context,
+        symbols(code, /\(0,([$\w]+)\.([$\w]+)\)\(window,"resize",/),
+        () => {},
+      );
+      for (const props of [
+        {},
+        { play: false },
+        { play: false, resetOnPause: true },
+        { play: true, resetOnPause: true },
+      ]) {
+        stateIndex = 0;
+        const output = render(code, context, {
+          ...props,
+          children: "完整的长章节标题",
+        }).props.children;
+        const classes = output.props.className.split(" ");
+        assert.ok(classes.includes("Marquee"));
+        assert.equal(classes.includes("Playing"), props.play ?? true);
+        assert.equal(
+          classes.includes("ResetOnPause"),
+          props.resetOnPause ?? false,
+        );
+        assert.equal(output.props.style["--delay"], "3s");
+        assert.equal(
+          output.props.children[0].props.children,
+          "完整的长章节标题",
+        );
+      }
+
+      const [marquee, playing, reset, noAnimation, content] = symbols(
+        bundle.source,
+        /Marquee:"([^"]+)",fade:"[^"]+",Playing:"([^"]+)",ResetOnPause:"([^"]+)",none:"([^"]+)",Content:"([^"]+)"/,
+      );
+      const cssDirectory = join(steamUiDirectory, "css");
+      const css = readdirSync(cssDirectory)
+        .filter((name) => name.endsWith(".css"))
+        .map((name) => readFileSync(join(cssDirectory, name), "utf8"))
+        .join("\n");
+      assert.ok(
+        css.includes(
+          `.${marquee}.${playing} .${content}{animation-play-state:running}`,
+        ),
+      );
+      assert.ok(
+        css.includes(
+          `.${marquee}:not(.${playing}).${reset} .${content}{animation-play-state:paused;animation-name:${noAnimation}}`,
+        ),
+      );
+      t.diagnostic(`Marquee function SHA256 ${sha256(code)}`);
+    },
+  );
+
+  await t.test(
     "DialogButton disabled removes activation without setting HTML disabled or dropping focusable",
     () => {
       const code = nativeFunction(bundle.source, '.disabled&&"Disabled"');

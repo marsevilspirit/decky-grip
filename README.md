@@ -111,7 +111,9 @@ Steam owns list/toolbar focus navigation and modal focus isolation/return throug
 loops. Logical gamepad callbacks must return `false` for unhandled input (an
 implicit return consumes it). Right opens the chapter panel; left closes it and
 returns to the article after removing its inert state, through the same path as
-X/B. Search retains its own direction-key behavior. Reader scrolling uses Steam's
+X/B. Focus requests run in React's layout commit, not an independent animation
+frame that could fire while the article is still inert. Search retains its own
+direction-key behavior. Reader scrolling uses Steam's
 own step and boundary logic in immediate mode: its smooth hook exposes no
 cancellation, so an old animation could overwrite a chapter jump or restored
 position. If the hook is unavailable, the reader explicitly reports compatibility
@@ -196,18 +198,20 @@ Linux x86_64 toolchain, and validates the package. It never ships an old
 once, then verifies the ELF, ZIP file list, and hashes. CI also runs the browser
 suite and uploads the ZIP with its source and package receipts.
 
-The command backs up the existing plugin **and settings**, uploads and verifies
+The command does **not** create a rollback backup. It uploads and verifies
 the ZIP, then opens **Decky's native reinstall confirmation**. Confirm once on
 the Deck. It waits up to three minutes for new GRIP processes, all installed
 file hashes, working RPC/L4 monitoring, preserved guide records, and two stable
 checks. A successful installer response alone is not treated as success.
 
-Packages and receipts are kept under `out/package-*/`. Device rollback archives
-and uploaded ZIPs are kept under
-`/home/deck/.local/share/grip-deployment-backups/deploy-*/`; the command prints
-their exact paths. It does not clear guides or reading positions, restart the
-global Loader, change permissions across `homebrew`, or automatically delete old
-backups. A timeout/disconnect exits with an error and keeps recovery artifacts.
+Packages and receipts are kept locally under `out/package-*/`. On the Deck,
+the ZIP is uploaded to `/tmp/grip-deploy-*/` and removed after successful
+verification. Only settings path inventories are compared in workstation memory;
+no copy of the old plugin or settings is saved. There is no deployment rollback
+archive if installation fails. The command does not clear guides or reading
+positions, restart the global Loader, change permissions across `homebrew`, or
+delete existing backups. A timeout/disconnect exits with an error and prints the
+temporary ZIP path, leaving it in place because Decky may still be reading it.
 An installation already confirmed on the Deck may continue after a local
 interruption; check its state before retrying. Physical controller/reading
 acceptance remains separate. The orchestration uses Decky's
@@ -261,8 +265,10 @@ See [implementation and acceptance notes](docs/heybox-import.md).
    titles and focus while opening, show errors in place, and retry with **A**.
    Keyboard users can move between cards with **Up/Down**, jump to the first or
    last card with **Home/End**, or use **Tab**; focused cards stay visible.
-   Press **X** or move right from the article to expand the full chapter directory;
-   it overlays the article without changing its width or reading position.
+   Press **X** or move right from the article to focus the chapter directory.
+   Its width and rows stay fixed; long titles scroll using Steam's native
+   marquee only while focused, then reset to the beginning on blur. The article's
+   width and reading position remain unchanged.
    **B** backs out one layer at a time: search, directory, then the reader.
    **L1 / R1** page through the article. A failed image offers its own retry
    button; **A** in the article

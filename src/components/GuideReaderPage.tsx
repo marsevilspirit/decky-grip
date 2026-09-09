@@ -4,6 +4,7 @@ import {
   DialogHeader,
   GamepadButton,
   gamepadDialogClasses,
+  Marquee,
   Spinner,
   TextField,
   useParams,
@@ -45,7 +46,6 @@ import {
   type GuideSearchIndex,
   type GuideSearchResult,
 } from "../reader/search";
-import { shortSectionTitle } from "../reader/toc-title";
 import { makeGuideKey, type GuideIdentity } from "../steam/guide-key";
 import {
   Focusable,
@@ -178,6 +178,7 @@ export function GuideReaderPage({
   const [navigationMode, setNavigationMode] = useState<
     "collapsed" | "toc" | "search"
   >("collapsed");
+  const [focusedSectionId, setFocusedSectionId] = useState<string | null>(null);
   const navigationOpen = navigationMode !== "collapsed";
   const guideSearchOpen = navigationMode === "search";
   const [previewImage, setPreviewImage] = useState<ReaderPreviewImage | null>(
@@ -247,20 +248,26 @@ export function GuideReaderPage({
   const loadedRef = useRef(loaded);
   loadedRef.current = loaded;
   const switchRequestRef = useRef<object | null>(null);
-  const focusFrameRef = useRef<number | null>(null);
+  const pendingFocusRef = useRef<(() => void) | null>(null);
+  const [focusRevision, setFocusRevision] = useState(0);
   const cancelPendingFocus = () => {
-    if (focusFrameRef.current !== null)
-      cancelAnimationFrame(focusFrameRef.current);
-    focusFrameRef.current = null;
+    pendingFocusRef.current = null;
   };
   const scheduleFocus = (focus: () => void) => {
-    cancelPendingFocus();
-    focusFrameRef.current = requestAnimationFrame(() => {
-      focusFrameRef.current = null;
-      focus();
-    });
+    pendingFocusRef.current = focus;
+    setFocusRevision((revision) => revision + 1);
   };
-  useEffect(() => cancelPendingFocus, [identity?.appId, identity?.guideId]);
+  useLayoutEffect(
+    () => cancelPendingFocus,
+    [identity?.appId, identity?.guideId],
+  );
+  useLayoutEffect(() => {
+    // Native events can schedule rAF before React removes inert. Transfer focus
+    // after the DOM commit, including requests that leave navigation unchanged.
+    const focus = pendingFocusRef.current;
+    pendingFocusRef.current = null;
+    focus?.();
+  }, [focusRevision]);
 
   const stopGuideSearchAlignment = () => {
     readerRef.current?.positioning.stopSearch();
@@ -509,6 +516,7 @@ export function GuideReaderPage({
     setOfflineRemoved(false);
     setNavigationMode("collapsed");
     setGuideSwitcherOpen(false);
+    setFocusedSectionId(null);
     setPreviewImage(null);
   }, [identity?.appId, identity?.guideId]);
 
@@ -1626,7 +1634,7 @@ export function GuideReaderPage({
                 return false;
               event.preventDefault();
               event.stopPropagation();
-              // Closing removes the article's inert state before the scheduled focus.
+              // Closing commits removal of inert before transferring focus.
               if (!event.detail.is_repeat) closeNavigation();
               return true;
             }}
@@ -1652,28 +1660,14 @@ export function GuideReaderPage({
               right: 0,
               top: 0,
               bottom: 0,
-              width: navigationOpen ? 340 : TOC_RAIL_WIDTH,
+              width: guideSearchOpen ? 340 : TOC_RAIL_WIDTH,
               minWidth: 0,
               maxWidth: "calc(100% - 40px)",
               zIndex: navigationOpen ? 6 : 1,
               overflowY: "auto",
-              padding: navigationOpen ? "16px 14px 72px" : "18px 6px 64px",
+              padding: guideSearchOpen ? "16px 14px 72px" : "18px 6px 64px",
             }}
           >
-            {navigationMode === "toc" && (
-              <div style={{ marginBottom: 14 }}>
-                <DialogHeader>章节目录</DialogHeader>
-                <DialogBodyText>
-                  {loaded.guide.title} · {loaded.guide.sections.length} 章
-                </DialogBodyText>
-                <DialogButton
-                  onClick={closeNavigation}
-                  style={{ width: "100%" }}
-                >
-                  返回正文
-                </DialogButton>
-              </div>
-            )}
             {guideSearchOpen ? (
               <>
                 <DialogButton
@@ -1869,22 +1863,37 @@ export function GuideReaderPage({
                       disabled={loading}
                       key={section.id}
                       onClick={() => jumpToSection(section.id)}
-                      onGamepadFocus={expandNavigation}
+                      onGamepadFocus={() => {
+                        expandNavigation();
+                        setFocusedSectionId(section.id);
+                      }}
+                      onGamepadBlur={() =>
+                        setFocusedSectionId((focused) =>
+                          focused === section.id ? null : focused,
+                        )
+                      }
                       style={{
                         boxSizing: "border-box",
                         marginBottom: 8,
                         minWidth: 0,
                         overflow: "hidden",
-                        textAlign: navigationOpen ? "left" : "center",
-                        whiteSpace: navigationOpen ? "normal" : "nowrap",
-                        overflowWrap: "anywhere",
+                        textAlign: "center",
+                        whiteSpace: "nowrap",
                         width: "100%",
                       }}
                     >
                       {activeSectionId === section.id && <div>当前章节</div>}
-                      {navigationOpen
-                        ? section.title
-                        : shortSectionTitle(section.title)}
+                      <Marquee
+                        center
+                        play={
+                          navigationMode === "toc" &&
+                          !readerCovered &&
+                          focusedSectionId === section.id
+                        }
+                        resetOnPause
+                      >
+                        {section.title}
+                      </Marquee>
                     </DialogButton>
                   ))}
               </>

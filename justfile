@@ -1,7 +1,7 @@
 default:
     @just --list
 
-# Build, back up and reinstall GRIP; confirm once in Decky's native dialog.
+# Build and reinstall GRIP without backups; confirm once in Decky's native dialog.
 [positional-arguments]
 deploy host="deck":
     node scripts/deploy.mjs "$1"

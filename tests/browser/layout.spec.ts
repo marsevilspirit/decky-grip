@@ -397,6 +397,25 @@ test("1280×800: native dialog layout keeps long chapter and search lists vertic
     }));
   const before = await measure();
   expect(before.top).toBeGreaterThan(500);
+  const directoryLayout = () =>
+    panel.evaluate((element) => ({
+      width: element.getBoundingClientRect().width,
+      padding: getComputedStyle(element).padding,
+      rows: [
+        ...element.querySelectorAll<HTMLButtonElement>(":scope > button"),
+      ].map((button) => ({
+        left: button.offsetLeft,
+        top: button.offsetTop,
+        width: button.offsetWidth,
+        height: button.offsetHeight,
+        text: button.textContent,
+      })),
+    }));
+  const directoryBefore = await directoryLayout();
+  expect(directoryBefore.width).toBe(172);
+  await expect(
+    panel.locator("[data-grip-toc-section] [data-native-marquee]"),
+  ).toHaveCount(18);
   const currentChapter = page.locator(
     '[data-grip-toc-section][aria-current="location"]',
   );
@@ -416,6 +435,7 @@ test("1280×800: native dialog layout keeps long chapter and search lists vertic
   await page.keyboard.press("ArrowRight");
   await expect(page.getByRole("dialog", { name: "指南目录" })).toBeVisible();
   await expectVerticalRows();
+  expect(await directoryLayout()).toEqual(directoryBefore);
   const lastChapter = panel.locator("[data-grip-toc-section]").last();
   await expect(lastChapter).toHaveText("第 18 章：长标题与离线正文排版");
   await lastChapter.focus();
@@ -440,6 +460,7 @@ test("1280×800: native dialog layout keeps long chapter and search lists vertic
   ).toBeVisible();
   await expect(reader(page)).toBeFocused();
   expect(await measure()).toEqual(before);
+  expect(await directoryLayout()).toEqual(directoryBefore);
 
   await page.keyboard.press("Control+f");
   const input = page.getByRole("textbox", { name: "搜索指南正文" });

@@ -126,8 +126,16 @@ vi.mock("@decky/ui", async () => {
     DialogButton: mockDialogButton(keyboard),
     Field: mockField(keyboard),
     ScrollPanel: mockScrollPanel(keyboard),
-    Marquee: ({ children }: MockProps) =>
-      createElement("div", { "data-native-marquee": true }, children),
+    Marquee: ({ children, play, resetOnPause }: MockProps) =>
+      createElement(
+        "div",
+        {
+          "data-native-marquee": true,
+          "data-playing": play,
+          "data-reset-on-pause": resetOnPause,
+        },
+        children,
+      ),
     DialogHeader: mockDeckyElement("div"),
     DialogBodyText: mockDeckyElement("div"),
     gamepadDialogClasses: {
@@ -1274,7 +1282,7 @@ describe("GuideReaderPage position lifecycle", () => {
     }
   });
 
-  it("shows full focused chapter titles while keeping the current chapter visibly separate from focus", async () => {
+  it("keeps the directory fixed and scrolls only the focused full title, independently of the current chapter", async () => {
     const guide = guideFixture();
     const title = "第一章：完整的章节名称与很长的任务说明";
     guide.sections = [
@@ -1316,6 +1324,13 @@ describe("GuideReaderPage position lifecycle", () => {
     const second = toc.querySelector<HTMLElement>(
       '[data-grip-toc-section="2"]',
     )!;
+    const marquee = (button: HTMLElement) =>
+      button.querySelector<HTMLElement>("[data-native-marquee]")!;
+    expect(toc.style.width).toBe("172px");
+    const padding = toc.style.padding;
+    expect(first.textContent).toBe(title);
+    expect(marquee(first)?.getAttribute("data-playing")).toBe("false");
+    expect(marquee(first)?.getAttribute("data-reset-on-pause")).toBe("true");
     toc.getBoundingClientRect = () => ({ left: 712 }) as DOMRect;
     first.getBoundingClientRect = () => ({ top: 100, bottom: 140 }) as DOMRect;
     expect(second.getAttribute("aria-current")).toBe("location");
@@ -1328,10 +1343,15 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(document.activeElement).toBe(first);
     expect(second.textContent).toContain("当前章节");
     expect(first.textContent).toBe(title);
-    expect(first.style.whiteSpace).toBe("normal");
-    expect(first.style.overflowWrap).toBe("anywhere");
+    expect(first.style.whiteSpace).toBe("nowrap");
+    expect(first.style.textAlign).toBe("center");
+    expect(marquee(first).textContent).toBe(title);
+    expect(marquee(first).getAttribute("data-playing")).toBe("true");
+    expect(marquee(second).getAttribute("data-playing")).toBe("false");
     expect(toc.style.position).toBe("absolute");
-    expect(toc.style.width).toBe("340px");
+    expect(toc.style.width).toBe("172px");
+    expect(toc.style.padding).toBe(padding);
+    expect(toc.textContent).not.toContain("章节目录");
     expect(scroller.style.marginRight).toBe("172px");
     expect(toc.getAttribute("aria-modal")).toBe("true");
     expect(scroller.scrollTop).toBe(650);
@@ -1339,6 +1359,7 @@ describe("GuideReaderPage position lifecycle", () => {
     await act(async () => pressKey(first, "Escape"));
     await flushFrame();
     expect(toc.style.width).toBe("172px");
+    expect(marquee(first).getAttribute("data-playing")).toBe("false");
     expect(document.activeElement).toBe(scroller);
     expect(scroller.scrollTop).toBe(650);
 
@@ -1355,6 +1376,13 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(document.activeElement).toBe(second);
     expect(first.textContent).toContain("当前章节");
     expect(second.textContent).toBe("第二章");
+    expect(marquee(second).getAttribute("data-playing")).toBe("true");
+    expect(marquee(first).getAttribute("data-playing")).toBe("false");
+    await act(async () => first.focus());
+    expect(marquee(first).getAttribute("data-playing")).toBe("true");
+    expect(marquee(second).getAttribute("data-playing")).toBe("false");
+    await act(async () => buttonNamed("搜索").focus());
+    expect(marquee(first).getAttribute("data-playing")).toBe("false");
   });
 
   it.each([1000, 6000])(
@@ -1608,12 +1636,20 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(scroller.hasAttribute("inert")).toBe(true);
     expect(document.activeElement).toBe(chapter);
     const left = gamepadEvent("onGamepadDirection", GamepadButton.DIR_LEFT);
-    await act(async () => chapter.dispatchEvent(left));
+    await act(async () => {
+      chapter.dispatchEvent(left);
+      // Steam dispatches outside React: a frame can run before the state commit.
+      expect(scroller.hasAttribute("inert")).toBe(true);
+      const callbacks = [...animationFrames.values()];
+      animationFrames.clear();
+      callbacks.forEach((callback) => callback(performance.now()));
+    });
     expect(left.defaultPrevented).toBe(true);
     expect(toc.getAttribute("data-expanded")).toBe("false");
     expect(scroller.hasAttribute("inert")).toBe(false);
-    await flushFrame();
+    // Returning focus must be part of that commit, not depend on another frame.
     expect(document.activeElement).toBe(scroller);
+    await flushFrame();
     expect(scroller.scrollTop).toBe(234);
     expect(scroller.style.marginRight).toBe(margin);
     expect(scroller.querySelector("[data-guide-search-body]")).toBe(body);
