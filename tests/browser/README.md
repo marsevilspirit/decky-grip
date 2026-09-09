@@ -2,7 +2,7 @@
 
 Run `pnpm exec playwright install chromium` once, then `pnpm run test:browser`.
 For an already installed local Chrome, use `PW_CHANNEL=chrome pnpm run test:browser`.
-The server binds only `127.0.0.1:4173`, refuses an occupied port, and stops with the runner.
+The fixture server binds only `127.0.0.1:4173`, refuses an occupied port, and stops with the runner.
 Failures retain screenshots and traces in `test-results/browser/`.
 
 These tests render the real `GuideReaderPage`, `GuideDocument` and `GuideSwitcher`
@@ -22,6 +22,18 @@ deterministic local fault injection without sleeping or replacing reader behavio
 The `scroll` fixture contains 20 chapters with 30 copies of one cached image per
 chapter for dense-image viewport work checks. The default fixture remains the
 18-chapter table/image layout case. No fixture replaces DOM geometry or decoding.
+
+The `import` fixture renders the real `PhoneImport` and `ImportGuideModal`.
+The runner builds the existing Rust test target and opens its real phone HTTP
+inbox on an ephemeral loopback port, closing it with the server. jsQR (test-only)
+decodes the QR image at its displayed size; a second browser page opens that URL
+and submits through the real phone page and token validation. The production
+`GuideDownloadTasks` and `downloadOfflineGuide` then handle game confirmation,
+image deduplication, progress, failure, cancellation, retry and publication.
+Only article extraction and image/disk transports are controlled fixtures.
+Tests check that partial/canceled versions never publish, retries reuse saved
+images, and a completed version opens the real reader with decoded PNGs. This
+does not validate live Xiaoheihe capture, real phone cameras or Deck networking.
 
 The adapter replaces only Decky primitives and the router/backend boundary.
 Dialog components remain structural stand-ins: a system-color surface provides

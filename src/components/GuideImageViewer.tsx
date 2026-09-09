@@ -115,7 +115,7 @@ export function GuideImageViewer({
   };
   const focusTargets = () => [
     ...(root.current?.querySelectorAll<HTMLElement>(
-      '.grip-image-control:not(:disabled):not([aria-disabled="true"]), .grip-image-viewport',
+      '.grip-image-control:not(.Disabled):not(:disabled):not([aria-disabled="true"]), .grip-image-viewport',
     ) ?? []),
   ];
   useLayoutEffect(() => {

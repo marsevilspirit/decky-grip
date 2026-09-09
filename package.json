@@ -46,6 +46,7 @@
     "@types/react": "19.1.1",
     "@types/react-dom": "19.1.1",
     "happy-dom": "20.12.1",
+    "jsqr": "1.4.0",
     "prettier": "3.9.6",
     "react": "19.1.1",
     "react-dom": "19.1.1",

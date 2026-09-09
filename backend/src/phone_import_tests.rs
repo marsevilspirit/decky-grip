@@ -5,6 +5,43 @@ fn session() -> PhoneImportSession {
     PhoneImportSession::start_loopback(LIFETIME).unwrap()
 }
 
+// Driven explicitly by the browser suite; never bind a LAN port or wait on stdin
+// during ordinary Rust tests. HTTP parsing, page scripts and tokens remain real.
+#[test]
+#[ignore = "interactive loopback bridge for pnpm run test:browser"]
+fn browser_bridge() {
+    use std::io::BufRead;
+
+    let mut active: Option<PhoneImportSession> = None;
+    for line in io::stdin().lock().lines() {
+        let request: Value = serde_json::from_str(&line.unwrap()).unwrap();
+        let args = &request["args"];
+        let result = match request["method"].as_str().unwrap() {
+            "start_phone_import" => {
+                active = Some(session());
+                active.as_ref().unwrap().info()
+            }
+            "get_phone_import" => active
+                .as_ref()
+                .filter(|session| Some(session.id()) == args[0].as_str())
+                .map(PhoneImportSession::snapshot)
+                .unwrap_or_else(|| json!({"state": "expired"})),
+            "stop_phone_import" => {
+                if active
+                    .as_ref()
+                    .is_some_and(|session| Some(session.id()) == args[0].as_str())
+                {
+                    active = None;
+                }
+                Value::Null
+            }
+            method => panic!("unexpected browser bridge method: {method}"),
+        };
+        println!("{}", json!({"id": request["id"], "result": result}));
+        io::stdout().flush().unwrap();
+    }
+}
+
 fn address(session: &PhoneImportSession) -> SocketAddr {
     format!(
         "127.0.0.1:{}",

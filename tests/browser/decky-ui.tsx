@@ -35,9 +35,19 @@ const element = (tag: "button" | "div") =>
           "focusClassName",
           "focusWithinClassName",
           "noFocusRing",
+          "focusable",
         ].includes(name)
       )
         delete dom[name];
+    }
+    if (tag === "button") {
+      // Steam's disabled buttons remain focusable; disabling suppresses activation.
+      dom.type = "button";
+      dom.disabled = false;
+      if (props.disabled) {
+        dom.className = `${props.className ?? ""} Disabled`;
+        delete dom.onClick;
+      }
     }
     dom.onFocus = (event: FocusEvent<HTMLElement>) => {
       (
@@ -100,16 +110,74 @@ export const gamepadDialogClasses = {
 };
 export const DialogButton = element("button");
 export const DialogHeader = element("div");
+export const DialogBody = element("div");
 export const DialogBodyText = element("div");
+export const DialogControlsSection = element("div");
+export const DialogFooter = element("div");
 export const Focusable = element("div");
 export const Spinner = () => <span role="status">正在处理…</span>;
 export const ReaderRoute = createContext({ appId: "", guideId: "" });
 export const useParams = () => useContext(ReaderRoute);
-export const TextField = ({ label, onChange, value, focusOnMount }: Props) => (
+export const TextField = ({
+  label,
+  onChange,
+  value,
+  focusOnMount,
+  disabled,
+}: Props) => (
   <input
     aria-label={label as string}
     onChange={onChange as ChangeEventHandler<HTMLInputElement>}
     value={value as string}
     autoFocus={Boolean(focusOnMount)}
+    disabled={Boolean(disabled)}
   />
+);
+export const ProgressBar = ({ nProgress, indeterminate }: Props) => (
+  <div
+    role="progressbar"
+    aria-valuemin={0}
+    aria-valuemax={100}
+    aria-valuenow={Number(nProgress)}
+    data-native-progress={indeterminate ? "indeterminate" : Number(nProgress)}
+  />
+);
+export const ModalRoot = ({ children, onCancel }: Props) => (
+  <form
+    role="dialog"
+    aria-modal="true"
+    onSubmit={(event) => event.preventDefault()}
+    onKeyDown={(event) => {
+      if (event.key === "Escape") (onCancel as (() => void) | undefined)?.();
+    }}
+  >
+    {children}
+  </form>
+);
+export const DropdownItem = ({
+  label,
+  selectedOption,
+  rgOptions,
+  disabled,
+  onChange,
+}: Props) => (
+  <label>
+    {label as string}
+    <select
+      aria-label={label as string}
+      value={selectedOption as string}
+      disabled={Boolean(disabled)}
+      onChange={(event) =>
+        (onChange as (option: { data: string }) => void)({
+          data: event.target.value,
+        })
+      }
+    >
+      {(rgOptions as Array<{ data: string; label: string }>).map((option) => (
+        <option key={option.data} value={option.data}>
+          {option.label}
+        </option>
+      ))}
+    </select>
+  </label>
 );

@@ -54,3 +54,49 @@ export function mockDeckyElement(
     );
   });
 }
+
+// Valve's DialogButton G (module 44351) marks Disabled and removes activation,
+// but passes disabled:false to its HTML/gamepad button (90242 / 28869).
+export function mockDialogButton(
+  keyboard?: Parameters<typeof mockDeckyElement>[1],
+) {
+  const Button = mockDeckyElement("button", keyboard);
+  return forwardRef<HTMLElement, MockDeckyProps>(
+    ({ disabled, focusable, ...props }, ref) => {
+      const handlers: MockDeckyProps = {};
+      for (const name of [
+        "onClick",
+        "onPointerDown",
+        "onPointerUp",
+        "onPointerCancel",
+        "onMouseDown",
+        "onMouseUp",
+        "onTouchStart",
+        "onTouchEnd",
+        "onTouchCancel",
+        "onSubmit",
+      ]) {
+        const handler = props[name] as ((event: Event) => void) | undefined;
+        handlers[name] =
+          !disabled && handler
+            ? (event: Event) => {
+                event.stopPropagation();
+                handler(event);
+              }
+            : undefined;
+      }
+      return createElement(Button, {
+        type: "button",
+        onOKActionDescription: disabled ? null : undefined,
+        ...props,
+        ...handlers,
+        ref,
+        disabled: false,
+        "data-native-focusable": focusable,
+        className: ["DialogButton", props.className, disabled && "Disabled"]
+          .filter(Boolean)
+          .join(" "),
+      });
+    },
+  );
+}

@@ -21,75 +21,88 @@ vi.mock("../../src/components/PhoneImport", () => ({
     ),
 }));
 
-vi.mock("@decky/ui", () => ({
-  ModalRoot: ({
-    children,
-    closeModal,
-  }: {
-    children: ReactNode;
-    closeModal?: () => void;
-  }) =>
-    createElement(
-      "form",
-      {
-        onSubmit: (event) => {
-          event.preventDefault();
-          closeModal?.();
-        },
-      },
+vi.mock("@decky/ui", async () => {
+  const { mockDialogButton } = await import("./helpers/decky-ui");
+  return {
+    ModalRoot: ({
       children,
-    ),
-  Button: (props: Record<string, unknown>) => createElement("button", props),
-  DialogButton: (props: Record<string, unknown>) =>
-    createElement("button", { type: "button", ...props }),
-  DialogHeader: (props: Record<string, unknown>) =>
-    createElement("div", { ...props, className: "DialogHeader" }),
-  DialogBody: (props: Record<string, unknown>) =>
-    createElement("div", { ...props, className: "DialogBody" }),
-  DialogBodyText: (props: Record<string, unknown>) =>
-    createElement("div", { ...props, className: "DialogBodyText" }),
-  DialogControlsSection: (props: Record<string, unknown>) =>
-    createElement("div", { ...props, className: "DialogControlsSection" }),
-  DialogFooter: (props: Record<string, unknown>) =>
-    createElement("div", { ...props, className: "DialogFooter" }),
-  ProgressBar: ({ indeterminate }: { indeterminate?: boolean }) =>
-    createElement("div", {
-      "data-steam-progress": indeterminate ? "indeterminate" : "determinate",
-    }),
-  Spinner: () => createElement("span", null, "busy"),
-  TextField: ({ label, ...props }: { label: string }) =>
-    createElement("input", { "aria-label": label, ...props }),
-  DropdownItem: ({
-    label,
-    selectedOption,
-    rgOptions,
-    disabled,
-    onChange,
-  }: {
-    label: string;
-    selectedOption: string;
-    rgOptions: Array<{ data: string; label: string }>;
-    disabled: boolean;
-    onChange: (option: { data: string }) => void;
-  }) =>
-    createElement(
-      "select",
-      {
-        "aria-label": label,
-        value: selectedOption,
-        disabled,
-        onChange: (event: { target: { value: string } }) =>
-          onChange({ data: event.target.value }),
-      },
-      rgOptions.map((option) =>
-        createElement(
-          "option",
-          { key: option.data, value: option.data },
-          option.label,
+      closeModal,
+    }: {
+      children: ReactNode;
+      closeModal?: () => void;
+    }) =>
+      createElement(
+        "form",
+        {
+          onSubmit: (event) => {
+            event.preventDefault();
+            closeModal?.();
+          },
+        },
+        children,
+      ),
+    Button: (props: Record<string, unknown>) => createElement("button", props),
+    DialogButton: mockDialogButton(),
+    DialogHeader: (props: Record<string, unknown>) =>
+      createElement("div", { ...props, className: "DialogHeader" }),
+    DialogBody: (props: Record<string, unknown>) =>
+      createElement("div", { ...props, className: "DialogBody" }),
+    DialogBodyText: (props: Record<string, unknown>) =>
+      createElement("div", { ...props, className: "DialogBodyText" }),
+    DialogControlsSection: (props: Record<string, unknown>) =>
+      createElement("div", { ...props, className: "DialogControlsSection" }),
+    DialogFooter: (props: Record<string, unknown>) =>
+      createElement("div", { ...props, className: "DialogFooter" }),
+    ProgressBar: ({
+      indeterminate,
+      nProgress,
+    }: {
+      indeterminate?: boolean;
+      nProgress?: number;
+    }) =>
+      createElement("div", {
+        role: "progressbar",
+        "aria-valuemin": 0,
+        "aria-valuemax": 100,
+        "aria-valuenow": nProgress,
+        "data-steam-progress": indeterminate ? "indeterminate" : "determinate",
+        "data-progress-percent": nProgress,
+      }),
+    Spinner: () => createElement("span", null, "busy"),
+    TextField: ({ label, ...props }: { label: string }) =>
+      createElement("input", { "aria-label": label, ...props }),
+    DropdownItem: ({
+      label,
+      selectedOption,
+      rgOptions,
+      disabled,
+      onChange,
+    }: {
+      label: string;
+      selectedOption: string;
+      rgOptions: Array<{ data: string; label: string }>;
+      disabled: boolean;
+      onChange: (option: { data: string }) => void;
+    }) =>
+      createElement(
+        "select",
+        {
+          "aria-label": label,
+          value: selectedOption,
+          disabled,
+          onChange: (event: { target: { value: string } }) =>
+            onChange({ data: event.target.value }),
+        },
+        rgOptions.map((option) =>
+          createElement(
+            "option",
+            { key: option.data, value: option.data },
+            option.label,
+          ),
         ),
       ),
-    ),
-}));
+  };
+});
 
 const host = document.createElement("div");
 document.body.appendChild(host);
@@ -184,7 +197,7 @@ it("never labels a partial-image failure successful and does not invent a game a
     ),
   );
   await share();
-  expect(button("保存完整图文").disabled).toBe(true);
+  expect(button("保存完整图文").classList.contains("Disabled")).toBe(true);
   await act(async () => root.unmount());
   root = createRoot(host);
   await act(async () =>
@@ -256,7 +269,7 @@ it.each(["text", "phone", "game"])(
     expect(host.textContent).not.toContain("正文和图片已完整保存");
     expect(button("立即阅读")).toBeUndefined();
     expect(save).toHaveBeenCalledOnce();
-    expect(button("保存完整图文").disabled).toBe(false);
+    expect(button("保存完整图文").classList.contains("Disabled")).toBe(false);
   },
 );
 
@@ -285,18 +298,25 @@ it("shows image progress without implying that zero images or publication means 
   expect(host.textContent).toContain("无需下载图片");
   expect(host.textContent).not.toContain("0/0");
   expect(host.querySelector('[role="progressbar"]')).toBeNull();
+  await act(async () => report({ completed: 0, total: 4 }));
+  expect(
+    host
+      .querySelector("[data-progress-percent]")
+      ?.getAttribute("data-progress-percent"),
+  ).toBe("0");
   await act(async () => report({ completed: 2, total: 4 }));
   const progress = host.querySelector('[role="progressbar"]');
-  expect(progress?.getAttribute("aria-valuenow")).toBe("2");
-  expect(progress?.getAttribute("aria-valuemax")).toBe("4");
-  expect(
-    progress?.querySelector('[data-steam-progress="indeterminate"]'),
-  ).not.toBeNull();
+  expect(host.querySelectorAll('[role="progressbar"]')).toHaveLength(1);
+  expect(progress?.getAttribute("aria-valuenow")).toBe("50");
+  expect(progress?.getAttribute("aria-valuemax")).toBe("100");
+  expect(progress?.getAttribute("data-steam-progress")).toBe("determinate");
+  expect(progress?.getAttribute("data-progress-percent")).toBe("50");
   expect(host.querySelector("progress")).toBeNull();
   expect(host.textContent).toContain("正在下载图片 2/4");
   await act(async () => report({ completed: 4, total: 4, publishing: true }));
+  expect(progress?.getAttribute("data-progress-percent")).toBe("100");
   expect(host.textContent).toContain("正在保存完整离线版本");
-  expect(button("取消导入").disabled).toBe(true);
+  expect(button("取消导入").classList.contains("Disabled")).toBe(true);
   expect(host.textContent).not.toContain("正文和图片已完整保存");
   await act(async () => finish());
   expect(host.querySelector('[role="progressbar"]')).toBeNull();
@@ -332,14 +352,16 @@ it("shows opening feedback immediately, prevents duplicate opens, and allows ret
   expect(onOpen).toHaveBeenCalledOnce();
   expect(host.textContent).toContain("正在打开");
   expect(
-    host.querySelector('button[aria-busy="true"]')?.hasAttribute("disabled"),
+    host
+      .querySelector('button[aria-busy="true"]')
+      ?.classList.contains("Disabled"),
   ).toBe(true);
   expect(host.querySelector("input")?.disabled).toBe(true);
   await act(async () => reject(new Error("阅读器暂时不可用")));
   expect(host.querySelector('[role="alert"]')?.textContent).toBe(
     "阅读器暂时不可用",
   );
-  expect(button("立即阅读").disabled).toBe(false);
+  expect(button("立即阅读").classList.contains("Disabled")).toBe(false);
   expect(close).not.toHaveBeenCalled();
   onOpen.mockResolvedValueOnce();
   await act(async () => button("立即阅读").click());
@@ -372,14 +394,14 @@ it("shows cancellation immediately and waits for cleanup before allowing another
   await act(async () => button("保存完整图文").click());
   await act(async () => button("取消导入").click());
   expect(host.textContent).toContain("正在取消");
-  expect(button("保存完整图文").disabled).toBe(true);
-  expect(button("取消导入").disabled).toBe(true);
+  expect(button("保存完整图文").classList.contains("Disabled")).toBe(true);
+  expect(button("取消导入").classList.contains("Disabled")).toBe(true);
   expect(host.querySelector('[role="progressbar"]')).toBeNull();
   expect(close).not.toHaveBeenCalled();
   await act(async () => cleanup());
   expect(host.textContent).toContain("已取消，原有离线版本保留");
   expect(host.textContent).not.toContain("正文和图片已完整保存");
-  expect(button("保存完整图文").disabled).toBe(false);
+  expect(button("保存完整图文").classList.contains("Disabled")).toBe(false);
   expect(close).not.toHaveBeenCalled();
 });
 

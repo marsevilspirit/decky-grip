@@ -316,6 +316,8 @@ export function GuideSwitcher({
             <DialogBodyText>{listError}</DialogBodyText>
             <DialogButton
               data-grip-guide-list-retry="true"
+              disabled={pendingKey !== null}
+              focusable
               aria-disabled={pendingKey !== null}
               onClick={() => {
                 if (pendingKey !== null) return;
@@ -344,6 +346,8 @@ export function GuideSwitcher({
             <div key={key} className="grip-guide-row" data-grip-guide-row={key}>
               <DialogButton
                 className="grip-guide-choice"
+                disabled={!current && pendingKey !== null}
+                focusable
                 data-grip-guide-choice={key}
                 data-current={current ? "true" : undefined}
                 aria-current={current ? "page" : undefined}
@@ -352,9 +356,17 @@ export function GuideSwitcher({
                 aria-label={`${current ? "返回阅读" : "打开指南"}：${titleFor(entry)}`}
                 preferredFocus={entry === preferredEntry}
                 onOKActionDescription={
-                  current ? "返回阅读" : failed ? "重试打开" : "打开指南"
+                  current
+                    ? "返回阅读"
+                    : pendingKey !== null
+                      ? null
+                      : failed
+                        ? "重试打开"
+                        : "打开指南"
                 }
-                onSecondaryActionDescription="管理指南"
+                onSecondaryActionDescription={
+                  pendingKey === null ? "管理指南" : null
+                }
                 onSecondaryButton={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
@@ -451,6 +463,8 @@ export function GuideSwitcher({
             <DialogButton
               ref={cancelRef}
               preferredFocus
+              disabled={removeMode === "busy"}
+              focusable
               aria-disabled={removeMode === "busy"}
               onClick={() => {
                 if (!removalInFlight.current) setRemoveMode(null);
@@ -459,6 +473,8 @@ export function GuideSwitcher({
               取消
             </DialogButton>
             <DialogButton
+              disabled={removeMode === "busy" || cannotRemove}
+              focusable
               aria-disabled={removeMode === "busy" || cannotRemove}
               onClick={() => void remove()}
             >

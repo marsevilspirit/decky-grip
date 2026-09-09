@@ -202,6 +202,7 @@ function GuideDownloadButtonForGuide({
         style={{ display: "grid", gap: 6, minWidth: 0, flex: "1 1 0" }}
       >
         <DialogButton
+          disabled={Boolean(blocked)}
           aria-disabled={Boolean(blocked)}
           aria-busy={Boolean(blocked)}
           data-grip-guide-download="true"
@@ -244,14 +245,11 @@ function GuideDownloadButtonForGuide({
         {downloading && (
           <div data-grip-download-progress="true">
             {total > 0 && (
-              <div
-                role="progressbar"
-                aria-label="离线图片下载进度"
-                aria-valuemin={0}
-                aria-valuemax={total}
-                aria-valuenow={completed}
-              >
-                <ProgressBar indeterminate focusable={false} />
+              <div role="group" aria-label="离线图片下载进度">
+                <ProgressBar
+                  nProgress={(completed / total) * 100}
+                  focusable={false}
+                />
               </div>
             )}
             <DialogBodyText>

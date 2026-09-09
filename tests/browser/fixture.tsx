@@ -9,6 +9,7 @@ import { ReaderSessionCache } from "../../src/reader/session-cache";
 import type { DownloadedGuide, ReaderPosition } from "../../src/reader/types";
 import type { GuideIdentity } from "../../src/steam/guide-key";
 import { ReaderRoute } from "./decky-ui";
+import { ImportFixture } from "./import-fixture";
 
 const identity = { appId: "1113000", guideId: "3414883877" };
 const scenario = new URLSearchParams(location.search).get("scenario");
@@ -219,4 +220,6 @@ function Fixture() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(<Fixture />);
+createRoot(document.getElementById("root")!).render(
+  scenario === "import" ? <ImportFixture /> : <Fixture />,
+);

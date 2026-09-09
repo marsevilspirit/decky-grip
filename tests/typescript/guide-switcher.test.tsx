@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { act, createElement, forwardRef } from "react";
+import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -14,7 +14,8 @@ import type { MockDeckyProps } from "./helpers/decky-ui";
 
 vi.mock("@decky/ui", async () => {
   const { GamepadButton } = await import("./helpers/decky-gamepad");
-  const { mockDeckyElement } = await import("./helpers/decky-ui");
+  const { mockDeckyElement, mockDialogButton } =
+    await import("./helpers/decky-ui");
   type GamepadHandler = (event: {
     detail: { button: number; is_repeat: boolean; source: number };
     preventDefault(): void;
@@ -25,7 +26,7 @@ vi.mock("@decky/ui", async () => {
     onKeyDown?: (event: KeyboardEvent) => void;
     onButtonDown?: GamepadHandler;
     onButtonUp?: GamepadHandler;
-    onClick?: () => void;
+    onClick?: (event: KeyboardEvent) => void;
   }
   const keyboard = (props: MockDeckyProps, tag: "div" | "button") => {
     const value = props as MockProps;
@@ -50,7 +51,7 @@ vi.mock("@decky/ui", async () => {
         }
         if (event.key === "Enter") {
           onButtonDown?.(gamepad(event));
-          if (tag === "button" && !event.repeat) value.onClick?.();
+          if (tag === "button" && !event.repeat) value.onClick?.(event);
         }
       },
       onKeyUp: (event: KeyboardEvent) => {
@@ -61,14 +62,7 @@ vi.mock("@decky/ui", async () => {
   const Button = mockDeckyElement("button", keyboard);
   return {
     Button,
-    DialogButton: forwardRef<HTMLElement, MockDeckyProps>((props, ref) =>
-      createElement(Button, {
-        ...props,
-        ref,
-        type: "button",
-        className: `DialogButton ${props.className ?? ""}`,
-      }),
-    ),
+    DialogButton: mockDialogButton(keyboard),
     DialogHeader: (props: MockDeckyProps) =>
       createElement("div", {
         ...props,
@@ -315,6 +309,14 @@ describe("GuideSwitcher", () => {
     expect(choice("3")).toBe(target);
     expect(document.activeElement).toBe(target);
     expect(target.disabled).toBe(false);
+    expect(target.classList.contains("Disabled")).toBe(true);
+    expect(target.getAttribute("data-native-focusable")).toBe("true");
+    expect(choice("2").classList.contains("Disabled")).toBe(true);
+    expect(choice("1").classList.contains("Disabled")).toBe(false);
+    expect(target.hasAttribute("data-ok-action")).toBe(false);
+    expect(target.hasAttribute("data-secondary-action")).toBe(false);
+    expect(choice("1").getAttribute("data-ok-action")).toBe("返回阅读");
+    expect(choice("1").hasAttribute("data-secondary-action")).toBe(false);
     expect(target.getAttribute("aria-busy")).toBe("true");
     expect(target.textContent).toContain("指南 3");
     expect(target.textContent).toContain("正在准备并打开");
@@ -328,6 +330,7 @@ describe("GuideSwitcher", () => {
     expect(document.activeElement).toBe(target);
     expect(choice("3")).toBe(target);
     expect(target.getAttribute("aria-busy")).toBe("false");
+    expect(target.classList.contains("Disabled")).toBe(false);
     expect(target.getAttribute("data-ok-action")).toBe("重试打开");
     expect(target.querySelector('[role="alert"]')?.textContent).toContain(
       "按 A 重试打开",
@@ -348,6 +351,14 @@ describe("GuideSwitcher", () => {
     });
     expect(choice("3")).toBe(target);
     expect(document.activeElement).toBe(target);
+    await render({ pendingKey: "10:2" });
+    const retry = button("重新读取指南列表");
+    expect(retry.classList.contains("Disabled")).toBe(true);
+    expect(retry.getAttribute("data-native-focusable")).toBe("true");
+    await click(retry);
+    expect(props.onReload).not.toHaveBeenCalled();
+    await render({ pendingKey: null });
+    expect(retry.classList.contains("Disabled")).toBe(false);
     await click(button("重新读取指南列表"));
     expect(props.onReload).toHaveBeenCalledOnce();
     expect(props.onChoose).not.toHaveBeenCalled();
@@ -518,9 +529,16 @@ describe("GuideSwitcher", () => {
     });
     await manage("1");
     const confirm = button("确认卸载");
-    await click(confirm);
+    await act(async () => {
+      confirm.focus();
+      confirm.click();
+      confirm.click();
+    });
     expect(document.activeElement).toBe(confirm);
     expect(confirm.disabled).toBe(false);
+    expect(confirm.classList.contains("Disabled")).toBe(true);
+    expect(confirm.getAttribute("data-native-focusable")).toBe("true");
+    expect(button("取消").classList.contains("Disabled")).toBe(true);
     expect(confirm.textContent).toContain("正在卸载");
     await key(confirm, "Escape");
     await click(button("取消"));
@@ -543,6 +561,7 @@ describe("GuideSwitcher", () => {
     expect(choice("1").textContent).toContain("当前会话仍可阅读");
     await manage("1");
     expect(button("确认卸载").getAttribute("aria-disabled")).toBe("true");
+    expect(button("确认卸载").classList.contains("Disabled")).toBe(true);
     await click(button("确认卸载"));
     expect(props.onRemove).toHaveBeenCalledOnce();
   });
@@ -558,6 +577,7 @@ describe("GuideSwitcher", () => {
     await click(confirm);
     expect(button("确认卸载")).toBe(confirm);
     expect(document.activeElement).toBe(confirm);
+    expect(confirm.classList.contains("Disabled")).toBe(false);
     expect(
       container.querySelector('[role="alertdialog"] [role="alert"]')
         ?.textContent,

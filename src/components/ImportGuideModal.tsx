@@ -160,14 +160,11 @@ export function ImportGuideModal({
           </div>
         </DialogBodyText>
         {task?.phase === "downloading" && progress && progress.total > 0 && (
-          <div
-            role="progressbar"
-            aria-label="图片下载进度"
-            aria-valuemin={0}
-            aria-valuenow={progress.completed}
-            aria-valuemax={progress.total}
-          >
-            <ProgressBar indeterminate focusable={false} />
+          <div role="group" aria-label="图片下载进度">
+            <ProgressBar
+              nProgress={(progress.completed / progress.total) * 100}
+              focusable={false}
+            />
           </div>
         )}
         {(error || task?.error) && (

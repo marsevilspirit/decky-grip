@@ -29,7 +29,8 @@ import type { MockDeckyProps as MockProps } from "./helpers/decky-ui";
 
 vi.mock("@decky/ui", async () => {
   const { GamepadButton } = await import("./helpers/decky-gamepad");
-  const { mockDeckyElement } = await import("./helpers/decky-ui");
+  const { mockDeckyElement, mockDialogButton } =
+    await import("./helpers/decky-ui");
   const keyboard = (props: MockProps) => {
     const onCancel = props.onCancel as
       ((event: CustomEvent) => void) | undefined;
@@ -100,7 +101,7 @@ vi.mock("@decky/ui", async () => {
   };
 
   return {
-    DialogButton: mockDeckyElement("button", keyboard),
+    DialogButton: mockDialogButton(keyboard),
     DialogHeader: mockDeckyElement("div"),
     DialogBodyText: mockDeckyElement("div"),
     gamepadDialogClasses: {
@@ -580,8 +581,8 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(
       buttonNamed("更新中…").querySelector('[data-grip-busy="true"]'),
     ).not.toBeNull();
-    expect(buttonNamed("搜索").disabled).toBe(false);
-    expect(buttonNamed("章节 1").disabled).toBe(false);
+    expect(buttonNamed("搜索").classList.contains("Disabled")).toBe(false);
+    expect(buttonNamed("章节 1").classList.contains("Disabled")).toBe(false);
     const oldBody = scroller.querySelector("[data-guide-search-body]");
     scroller.querySelector<HTMLElement>(
       '[data-guide-section-id="20"]',
@@ -603,7 +604,7 @@ describe("GuideReaderPage position lifecycle", () => {
       )?.set?.call(search, "精准命中");
       search.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    expect(buttonNamed("下一个").disabled).toBe(false);
+    expect(buttonNamed("下一个").classList.contains("Disabled")).toBe(false);
     await act(async () => buttonNamed("下一个").click());
     expect(scroller.scrollTop).toBe(3_952);
     expect(scroller.querySelector("[data-guide-search-body]")).toBe(oldBody);
@@ -621,7 +622,7 @@ describe("GuideReaderPage position lifecycle", () => {
       "1 张图片失败，其余继续下载",
     );
     expect(container?.textContent).toContain("旧版仍可阅读");
-    expect(buttonNamed("取消更新").disabled).toBe(false);
+    expect(buttonNamed("取消更新").classList.contains("Disabled")).toBe(false);
     expect(buttonNamed("取消更新").getAttribute("aria-label")).toContain("2/5");
     expect(cache.peek(identity)?.guide).toBe(guide);
 
@@ -710,13 +711,13 @@ describe("GuideReaderPage position lifecycle", () => {
       buttonNamed("取消更新").click();
     });
     expect(signal.aborted).toBe(true);
-    expect(buttonNamed("取消中").disabled).toBe(true);
+    expect(buttonNamed("取消中").classList.contains("Disabled")).toBe(true);
     expect(container?.textContent).toContain("等待正在保存的图片完成");
     expect(scroller.style.overflowY).toBe("auto");
     await act(async () => finish());
     await flushMicrotasks();
     for (let frame = 0; frame < 3; frame++) await flushFrame();
-    expect(buttonNamed("更新").disabled).toBe(false);
+    expect(buttonNamed("更新").classList.contains("Disabled")).toBe(false);
     expect(container?.textContent).toContain("更新已取消，继续阅读原指南");
     expect(container?.textContent).not.toContain("更新失败");
     expect(cache.peek(identity)?.guide).toBe(guide);
@@ -781,14 +782,14 @@ describe("GuideReaderPage position lifecycle", () => {
     notifyResize();
     await act(async () => vi.advanceTimersByTime(101));
     expect(cache.peek(identity)?.guide).toBe(guide);
-    expect(buttonNamed("取消更新").disabled).toBe(false);
+    expect(buttonNamed("取消更新").classList.contains("Disabled")).toBe(false);
     await act(async () => {
       scroller.dispatchEvent(new Event("wheel", { bubbles: true }));
       scroller.scrollTop = 4600;
       scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
     });
     await act(async () => report({ completed: 3, total: 3, publishing: true }));
-    expect(buttonNamed("保存中").disabled).toBe(true);
+    expect(buttonNamed("保存中").classList.contains("Disabled")).toBe(true);
     await act(async () => buttonNamed("保存中").click());
     expect(downloads.getSnapshot(identity.guideId)?.phase).toBe("downloading");
     await act(async () => {
@@ -2062,7 +2063,9 @@ describe("GuideReaderPage position lifecycle", () => {
       pressKey(scroller, "Enter");
       await vi.advanceTimersByTimeAsync(0);
     });
-    expect(buttonNamed("正在重试图片…").disabled).toBe(true);
+    expect(buttonNamed("正在重试图片…").classList.contains("Disabled")).toBe(
+      true,
+    );
     expect(fetchImage).toHaveBeenCalledTimes(3);
     await act(async () => {
       release(payload);
@@ -2823,7 +2826,7 @@ describe("GuideReaderPage position lifecycle", () => {
     await act(async () => buttonNamed("更新").click());
     await flushMicrotasks();
     const reopenSearch = buttonNamed("搜索");
-    expect(reopenSearch.disabled).toBe(false);
+    expect(reopenSearch.classList.contains("Disabled")).toBe(false);
     await act(async () => reopenSearch.click());
     expect(container?.querySelector('[aria-label="指南搜索"]')).not.toBeNull();
     await act(async () =>

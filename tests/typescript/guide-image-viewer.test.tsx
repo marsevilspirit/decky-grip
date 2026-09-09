@@ -13,9 +13,10 @@ import { gamepadEvent, type GamepadHandler } from "./helpers/decky-gamepad";
 
 vi.mock("@decky/ui", async () => {
   const { GamepadButton } = await import("./helpers/decky-gamepad");
-  const { mockDeckyElement } = await import("./helpers/decky-ui");
+  const { mockDeckyElement, mockDialogButton } =
+    await import("./helpers/decky-ui");
   return {
-    DialogButton: mockDeckyElement("button"),
+    DialogButton: mockDialogButton(),
     DialogBodyText: mockDeckyElement("div"),
     Focusable: mockDeckyElement("div"),
     GamepadButton,
@@ -145,11 +146,11 @@ describe("full-screen image viewer interaction", () => {
     for (let i = 0; i < 20; i++)
       gamepad(dialog(), "onButtonDown", GamepadButton.BUMPER_RIGHT);
     expect(img().style.width).toBe("16000px");
-    expect(button("放大").disabled).toBe(true);
+    expect(button("放大").classList.contains("Disabled")).toBe(true);
     for (let i = 0; i < 40; i++)
       gamepad(dialog(), "onButtonDown", GamepadButton.BUMPER_LEFT);
     expect(img().style.width).toBe("20px");
-    expect(button("缩小").disabled).toBe(true);
+    expect(button("缩小").classList.contains("Disabled")).toBe(true);
   });
 
   it("pans to the image edge, then enters the toolbar, whose Up returns to the canvas", () => {
@@ -175,7 +176,7 @@ describe("full-screen image viewer interaction", () => {
 
   it("switches among supplied visible images by LT/RT and buttons without repeats or boundary leakage", () => {
     render({ images: [first, tall, small, first] });
-    expect(button("上一张").disabled).toBe(true);
+    expect(button("上一张").classList.contains("Disabled")).toBe(true);
     expect(dialog().textContent).toContain("1 / 3");
     const edge = gamepad(dialog(), "onButtonDown", GamepadButton.TRIGGER_LEFT);
     expect(edge.stopPropagation).toHaveBeenCalledOnce();
@@ -188,7 +189,7 @@ describe("full-screen image viewer interaction", () => {
     act(() => button("下一张").click());
     expect(img().src).toBe(small.src);
     expect(img().style.width).toBe("100px");
-    expect(button("下一张").disabled).toBe(true);
+    expect(button("下一张").classList.contains("Disabled")).toBe(true);
     expect(dialog().textContent).toContain("3 / 3");
     const end = gamepad(dialog(), "onButtonDown", GamepadButton.TRIGGER_RIGHT);
     expect(end.preventDefault).toHaveBeenCalledOnce();
@@ -283,14 +284,22 @@ describe("full-screen image viewer interaction", () => {
   it("returns focus to the canvas before a focused zoom control becomes disabled", () => {
     render();
     button("放大").focus();
-    for (let index = 0; index < 20 && !button("放大").disabled; index++)
+    for (
+      let index = 0;
+      index < 20 && !button("放大").classList.contains("Disabled");
+      index++
+    )
       act(() => button("放大").click());
-    expect(button("放大").disabled).toBe(true);
+    expect(button("放大").classList.contains("Disabled")).toBe(true);
     expect(document.activeElement).toBe(viewport());
     button("缩小").focus();
-    for (let index = 0; index < 40 && !button("缩小").disabled; index++)
+    for (
+      let index = 0;
+      index < 40 && !button("缩小").classList.contains("Disabled");
+      index++
+    )
       act(() => button("缩小").click());
-    expect(button("缩小").disabled).toBe(true);
+    expect(button("缩小").classList.contains("Disabled")).toBe(true);
     expect(document.activeElement).toBe(viewport());
     key("Tab");
     expect(document.activeElement).toBe(button("放大"));
@@ -405,7 +414,7 @@ describe("full-screen image viewer interaction", () => {
 
   it("keeps keyboard focus within the viewer, skips disabled controls and needs no image list", () => {
     render({ images: [first, small] });
-    expect(button("上一张").disabled).toBe(true);
+    expect(button("上一张").classList.contains("Disabled")).toBe(true);
     expect(key("Tab").defaultPrevented).toBe(true);
     expect(document.activeElement).toBe(button("下一张"));
     key("Tab", { shiftKey: true });

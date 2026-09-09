@@ -14,14 +14,16 @@ vi.mock("../../src/backend", () => ({
   getPhoneImport: vi.fn(),
   stopPhoneImport: vi.fn(async () => {}),
 }));
-vi.mock("@decky/ui", () => ({
-  Button: (props: Record<string, unknown>) => createElement("button", props),
-  DialogButton: (props: Record<string, unknown>) =>
-    createElement("button", { type: "button", ...props }),
-  DialogBodyText: (props: Record<string, unknown>) =>
-    createElement("div", { ...props, className: "DialogBodyText" }),
-  Spinner: () => createElement("span", null, "busy"),
-}));
+vi.mock("@decky/ui", async () => {
+  const { mockDialogButton } = await import("./helpers/decky-ui");
+  return {
+    Button: (props: Record<string, unknown>) => createElement("button", props),
+    DialogButton: mockDialogButton(),
+    DialogBodyText: (props: Record<string, unknown>) =>
+      createElement("div", { ...props, className: "DialogBodyText" }),
+    Spinner: () => createElement("span", null, "busy"),
+  };
+});
 const session = {
   id: "session-1",
   url: "http://steamdeck.local:54321/#temporary-token",
@@ -140,7 +142,9 @@ it("keeps the toggle busy until starting and stopping finish, without duplicate 
   vi.mocked(getPhoneImport).mockResolvedValue({ state: "waiting" });
   await show();
   expect(host.textContent).toContain("正在开启");
-  expect(host.querySelector("button")?.disabled).toBe(true);
+  expect(host.querySelector("button")?.classList.contains("Disabled")).toBe(
+    true,
+  );
   await act(async () => host.querySelector("button")!.click());
   expect(startPhoneImport).toHaveBeenCalledOnce();
   await act(async () => started(session));
@@ -156,11 +160,15 @@ it("keeps the toggle busy until starting and stopping finish, without duplicate 
   });
   expect(stopPhoneImport).toHaveBeenCalledExactlyOnceWith(session.id);
   expect(host.textContent).toContain("正在关闭");
-  expect(host.querySelector("button")?.disabled).toBe(true);
+  expect(host.querySelector("button")?.classList.contains("Disabled")).toBe(
+    true,
+  );
   expect(host.querySelector("img")).toBeNull();
   await act(async () => stopped());
   expect(host.textContent).toContain("手机接收已关闭");
-  expect(host.querySelector("button")?.disabled).toBe(false);
+  expect(host.querySelector("button")?.classList.contains("Disabled")).toBe(
+    false,
+  );
 });
 
 it("hides an expired QR even while a receiver poll is stalled and ignores its late result", async () => {

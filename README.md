@@ -75,7 +75,8 @@ extractor in `dist/heybox-render.js`. Both are packaged alongside a freshly buil
 Linux x86_64 `grip-sidecar` in the plugin's `bin/` directory.
 Python tests use only the standard library.
 
-Local browser layout regressions run separately from `check`:
+Local browser regressions run separately from `check` (Node, Rust and a browser
+are required; a Steam Deck is not):
 
 ```bash
 pnpm exec playwright install chromium
@@ -88,7 +89,11 @@ table bounds, and checks search positioning after actual image decoding. It also
 covers guide switching, close/reopen/reload, failed-load and save retries, and
 DOM-work counts for a same-frame scroll burst over 600 images. Backend responses
 and saved positions use local fixtures and a thin Decky adapter; layout,
-observers, decoding and reader interactions remain real. This does not validate
+observers, decoding and reader interactions remain real. The import journey
+renders the real QR component, decodes its image pixels with the test-only `jsqr`,
+and submits through the real Rust phone page on loopback. Download fixtures
+exercise the production image-download/task pipeline, including cancellation,
+failure and retry, without contacting third-party sites. This does not validate
 Steam FocusNav, CEF compatibility, physical controller input, or device network/offline behavior.
 CI installs Chromium and runs the same suite; failures retain screenshots and
 traces in `test-results/browser/`. The browser dependency is development-only.
@@ -100,6 +105,15 @@ components. Do not add a GRIP color palette, button skin, focus ring, or custom
 animation. Reader CSS is only for document layout (including safe image/table
 sizes and BBCode structure); the browser adapter does not reproduce Steam's
 stylesheet, so local browser tests are not native-style visual acceptance.
+
+Native component contracts can also be checked against an installed Steam
+client: `node --test tests/scripts/steam-native-contract.test.mjs`. The test
+locates the macOS installation by default; use `GRIP_STEAM_UI_DIR` for another
+`steamui` directory. It executes the actual button/progress component functions,
+does not vendor Valve code, and explicitly skips when Steam is not installed.
+Steam progress takes a 0–100 percentage. A disabled DialogButton retains its
+focusable DOM node; its native disabled styling and event blocking are not the
+same contract as an HTML button's `disabled` attribute.
 
 `GuideReaderPage` owns the UI and saves checkpoints. `reader/viewport.ts` owns
 document observers, image residency, retry hosts, and frame-coalesced measurement;

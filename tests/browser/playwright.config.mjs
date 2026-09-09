@@ -21,6 +21,7 @@ export default defineConfig({
     cwd: fileURLToPath(new URL("../../", import.meta.url)),
     url: "http://127.0.0.1:4173",
     reuseExistingServer: false,
+    timeout: 180_000,
     gracefulShutdown: { signal: "SIGTERM", timeout: 2_000 },
   },
 });

@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { act, createContext, createElement, type ReactNode } from "react";
+import { act, createContext, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -16,38 +16,30 @@ import {
   type GuideImageDownloadProgress,
 } from "../../src/reader/download";
 
-vi.mock("@decky/ui", () => ({
-  DialogButton: ({
-    children,
-    disabled,
-    onClick,
-    "aria-disabled": ariaDisabled,
-    "aria-busy": ariaBusy,
-  }: {
-    children?: ReactNode;
-    disabled?: boolean;
-    onClick?: () => void;
-    "aria-disabled"?: boolean;
-    "aria-busy"?: boolean;
-  }) =>
-    createElement(
-      "button",
-      {
-        disabled,
-        onClick,
-        "aria-disabled": ariaDisabled,
-        "aria-busy": ariaBusy,
-      },
-      children,
-    ),
-  DialogBodyText: (props: Record<string, unknown>) =>
-    createElement("div", { ...props, className: "DialogBodyText" }),
-  ProgressBar: ({ indeterminate }: { indeterminate?: boolean }) =>
-    createElement("div", {
-      "data-steam-progress": indeterminate ? "indeterminate" : "determinate",
-    }),
-  Spinner: () => createElement("span"),
-}));
+vi.mock("@decky/ui", async () => {
+  const { mockDialogButton } = await import("./helpers/decky-ui");
+  return {
+    DialogButton: mockDialogButton(),
+    DialogBodyText: (props: Record<string, unknown>) =>
+      createElement("div", { ...props, className: "DialogBodyText" }),
+    ProgressBar: ({
+      indeterminate,
+      nProgress,
+    }: {
+      indeterminate?: boolean;
+      nProgress?: number;
+    }) =>
+      createElement("div", {
+        role: "progressbar",
+        "aria-valuemin": 0,
+        "aria-valuemax": 100,
+        "aria-valuenow": nProgress,
+        "data-steam-progress": indeterminate ? "indeterminate" : "determinate",
+        "data-progress-percent": nProgress,
+      }),
+    Spinner: () => createElement("span"),
+  };
+});
 
 const firstGuide: GuideIdentity = { appId: "1113000", guideId: "10" };
 const secondGuide: GuideIdentity = { appId: "1113000", guideId: "20" };
@@ -129,11 +121,17 @@ describe("GuideDownloadButton", () => {
     expect(primary.textContent).toBe("取消下载");
     expect(portalTarget.textContent).toContain("图片 13/61 · 21%");
     const progress = portalTarget.querySelector('[role="progressbar"]')!;
-    expect(progress.getAttribute("aria-valuemax")).toBe("61");
-    expect(progress.getAttribute("aria-valuenow")).toBe("13");
-    expect(
-      progress.querySelector('[data-steam-progress="indeterminate"]'),
-    ).not.toBeNull();
+    expect(portalTarget.querySelectorAll('[role="progressbar"]')).toHaveLength(
+      1,
+    );
+    expect(progress.getAttribute("aria-valuemax")).toBe("100");
+    expect(Number(progress.getAttribute("aria-valuenow"))).toBeCloseTo(
+      (13 / 61) * 100,
+    );
+    expect(progress.getAttribute("data-steam-progress")).toBe("determinate");
+    expect(Number(progress.getAttribute("data-progress-percent"))).toBeCloseTo(
+      (13 / 61) * 100,
+    );
     expect(portalTarget.querySelector("progress")).toBeNull();
     expect(getDownloadStatus).not.toHaveBeenCalled();
     await act(async () =>
@@ -161,11 +159,15 @@ describe("GuideDownloadButton", () => {
     expect(button()).toBe(primary);
     expect(document.activeElement).toBe(primary);
     expect(primary.getAttribute("aria-disabled")).toBe("true");
+    expect(primary.classList.contains("Disabled")).toBe(true);
+    expect(primary.disabled).toBe(false);
+    expect(primary.getAttribute("data-native-focusable")).toBe("true");
     await act(async () => {
       finish();
       await work;
     });
     expect(button()?.textContent).toBe("继续下载");
+    expect(primary.classList.contains("Disabled")).toBe(false);
     expect(button()).toBe(primary);
     expect(document.activeElement).toBe(primary);
     expect(portalTarget.querySelectorAll("button")).toHaveLength(1);
@@ -348,6 +350,7 @@ describe("GuideDownloadButton", () => {
     await act(async () => button()?.click());
     expect(button()?.textContent).toBe("检查下载…");
     expect(button()?.getAttribute("aria-disabled")).toBe("true");
+    expect(button()?.classList.contains("Disabled")).toBe(true);
     await act(async () =>
       finishCheck({ state: "complete", completed: 1, total: 1 }),
     );
@@ -358,9 +361,11 @@ describe("GuideDownloadButton", () => {
     });
     expect(button()?.textContent).toBe("正在打开…");
     expect(button()?.getAttribute("aria-disabled")).toBe("true");
+    expect(button()?.classList.contains("Disabled")).toBe(true);
     expect(openGuide).toHaveBeenCalledTimes(1);
     await act(async () => failOpen(new Error("navigation failed")));
     expect(button()?.textContent).toBe("重试打开");
+    expect(button()?.classList.contains("Disabled")).toBe(false);
     expect(portalTarget.textContent).toContain(
       "本地阅读打开失败：navigation failed",
     );
@@ -431,8 +436,13 @@ describe("GuideDownloadButton", () => {
       portalTarget
         .querySelector('[role="progressbar"]')
         ?.getAttribute("aria-valuenow"),
-    ).toBe("1");
+    ).toBe("50");
     expect(portalTarget.textContent).toContain("图片 1/2 · 50%");
+    expect(
+      portalTarget
+        .querySelector("[data-progress-percent]")
+        ?.getAttribute("data-progress-percent"),
+    ).toBe("50");
     await act(async () => {
       // Publication can arrive before React commits the previous cancel label.
       report({ completed: 2, total: 2, publishing: true });
@@ -442,8 +452,15 @@ describe("GuideDownloadButton", () => {
     expect(signal.aborted).toBe(false);
     expect(cancel).not.toHaveBeenCalled();
     expect(primary.textContent).toBe("保存新版…");
+    expect(
+      portalTarget
+        .querySelector("[data-progress-percent]")
+        ?.getAttribute("data-progress-percent"),
+    ).toBe("100");
     expect(primary.getAttribute("aria-disabled")).toBe("true");
     expect(primary.disabled).toBe(false);
+    expect(primary.classList.contains("Disabled")).toBe(true);
+    expect(primary.getAttribute("data-native-focusable")).toBe("true");
     expect(button()).toBe(primary);
     expect(document.activeElement).toBe(primary);
     await act(async () => finish());
@@ -456,6 +473,7 @@ describe("GuideDownloadButton", () => {
     );
     expect(primary.textContent).toBe("本地阅读");
     expect(primary.getAttribute("aria-disabled")).toBe("false");
+    expect(primary.classList.contains("Disabled")).toBe(false);
     expect(portalTarget.textContent).toContain("正文和图片已完整离线");
     expect(portalTarget.querySelectorAll("button")).toHaveLength(1);
     expect(button()).toBe(primary);
