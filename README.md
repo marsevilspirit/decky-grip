@@ -321,9 +321,10 @@ active hydration candidates with visible images first, while staging no more tha
 48 distinct image URLs at once. This budget never permanently excludes images
 later in a long guide. Under **高级选项**, the panel shows cache usage and provides
 separate controls for clearing all guide bodies or images. To remove one guide,
-open the reader's **Y** switcher and choose **管理** beside that guide (or focus
-its card and press **X**), then choose **确认卸载**. The confirmation names the
-target guide; it does not need to be the one currently being read.
+open the reader's **Y** switcher, focus the guide's card and press **X**, then
+choose **确认卸载**. **A** opens or resumes reading; each card has no separate
+management button. The confirmation names the target guide; it does not need
+to be the one currently being read.
 This removes its body and all unreferenced images, including leftovers from
 older updates, while preserving other cached guides and active downloads. If
 another guide cannot be inspected safely, deletion stops. The current in-memory

@@ -1892,17 +1892,20 @@ describe("GuideReaderPage position lifecycle", () => {
     });
     await act(async () => pressKey(scroller, "Options"));
     await flushFrame();
-    const manage = () =>
-      container!.querySelector<HTMLElement>(
-        `[data-grip-guide-manage="${identity.appId}:${identity.guideId}"]`,
+    const manage = () => {
+      const choice = container!.querySelector<HTMLElement>(
+        `[data-grip-guide-choice="${identity.appId}:${identity.guideId}"]`,
       )!;
-    await act(async () => manage().click());
+      choice.focus();
+      pressKey(choice, "Secondary");
+    };
+    await act(async () => manage());
     const confirm = container!.querySelector('[role="alertdialog"]')!;
     expect(confirm.textContent).toContain(guide.title);
     expect(remove).not.toHaveBeenCalled();
     await act(async () => buttonNamed("取消").click());
     expect(remove).not.toHaveBeenCalled();
-    await act(async () => manage().click());
+    await act(async () => manage());
     await act(async () => {
       buttonNamed("确认卸载").click();
     });
@@ -1912,14 +1915,14 @@ describe("GuideReaderPage position lifecycle", () => {
       finish();
     });
     expect(container!.textContent).toContain("已卸载");
-    await act(async () => manage().click());
+    await act(async () => manage());
     expect(buttonNamed("确认卸载").getAttribute("aria-disabled")).toBe("true");
     expect(container!.querySelector('[aria-label="指南正文"]')).toBe(scroller);
     await act(async () => buttonNamed("取消").click());
     await act(async () => pressKey(scroller, "Escape"));
     await act(async () => buttonNamed("更新").click());
     await act(async () => pressKey(scroller, "Options"));
-    await act(async () => manage().click());
+    await act(async () => manage());
     expect(buttonNamed("确认卸载").getAttribute("aria-disabled")).toBe("false");
   });
 

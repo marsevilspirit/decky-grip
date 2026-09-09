@@ -19,22 +19,18 @@ export interface GuideSwitcherProps {
 }
 
 const SWITCHER_CSS = `
-.grip-guide-row { display: flex; align-items: stretch; gap: 12px; margin-bottom: 12px; }
+.grip-guide-row { display: flex; margin-bottom: 12px; }
 .grip-reader-guide-switcher .grip-guide-choice {
   box-sizing: border-box; flex: 1; min-width: 0; min-height: 100px;
   padding: 14px 18px; text-align: left; white-space: normal; overflow-wrap: anywhere;
   color: #dcdedf; background: #1d2b38; border: 2px solid transparent; border-radius: 8px;
 }
-.grip-reader-guide-switcher .grip-guide-manage {
-  flex: 0 0 76px; min-width: 0; min-height: 44px; align-self: center; padding: 12px;
-  color: #dcdedf; background: #1d2b38; border: 2px solid transparent; border-radius: 8px;
-}
 .grip-reader-guide-switcher .grip-guide-choice[data-current="true"] { border-color: #406078; }
-.grip-reader-guide-switcher .grip-guide-choice:focus, .grip-reader-guide-switcher .grip-guide-choice[data-focused="true"], .grip-reader-guide-switcher .grip-guide-manage:focus, .grip-reader-guide-switcher .grip-guide-manage[data-focused="true"] {
+.grip-reader-guide-switcher .grip-guide-choice:focus, .grip-reader-guide-switcher .grip-guide-choice[data-focused="true"] {
   color: #fff; background: #29475f; border-color: #89d3ff;
   box-shadow: 0 0 0 2px #89d3ff55;
 }
-.grip-reader-guide-switcher .grip-guide-choice:active, .grip-reader-guide-switcher .grip-guide-choice[data-pressed="true"], .grip-reader-guide-switcher .grip-guide-manage:active { background: #365e7a; }
+.grip-reader-guide-switcher .grip-guide-choice:active, .grip-reader-guide-switcher .grip-guide-choice[data-pressed="true"] { background: #365e7a; }
 .grip-guide-choice-status { font-size: 13px; line-height: 1.5; margin-top: 7px; color: #a9d9f4; }
 .grip-guide-choice [role="alert"] { color: #ffc4b8; }
 @keyframes grip-switcher-enter { from { opacity: 0; transform: translateY(8px); } }
@@ -435,28 +431,6 @@ export function GuideSwitcher({
                     "未下载离线副本，打开时将下载正文"
                   )}
                 </div>
-              </Button>
-              <Button
-                className="grip-guide-manage"
-                data-grip-guide-manage={key}
-                data-focused={
-                  focusedKey === `manage:${key}` ? "true" : undefined
-                }
-                aria-label={`管理指南：${titleFor(entry)}`}
-                aria-disabled={pendingKey !== null}
-                onOKActionDescription="管理指南"
-                onGamepadFocus={(event) => {
-                  setFocusedKey(`manage:${key}`);
-                  revealChoice(event.target as HTMLElement);
-                }}
-                onGamepadBlur={() =>
-                  setFocusedKey((value) =>
-                    value === `manage:${key}` ? null : value,
-                  )
-                }
-                onClick={() => openManagement(entry)}
-              >
-                管理
               </Button>
             </div>
           );
