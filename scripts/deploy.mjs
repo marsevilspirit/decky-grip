@@ -9,7 +9,7 @@ import { buildPackage, run } from "./package.mjs";
 const HOMEBREW = "/home/deck/homebrew";
 const PLUGIN = `${HOMEBREW}/plugins/decky-grip`;
 const BACKUPS = "/home/deck/.local/share/grip-deployment-backups";
-const SSH_OPTIONS = [
+export const SSH_OPTIONS = [
   "-o",
   "BatchMode=yes",
   "-o",

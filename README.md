@@ -168,7 +168,16 @@ the byte accounting shared by body, summary, and image caches.
 just deploy          # defaults to ssh deck
 just deploy my-deck  # another configured SSH alias
 just package         # build a Deck ZIP locally, without SSH
+just screenshot      # copy the Deck's full Gaming Mode screen to the Mac clipboard
+just screenshot my-deck # another configured SSH alias
 ```
+
+On a Mac, `just screenshot` captures the full Gaming Mode screen (including Steam
+menus), verifies the PNG, and copies the image itself to the clipboard for ⌘V.
+Keep the Deck awake; this command needs only SSH and the Deck's existing `xprop`
+and `flock`, not Docker, a plugin installation, or CEF debugging. Local temporary
+files are removed; Gamescope reuses its native `/tmp/gamescope.png`. Avoid taking
+a Steam screenshot simultaneously. Desktop Mode is not supported by this command.
 
 Install `just`, Docker, `zip`/`unzip`, and the development requirements above;
 deployment also needs Node.js 22+ for its native WebSocket client. Docker must be
