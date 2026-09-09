@@ -15,19 +15,27 @@ import { GuideDownloadTasks } from "../../src/reader/download";
 import type { GuideImageDownloadResult } from "../../src/reader/download";
 import type { DownloadedGuide, ReaderPosition } from "../../src/reader/types";
 import type { RuntimeStatusStore } from "../../src/runtime-status";
+import type { GuideIdentity } from "../../src/steam/guide-key";
+import type { SteamGuideRuntime } from "../../src/steam/runtime";
 
 const steam = vi.hoisted(() => ({
+  runningAppId: undefined as string | undefined,
+  nativeGuide: null as GuideIdentity | null,
+  historyListener: null as (() => void) | null,
+  hotkeyListener: null as ((payload: unknown) => void) | null,
   backend: {
     get_positions: vi.fn(),
     get_guide_library: vi.fn(),
     get_cached_guide: vi.fn(),
     get_guide: vi.fn(),
+    get_guide_image: vi.fn(),
     get_reader_position: vi.fn(),
     save_reader_position: vi.fn(),
     prepare_guide: vi.fn(),
     download_guide_image: vi.fn(),
     commit_guide: vi.fn(),
     discard_guide: vi.fn(),
+    remove_offline_guide: vi.fn(),
   },
   toast: vi.fn<(data: ToastData) => void>(),
   showModal: vi.fn<
@@ -65,7 +73,10 @@ vi.mock("@decky/api", () => ({
       if (!handler) throw new Error(`Unexpected Steam backend call: ${method}`);
       return handler(...args);
     },
-  addEventListener: (_event: string, listener: unknown) => listener,
+  addEventListener: (event: string, listener: (payload: unknown) => void) => {
+    if (event === "grip_hotkey") steam.hotkeyListener = listener;
+    return listener;
+  },
   removeEventListener: vi.fn(),
   routerHook: {
     addRoute: steam.addRoute,
@@ -77,6 +88,11 @@ vi.mock("@decky/api", () => ({
 }));
 vi.mock("@decky/ui", () => ({
   Router: {
+    get MainRunningApp() {
+      return steam.runningAppId
+        ? { appid: Number(steam.runningAppId) }
+        : undefined;
+    },
     WindowStore: {
       GamepadUIMainWindowInstance: {
         History: { location: { pathname: "/library/home" } },
@@ -91,6 +107,26 @@ vi.mock("@decky/ui", () => ({
   getGamepadNavigationTrees: () => [],
   getReactInstance: () => null,
   SideMenu: { Main: "main" },
+}));
+vi.mock("../../src/steam/runtime", () => ({
+  createSteamGuideRuntime: (): SteamGuideRuntime => ({
+    identity: steam,
+    getLocation: () => ({ pathname: "/library/home" }),
+    getActiveGuide: () => steam.nativeGuide,
+    getGuideScroller: () => null,
+    replaceLocationState: () => {},
+    listenHistory: (listener) => {
+      steam.historyListener = listener;
+      return () => {
+        steam.historyListener = null;
+      };
+    },
+    listenGuideScroll: () => () => {},
+    listenGuideInteraction: () => () => {},
+    listenGuideLayout: () => () => {},
+    listenWindowFocus: () => () => {},
+    beforeGuideSelection: () => () => {},
+  }),
 }));
 vi.mock("../../src/components/GuideDownloadButton", () => ({
   NativeGuideDownloadButton: () => null,
@@ -135,20 +171,59 @@ const position: ReaderPosition = {
   anchorOffset: 10,
   updatedAt: 1,
 };
+const localEntry = {
+  ...identity,
+  updatedAt: 1,
+  cache: {
+    title: guide.title,
+    author: guide.author,
+    fetchedAt: 1,
+    sectionTitle: null,
+    stale: false,
+  },
+};
 
 describe("plugin download completion notification", () => {
   let plugin: ReturnType<typeof createPlugin>;
   let downloads: GuideDownloadTasks;
   let status: RuntimeStatusStore;
   const notification = () => steam.toast.mock.calls[0][0];
+  const panel = () => (plugin.content as ReactElement<GripPanelProps>).props;
+  const reader = () =>
+    steam.addRoute.mock.calls[steam.addRoute.mock.calls.length - 1][1]().props;
+  const restart = () => {
+    plugin.onDismount?.();
+    plugin = createPlugin();
+    ({ downloads, status } =
+      steam.addGlobalComponent.mock.calls[
+        steam.addGlobalComponent.mock.calls.length - 1
+      ][1]().props);
+  };
+  const observe = async (identity: GuideIdentity) => {
+    await vi.waitFor(() => expect(steam.historyListener).not.toBeNull());
+    steam.nativeGuide = identity;
+    steam.historyListener!();
+    await Promise.resolve();
+    expect(status.getSnapshot().activeGuide).toEqual(identity);
+  };
+  const expectNoDownload = () => {
+    expect(steam.backend.get_guide).not.toHaveBeenCalled();
+    expect(steam.backend.prepare_guide).not.toHaveBeenCalled();
+    expect(steam.backend.download_guide_image).not.toHaveBeenCalled();
+  };
 
   beforeEach(() => {
     vi.resetAllMocks();
+    steam.runningAppId = undefined;
+    steam.nativeGuide = null;
+    steam.historyListener = null;
+    steam.hotkeyListener = null;
     vi.spyOn(console, "info").mockImplementation(() => {});
     steam.backend.get_positions.mockResolvedValue({});
     steam.backend.get_guide_library.mockResolvedValue([]);
     steam.backend.get_cached_guide.mockResolvedValue(null);
     steam.backend.get_guide.mockResolvedValue(guide);
+    steam.backend.get_guide_image.mockResolvedValue(null);
     steam.backend.get_reader_position.mockResolvedValue(position);
     steam.backend.save_reader_position.mockResolvedValue(position);
     steam.backend.prepare_guide.mockResolvedValue({ token: "prepared", guide });
@@ -167,14 +242,10 @@ describe("plugin download completion notification", () => {
     vi.restoreAllMocks();
   });
 
-  it("only reads local content when a Steam guide is observed or opened, until an explicit download", async () => {
+  it("does not preload a browsed Steam guide and only downloads after an explicit action", async () => {
     const { cache } = steam.addRoute.mock.calls[0][1]().props;
-    status.update({ activeGuide: identity });
-    await vi.waitFor(() =>
-      expect(steam.backend.get_cached_guide).toHaveBeenCalledWith(
-        identity.guideId,
-      ),
-    );
+    await observe(identity);
+    expect(steam.backend.get_cached_guide).not.toHaveBeenCalled();
     expect(steam.backend.get_guide).not.toHaveBeenCalled();
     expect(steam.backend.prepare_guide).not.toHaveBeenCalled();
     expect(downloads.getSnapshot(identity.guideId)).toBeNull();
@@ -193,6 +264,177 @@ describe("plugin download completion notification", () => {
     expect(steam.backend.download_guide_image).toHaveBeenCalledOnce();
     expect((await cache.load(identity)).guide).toBe(guide);
     expect(steam.backend.get_guide).not.toHaveBeenCalled();
+  });
+
+  it.each([identity.appId, "730"])(
+    "keeps locally opened A for the panel and L4 after browsing B from app %s",
+    async (appId) => {
+      steam.runningAppId = identity.appId;
+      steam.backend.get_cached_guide.mockImplementation(async (guideId) =>
+        guideId === identity.guideId ? guide : null,
+      );
+      await reader().onSwitchGuide(identity);
+      await vi.waitFor(() =>
+        expect(status.getRecentGuide(identity.appId)).toEqual(identity),
+      );
+      const browsed = { appId, guideId: "456" };
+      await observe(browsed);
+      steam.navigate.mockClear();
+      // With no running game, the global local-recent choice must also ignore B.
+      if (appId !== identity.appId) steam.runningAppId = undefined;
+      await panel().openReader();
+      await vi.waitFor(() => expect(steam.navigate).toHaveBeenCalledOnce());
+      steam.runningAppId = identity.appId;
+      steam.hotkeyListener!("L4");
+      await vi.waitFor(() => expect(steam.navigate).toHaveBeenCalledTimes(2));
+      expect(steam.navigate.mock.calls).toEqual(
+        Array.from({ length: 2 }, () => [
+          `/decky-grip/reader/${identity.appId}/${identity.guideId}`,
+          true,
+        ]),
+      );
+      expect(
+        steam.backend.get_cached_guide.mock.calls.every(
+          ([guideId]) => guideId === identity.guideId,
+        ),
+      ).toBe(true);
+      expect(status.getRecentGuide(identity.appId)).toEqual(identity);
+      expectNoDownload();
+    },
+  );
+
+  it("uses the downloaded library after restart, not the newer native reading position", async () => {
+    steam.runningAppId = identity.appId;
+    steam.backend.get_positions.mockResolvedValue({
+      [`${identity.appId}:456`]: { scrollTop: 99, updatedAt: 100 },
+    });
+    steam.backend.get_guide_library.mockResolvedValue([localEntry]);
+    steam.backend.get_cached_guide.mockImplementation(async (guideId) =>
+      guideId === identity.guideId ? guide : null,
+    );
+    restart();
+    await panel().openReader();
+    expect(status.getSnapshot().savedCount).toBe(1);
+    expect(steam.navigate).toHaveBeenCalledExactlyOnceWith(
+      `/decky-grip/reader/${identity.appId}/${identity.guideId}`,
+      true,
+    );
+    expect(
+      steam.backend.get_cached_guide.mock.calls.every(
+        ([guideId]) => guideId === identity.guideId,
+      ),
+    ).toBe(true);
+    expectNoDownload();
+  });
+
+  it("does not remember an explicitly opened guide whose local body is missing", async () => {
+    steam.runningAppId = identity.appId;
+    steam.backend.get_cached_guide.mockImplementation(async (guideId) =>
+      guideId === identity.guideId ? guide : null,
+    );
+    await reader().onSwitchGuide(identity);
+    await vi.waitFor(() =>
+      expect(steam.backend.save_reader_position).toHaveBeenCalled(),
+    );
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await reader().onSwitchGuide({ ...identity, guideId: "456" });
+    await vi.waitFor(() =>
+      expect(warning).toHaveBeenCalledWith(
+        "[GRIP] Reader content load failed",
+        expect.any(Error),
+      ),
+    );
+    expect(status.getRecentGuide(identity.appId)).toEqual(identity);
+    steam.navigate.mockClear();
+    await panel().openReader();
+    expect(steam.navigate).toHaveBeenCalledExactlyOnceWith(
+      `/decky-grip/reader/${identity.appId}/${identity.guideId}`,
+      true,
+    );
+    expectNoDownload();
+  });
+
+  it("forgets removed local B and ignores an older library response that could resurrect it", async () => {
+    const removed = { ...identity, guideId: "456" };
+    const oldLibrary = deferred<(typeof localEntry)[]>();
+    const bodies = new Map([
+      [identity.guideId, guide],
+      [removed.guideId, { ...guide, guideId: removed.guideId }],
+    ]);
+    steam.runningAppId = identity.appId;
+    steam.backend.get_cached_guide.mockImplementation(
+      async (guideId) => bodies.get(guideId) ?? null,
+    );
+    steam.backend.get_guide_library
+      .mockReturnValueOnce(oldLibrary.promise)
+      .mockResolvedValue([localEntry]);
+    steam.backend.remove_offline_guide.mockImplementation(async (guideId) => {
+      bodies.delete(guideId);
+      return { filesRemoved: 1, bytesRemoved: 100 };
+    });
+    restart();
+    await reader().onSwitchGuide(removed);
+    await vi.waitFor(() =>
+      expect(status.getRecentGuide(identity.appId)).toEqual(removed),
+    );
+    await reader().onRemoveOffline(removed.guideId);
+    expect(steam.backend.remove_offline_guide).toHaveBeenCalledExactlyOnceWith(
+      removed.guideId,
+    );
+    expect(status.getRecentGuide(identity.appId)).toEqual(identity);
+    oldLibrary.resolve([{ ...localEntry, ...removed, updatedAt: 100 }]);
+    await oldLibrary.promise;
+    await Promise.resolve();
+    expect(status.getRecentGuide(identity.appId)).toEqual(identity);
+    steam.navigate.mockClear();
+    steam.backend.get_cached_guide.mockClear();
+    await panel().openReader();
+    expect(steam.navigate).toHaveBeenCalledExactlyOnceWith(
+      `/decky-grip/reader/${identity.appId}/${identity.guideId}`,
+      true,
+    );
+    expect(
+      steam.backend.get_cached_guide.mock.calls.every(
+        ([guideId]) => guideId === identity.guideId,
+      ),
+    ).toBe(true);
+    expectNoDownload();
+  });
+
+  it("waits for the cold local library instead of adopting native B before A arrives", async () => {
+    const library = deferred<(typeof localEntry)[]>();
+    steam.runningAppId = identity.appId;
+    steam.nativeGuide = { ...identity, guideId: "456" };
+    steam.backend.get_guide_library.mockReturnValue(library.promise);
+    steam.backend.get_cached_guide.mockImplementation(async (guideId) =>
+      guideId === identity.guideId ? guide : null,
+    );
+    restart();
+    await vi.waitFor(() =>
+      expect(status.getSnapshot().activeGuide).toEqual(steam.nativeGuide),
+    );
+    const opening = panel().openReader();
+    await Promise.resolve();
+    expect(steam.navigate).not.toHaveBeenCalled();
+    expect(steam.backend.get_cached_guide).not.toHaveBeenCalled();
+    library.resolve([localEntry]);
+    await opening;
+    expect(steam.navigate).toHaveBeenCalledExactlyOnceWith(
+      `/decky-grip/reader/${identity.appId}/${identity.guideId}`,
+      true,
+    );
+    expectNoDownload();
+  });
+
+  it("asks for a download when the running game has no local guide rather than opening another app or native B", async () => {
+    steam.runningAppId = "730";
+    steam.nativeGuide = { appId: "730", guideId: "456" };
+    steam.backend.get_guide_library.mockResolvedValue([localEntry]);
+    restart();
+    await expect(panel().openReader()).rejects.toThrow("下载");
+    expect(steam.navigate).not.toHaveBeenCalled();
+    expect(steam.backend.get_cached_guide).not.toHaveBeenCalled();
+    expectNoDownload();
   });
 
   it("reads stale local guides without downloading and only refreshes on an explicit update", async () => {

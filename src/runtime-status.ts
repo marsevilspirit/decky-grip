@@ -22,7 +22,7 @@ export interface GripRuntimeStatus {
 }
 
 export class RuntimeStatusStore {
-  private readonly recentGuides = new RecentGuideIndex();
+  private recentGuides = new RecentGuideIndex();
   private snapshot: GripRuntimeStatus;
 
   private readonly listeners = new Set<() => void>();
@@ -63,6 +63,10 @@ export class RuntimeStatusStore {
 
   rememberGuide(identity: GuideIdentity): void {
     this.recentGuides.remember(identity);
+  }
+
+  clearRecentGuides(): void {
+    this.recentGuides = new RecentGuideIndex();
   }
 
   refreshGuideLibrary(): void {

@@ -39,10 +39,7 @@ import {
   readerRouteAppId,
   ReaderHotkeyToggle,
 } from "./hotkey/reader-toggle";
-import {
-  chooseObservedGuide,
-  resolveGuideForReaderOpen,
-} from "./reader/recent-guide";
+import { resolveGuideForReaderOpen } from "./reader/recent-guide";
 import { ReaderImageCacheControl } from "./reader/image-cache-control";
 import { ReaderImageHydrator } from "./reader/image-hydrator";
 import {
@@ -107,6 +104,7 @@ export default definePlugin(() => {
   const imageHydrator = new ReaderImageHydrator(getGuideImage);
   let guideCacheMutationActive = false;
   let imageCacheMutationActive = false;
+  let recentGuidesGeneration = 0;
   const readerCache = new ReaderSessionCache(
     {
       getCachedGuide,
@@ -150,11 +148,19 @@ export default definePlugin(() => {
       throw new Error("指南正文缓存正在清理，请稍后再试");
     }
     guideCacheMutationActive = true;
+    readerOpenGeneration += 1;
     imageHydrator.cancelPreload();
     try {
       return await action();
     } finally {
       readerCache.clear();
+      // Neither a removed guide nor an older in-flight list may become recent again.
+      recentGuidesGeneration += 1;
+      status.clearRecentGuides();
+      recentGuidesReady = mergeReaderRecentGuides(
+        currentRunningAppId() ?? null,
+      );
+      await recentGuidesReady;
       guideCacheMutationActive = false;
       status.refreshGuideLibrary();
       status.refreshDownloads();
@@ -168,36 +174,32 @@ export default definePlugin(() => {
     runtimeFactory: createSteamGuideRuntime,
     status,
   });
-  const controllerReady = controller.start();
+  void controller.start();
   const mergeReaderRecentGuides = async (appId: string | null) => {
+    const generation = recentGuidesGeneration;
     try {
       const entries = await getGuideLibrary(appId);
-      if (mounted) {
+      if (mounted && generation === recentGuidesGeneration) {
         status.mergeRecentGuides(
-          entries.map(({ appId, guideId, updatedAt }) => ({
-            identity: { appId, guideId },
-            updatedAt,
-          })),
+          entries
+            .filter((entry) => entry.cache)
+            .map(({ appId, guideId, updatedAt }) => ({
+              identity: { appId, guideId },
+              updatedAt,
+            })),
         );
       }
     } catch (error: unknown) {
       console.warn("[GRIP] Could not read GRIP Reader history", error);
     }
   };
-  let recentGuidesReady = controllerReady.then(() =>
-    mergeReaderRecentGuides(currentRunningAppId() ?? null),
+  let recentGuidesReady = mergeReaderRecentGuides(
+    currentRunningAppId() ?? null,
   );
 
   const resolveReaderIdentity = (
     targetAppId: string | undefined,
-  ): GuideIdentity | null => {
-    const runtimeStatus = status.getSnapshot();
-    return chooseObservedGuide(
-      runtimeStatus.activeGuide,
-      status.getRecentGuide(targetAppId),
-      targetAppId,
-    );
-  };
+  ): GuideIdentity | null => status.getRecentGuide(targetAppId);
 
   let lastPreloadKey: string | null = null;
   let lastPreloadAt = 0;
@@ -302,8 +304,8 @@ export default definePlugin(() => {
       if (!identity) {
         throw new Error(
           targetAppId === undefined
-            ? "请先打开一次 Steam 指南，再使用 GRIP 阅读器"
-            : "当前游戏还没有可继续的指南，请先打开一次该游戏的 Steam 指南",
+            ? "还没有可继续的本地指南，请先下载指南到 GRIP"
+            : "当前游戏还没有可继续的本地指南，请先下载该游戏的指南到 GRIP",
         );
       }
       makeGuideKey(identity);
@@ -339,7 +341,6 @@ export default definePlugin(() => {
         `/decky-grip/reader/${identity.appId}/${identity.guideId}`,
         true,
       );
-      status.rememberGuide(identity);
       void readerCache
         .load(identity)
         .then((snapshot) => {
@@ -349,6 +350,7 @@ export default definePlugin(() => {
             }
             return;
           }
+          status.rememberGuide(identity);
           if (performanceTrace) {
             readerPerformance.markCacheReady(
               identity,
@@ -442,11 +444,10 @@ export default definePlugin(() => {
       readerCache.acceptOfflineGuide(guide);
       let positionError: string | null = null;
       // Imported publication already persists the game association before unload can stop the backend.
-      if (mounted && imported) status.rememberGuide(identity);
+      if (mounted) status.rememberGuide(identity);
       if (mounted && !imported) {
         try {
           await readerCache.rememberAccess(identity, handoff);
-          if (mounted) status.rememberGuide(identity);
         } catch (error: unknown) {
           positionError = errorMessage(error);
         }
@@ -636,9 +637,7 @@ export default definePlugin(() => {
           const appId = String(unAppID);
           if (bRunning) {
             status.setGuideLibraryAppId(appId);
-            recentGuidesReady = controllerReady.then(() =>
-              mergeReaderRecentGuides(appId),
-            );
+            recentGuidesReady = mergeReaderRecentGuides(appId);
             void recentGuidesReady.then(() => preloadReaderFor(appId));
             return;
           }

@@ -14,9 +14,9 @@ function copyIdentity(identity: GuideIdentity): GuideIdentity {
 }
 
 /**
- * Keeps the latest guide independently for every app. Persisted bookmarks seed
- * the index, while guides observed during this plugin lifetime always take
- * precedence for their app and for the global fallback.
+ * Keeps the latest local guide independently for every app. Cached reader
+ * history seeds the index; successful local reads/downloads take precedence.
+ * Native Steam browsing must never write to this index.
  */
 export class RecentGuideIndex {
   private readonly persistedByApp = new Map<string, PersistedRecentGuide>();
@@ -67,21 +67,6 @@ export class RecentGuideIndex {
           null);
     return identity ? { ...identity } : null;
   }
-}
-
-export function chooseObservedGuide(
-  activeGuide: GuideIdentity | null,
-  lastGuide: GuideIdentity | null,
-  runningAppId?: string,
-): GuideIdentity | null {
-  const candidates = [activeGuide, lastGuide];
-  return (
-    candidates.find(
-      (identity): identity is GuideIdentity =>
-        identity !== null &&
-        (runningAppId === undefined || identity.appId === runningAppId),
-    ) ?? null
-  );
 }
 
 export async function resolveGuideForReaderOpen(

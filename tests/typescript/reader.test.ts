@@ -8,7 +8,6 @@ import {
   restoreReaderPosition,
 } from "../../src/reader/anchor";
 import {
-  chooseObservedGuide,
   guideChoicesForReader,
   RecentGuideIndex,
   resolveGuideForReaderOpen,
@@ -273,15 +272,23 @@ describe("GRIP Reader helpers", () => {
     expect(index.find()).toEqual({ appId: "1113000", guideId: "11" });
   });
 
-  it("never selects another game's observed guide while a game is running", () => {
-    const otherGame = { appId: "222", guideId: "20" };
-    const runningGame = { appId: "1113000", guideId: "11" };
-
-    expect(chooseObservedGuide(otherGame, runningGame, "1113000")).toEqual(
-      runningGame,
-    );
-    expect(chooseObservedGuide(otherGame, null, "1113000")).toBeNull();
-    expect(chooseObservedGuide(otherGame, null)).toEqual(otherGame);
+  it("clears both persisted and session-local recent guides after cache cleanup", () => {
+    const status = new RuntimeStatusStore();
+    status.seedRecentGuides([
+      { identity: { appId: "1113000", guideId: "11" }, updatedAt: 1 },
+    ]);
+    status.rememberGuide({ appId: "222", guideId: "20" });
+    status.clearRecentGuides();
+    expect(status.getRecentGuide()).toBeNull();
+    expect(status.getRecentGuide("1113000")).toBeNull();
+    expect(status.getRecentGuide("222")).toBeNull();
+    status.mergeRecentGuides([
+      { identity: { appId: "1113000", guideId: "12" }, updatedAt: 2 },
+    ]);
+    expect(status.getRecentGuide()).toEqual({
+      appId: "1113000",
+      guideId: "12",
+    });
   });
 
   it("opens a known guide without waiting for pending recent-guide history", async () => {
@@ -343,9 +350,7 @@ describe("GRIP Reader helpers", () => {
     expect(recentGuides.find("1113000")).toEqual(runtimeGuideA);
     expect(recentGuides.find("222")).toEqual(runtimeGuideB);
     expect(recentGuides.find()).toEqual(runtimeGuideB);
-    expect(
-      chooseObservedGuide(null, recentGuides.find("1113000"), "1113000"),
-    ).toEqual(runtimeGuideA);
+    expect(recentGuides.find("999")).toBeNull();
   });
 
   it("tracks A to B library switches and ignores duplicate app events", () => {

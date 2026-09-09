@@ -13,7 +13,6 @@ import type { GuideSelection, SteamGuideRuntime } from "./steam/runtime";
 import type { GuideScroller } from "./steam/guide-scroll";
 import { captureNativeReaderHandoff } from "./steam/reader-handoff";
 import type { CapturedReaderPosition } from "./reader/anchor";
-import type { RecentGuideSeed } from "./reader/recent-guide";
 import { RuntimeStatusStore } from "./runtime-status";
 
 export const SAVE_DEBOUNCE_MS = 600;
@@ -201,14 +200,9 @@ export class GripController {
     }
     try {
       const loaded = readPositionSnapshots(await this.backend.getPositions());
-      const recentGuides: RecentGuideSeed[] = [];
       this.persistedKeys.clear();
-      for (const [guideKey, position] of loaded) {
+      for (const guideKey of loaded.keys()) {
         this.persistedKeys.add(guideKey);
-        recentGuides.push({
-          identity: splitGuideKey(guideKey),
-          updatedAt: position.updatedAt,
-        });
       }
       if (preserveNewerInMemory) {
         // A retry can happen after the runtime has already captured new scroll
@@ -222,7 +216,6 @@ export class GripController {
         }
       }
       this.positions = loaded;
-      this.status.seedRecentGuides(recentGuides);
       this.status.update({
         positionWarning: null,
         savedCount: this.persistedKeys.size,
@@ -658,9 +651,6 @@ export class GripController {
     this.clearGuideActivity();
     if (previous) {
       this.flushKey(makeGuideKey(previous));
-    }
-    if (identity) {
-      this.status.rememberGuide(identity);
     }
     this.status.update({
       activeGuide: identity,

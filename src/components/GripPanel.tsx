@@ -316,7 +316,7 @@ export function GripPanel({
         <PanelSectionRow>
           <ButtonItem
             disabled={readerBusy || cacheBusy}
-            description="优先继续当前游戏正在查看的指南"
+            description="继续当前游戏上次阅读的本地指南，不受 Steam 网页浏览影响"
             layout="below"
             onClick={() => runOpen("reader")}
           >

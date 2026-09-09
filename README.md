@@ -40,9 +40,9 @@ restore it when the guide is opened again.
 - Steam guide and app ids stay decimal strings so large Steam ids never lose
   precision. Imported articles use `heybox-<12 lowercase hex digits>` without
   migrating existing Steam cache files or bookmarks.
-- The reader's **Y** switcher lists up to 20 recent guides for that game, with
-  cached titles and last-read chapters. Reader history remains available when a
-  guide body cache is removed; the plugin panel stays compact.
+- The reader's **Y** switcher lists up to 20 downloaded guides for that game,
+  with cached titles and last-read chapters. Uninstalled guides disappear from
+  the list while their bookmarks are retained; the plugin panel stays compact.
 - The plugin does not need root privileges.
 
 The code's module boundaries, ownership rules and earlier Steam UI findings are recorded in
@@ -266,6 +266,8 @@ See [implementation and acceptance notes](docs/heybox-import.md).
    while each file's identity, size, and timestamps remain unchanged.
 2. Select **GRIP**, then choose **继续当前或最近指南**. The plugin panel does
    not list downloaded guides; switch guides inside the reader with **Y**.
+   This resumes the last local guide for the current game. Browsing a Steam
+   guide does not change this choice, including after restarting the plugin.
    Open **高级选项** for local cache maintenance and diagnostics.
 3. Scroll normally in the full-screen reader. Press **Y** to open the current
    game's guide list with focus directly on another guide. Cards keep their

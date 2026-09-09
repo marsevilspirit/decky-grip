@@ -259,35 +259,70 @@ describe("GRIP controller", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it("retains each app's runtime guide while switching games", async () => {
-    const secondAppId = "222";
-    const secondGuideId = "2002";
-    const harness = makeHarness({});
-    await harness.controller.start();
+  it.each(["seed", "remember"] as const)(
+    "preserves local %s recents when native guides and positions change",
+    async (source) => {
+      const localGuide = { appId: APP_ID, guideId: GUIDE_ID };
+      const nativeGuide = { appId: APP_ID, guideId: "3414883999" };
+      const otherNativeGuide = { appId: "222", guideId: "2002" };
+      const harness = makeHarness({
+        [`${APP_ID}:${nativeGuide.guideId}`]: {
+          scrollTop: 1_200,
+          updatedAt: 900_000,
+        },
+        "222:2002": { scrollTop: 500, updatedAt: 900_001 },
+      });
+      if (source === "seed")
+        harness.status.seedRecentGuides([
+          { identity: localGuide, updatedAt: 1 },
+        ]);
+      else harness.status.rememberGuide(localGuide);
+      await harness.controller.start();
+      expect(harness.status.getRecentGuide(APP_ID)).toEqual(localGuide);
+      expect(harness.status.getRecentGuide()).toEqual(localGuide);
+      expect(harness.status.getRecentGuide("222")).toBeNull();
+      expect(harness.status.getSnapshot().savedCount).toBe(2);
 
-    harness.runtime.selectGuide(GUIDE_ID);
-    await vi.advanceTimersByTimeAsync(0);
-    harness.runtime.switchApp(secondAppId);
-    harness.runtime.selectGuide(secondGuideId);
-    await vi.advanceTimersByTimeAsync(0);
+      harness.runtime.selectGuide(nativeGuide.guideId);
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(harness.status.getSnapshot()).toMatchObject({
+        activeGuide: nativeGuide,
+        lastGuide: nativeGuide,
+        lastRestored: { ...nativeGuide, scrollTop: 1_200 },
+      });
+      expect(harness.runtime.scrollTop).toBe(1_200);
+      expect(harness.status.getRecentGuide(APP_ID)).toEqual(localGuide);
+      expect(harness.status.getRecentGuide()).toEqual(localGuide);
 
-    expect(harness.status.getRecentGuide(APP_ID)).toEqual({
-      appId: APP_ID,
-      guideId: GUIDE_ID,
-    });
-    expect(harness.status.getRecentGuide(secondAppId)).toEqual({
-      appId: secondAppId,
-      guideId: secondGuideId,
-    });
+      harness.runtime.switchApp(otherNativeGuide.appId);
+      harness.runtime.selectGuide(otherNativeGuide.guideId);
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(harness.status.getSnapshot()).toMatchObject({
+        activeGuide: otherNativeGuide,
+        lastGuide: otherNativeGuide,
+        lastRestored: { ...otherNativeGuide, scrollTop: 500 },
+      });
+      expect(harness.status.getRecentGuide("222")).toBeNull();
+      await expect(harness.controller.retryPositions()).resolves.toBe(true);
+      expect(harness.status.getRecentGuide(APP_ID)).toEqual(localGuide);
+      expect(harness.status.getRecentGuide()).toEqual(localGuide);
+      expect(harness.status.getSnapshot().savedCount).toBe(2);
 
-    harness.runtime.switchApp(APP_ID);
-    expect(harness.status.getSnapshot().activeGuide).toBeNull();
-    expect(harness.status.getRecentGuide(APP_ID)).toEqual({
-      appId: APP_ID,
-      guideId: GUIDE_ID,
-    });
-    harness.controller.stop();
-  });
+      vi.mocked(harness.backend.getPositions).mockResolvedValueOnce({});
+      await expect(
+        harness.controller.reloadPositionsAfterRepair(),
+      ).resolves.toBe(true);
+      expect(harness.status.getRecentGuide(APP_ID)).toEqual(localGuide);
+      expect(harness.status.getRecentGuide()).toEqual(localGuide);
+      expect(harness.status.getSnapshot().savedCount).toBe(0);
+      harness.runtime.switchApp(APP_ID);
+      expect(harness.status.getSnapshot()).toMatchObject({
+        activeGuide: null,
+        lastGuide: otherNativeGuide,
+      });
+      harness.controller.stop();
+    },
+  );
 
   it("keeps watching when positions fail and can retry them later", async () => {
     const failure = new Error("positions.json is malformed");
@@ -313,10 +348,7 @@ describe("GRIP controller", () => {
       positionWarning: null,
       savedCount: 1,
     });
-    expect(harness.status.getRecentGuide(APP_ID)).toEqual({
-      appId: APP_ID,
-      guideId: GUIDE_ID,
-    });
+    expect(harness.status.getRecentGuide(APP_ID)).toBeNull();
     harness.controller.stop();
   });
 
