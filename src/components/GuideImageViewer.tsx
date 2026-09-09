@@ -1,4 +1,11 @@
-import { Button, Focusable, GamepadButton, type GamepadEvent } from "@decky/ui";
+import {
+  DialogBodyText,
+  DialogButton,
+  Focusable,
+  GamepadButton,
+  gamepadDialogClasses,
+  type GamepadEvent,
+} from "@decky/ui";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 
 export interface ReaderPreviewImage {
@@ -186,7 +193,7 @@ export function GuideImageViewer({
   return (
     <Focusable
       ref={root}
-      className="grip-image-viewer"
+      className={`DialogContent _DialogLayout ${gamepadDialogClasses.GamepadDialogContent} grip-image-viewer`}
       role="dialog"
       aria-modal="true"
       aria-label="图片全屏查看"
@@ -266,31 +273,9 @@ export function GuideImageViewer({
         zIndex: 20,
         display: "flex",
         flexDirection: "column",
-        background: "#080d13",
-        paddingBottom: 56,
+        padding: "0 0 56px",
       }}
     >
-      <style>{`
-        .grip-image-control { min-width: 0 !important; padding: 8px 12px !important; }
-        .grip-image-control:is(:focus, :focus-visible, .gpfocus) {
-          outline: 2px solid #72d5ff !important; outline-offset: 2px;
-          background: #214561 !important; color: #fff !important;
-        }
-        .grip-image-control:active { background: #367391 !important; }
-        .grip-image-control:disabled { opacity: .4; cursor: not-allowed; }
-        .grip-image-viewport { cursor: grab; }
-        .grip-image-viewport[data-dragging="true"] { cursor: grabbing; }
-        .grip-image-viewport:is(:focus-visible, .gpfocus) {
-          outline: 2px solid #72d5ff; outline-offset: -2px;
-        }
-        @media (prefers-reduced-motion: no-preference) {
-          .grip-image-control { transition: background-color 90ms ease, outline-color 90ms ease; }
-          .grip-image-viewer, .grip-image-viewport img { animation: grip-image-enter 100ms ease-out; }
-          .grip-image-feedback { animation: grip-image-feedback 150ms ease-out; }
-        }
-        @keyframes grip-image-enter { from { opacity: .7; } to { opacity: 1; } }
-        @keyframes grip-image-feedback { from { color: #72d5ff; } }
-      `}</style>
       <Focusable
         ref={viewport}
         className="grip-image-viewport"
@@ -342,6 +327,7 @@ export function GuideImageViewer({
           minHeight: 0,
           overflow: "auto",
           touchAction: "none",
+          cursor: dragging ? "grabbing" : "grab",
         }}
       >
         <div
@@ -371,7 +357,11 @@ export function GuideImageViewer({
           />
         </div>
       </Focusable>
-      {failed && <div role="alert">图片暂不可用，请返回正文重试。</div>}
+      {failed && (
+        <div role="alert">
+          <DialogBodyText>图片暂不可用，请返回正文重试。</DialogBodyText>
+        </div>
+      )}
       <Focusable
         className="grip-image-toolbar"
         flow-children="row"
@@ -391,70 +381,75 @@ export function GuideImageViewer({
       >
         {choices.length > 1 && (
           <>
-            <Button
+            <DialogButton
               className="grip-image-control"
+              style={{ minWidth: 0, width: "auto" }}
               onClick={() => switchImage(-1)}
               disabled={index <= 0}
             >
               上一张
-            </Button>
+            </DialogButton>
             <span aria-live="polite" aria-atomic="true">
-              <span key={current.src} className="grip-image-feedback">
-                {index + 1} / {choices.length}
-              </span>
+              {index + 1} / {choices.length}
             </span>
-            <Button
+            <DialogButton
               className="grip-image-control"
+              style={{ minWidth: 0, width: "auto" }}
               onClick={() => switchImage(1)}
               disabled={index >= choices.length - 1}
             >
               下一张
-            </Button>
+            </DialogButton>
           </>
         )}
-        <Button
+        <DialogButton
           className="grip-image-control"
+          style={{ minWidth: 0, width: "auto" }}
           data-grip-zoom="out"
           onClick={() => zoom(1 / 1.5)}
           disabled={scale <= 0.01}
         >
           缩小
-        </Button>
+        </DialogButton>
         <span aria-live="polite" aria-atomic="true">
-          <span key={scale} className="grip-image-feedback">
-            {Math.round(scale * 100)}%
-          </span>
+          {Math.round(scale * 100)}%
         </span>
-        <Button
+        <DialogButton
           className="grip-image-control"
+          style={{ minWidth: 0, width: "auto" }}
           data-grip-zoom="in"
           onClick={() => zoom(1.5)}
           disabled={scale >= 8}
         >
           放大
-        </Button>
-        <Button
+        </DialogButton>
+        <DialogButton
           ref={fitButton}
           className="grip-image-control"
+          style={{ minWidth: 0, width: "auto" }}
           onClick={() => fit()}
         >
           适应屏幕
-        </Button>
-        <Button className="grip-image-control" onClick={onClose}>
+        </DialogButton>
+        <DialogButton
+          className="grip-image-control"
+          style={{ minWidth: 0, width: "auto" }}
+          onClick={onClose}
+        >
           返回正文
-        </Button>
+        </DialogButton>
       </Focusable>
       <div
         title="键盘：方向键移动，+ / - 缩放，0 适屏，PageUp / PageDown 切图，Esc 返回"
         style={{
           textAlign: "center",
-          opacity: 0.7,
-          fontSize: 14,
           paddingBottom: 8,
         }}
       >
-        方向键移动 · L1 / R1 缩放{choices.length > 1 ? " · L2 / R2 切图" : ""} ·
-        X 适屏 · B 返回
+        <DialogBodyText>
+          方向键移动 · L1 / R1 缩放{choices.length > 1 ? " · L2 / R2 切图" : ""}{" "}
+          · X 适屏 · B 返回
+        </DialogBodyText>
       </div>
     </Focusable>
   );

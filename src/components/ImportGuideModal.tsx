@@ -1,7 +1,13 @@
 import {
   DialogButton as Button,
+  DialogBody,
+  DialogBodyText,
+  DialogControlsSection,
+  DialogFooter,
+  DialogHeader,
   DropdownItem,
   ModalRoot,
+  ProgressBar,
   TextField,
 } from "@decky/ui";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
@@ -98,95 +104,101 @@ export function ImportGuideModal({
   };
   return (
     <ModalRoot closeModal={closeModal} onCancel={closeModal}>
-      <div
-        style={{
-          padding: 24,
-          maxWidth: 680,
-          maxHeight: "70vh",
-          overflowY: "auto",
-        }}
-      >
-        <h2>导入小黑盒攻略</h2>
-        <p>
+      <DialogHeader>导入小黑盒攻略</DialogHeader>
+      <DialogBody>
+        <DialogBodyText>
           粘贴公开文章的分享链接或分享文字，确认所属游戏后保存。无需登录小黑盒。
-        </p>
-        <TextField
-          label="分享链接"
-          value={text}
-          disabled={locked}
-          onChange={(event) => changeLink(event.target.value)}
-        />
-        <PhoneImport disabled={locked} onLink={changeLink} />
-        {games.length ? (
-          <DropdownItem
-            label="保存到游戏"
-            selectedOption={appId}
-            rgOptions={games}
+        </DialogBodyText>
+        <DialogControlsSection>
+          <TextField
+            label="分享链接"
+            value={text}
             disabled={locked}
-            onChange={(option) => {
-              setAppId(String(option.data));
-              resetFeedback();
-            }}
+            onChange={(event) => changeLink(event.target.value)}
           />
-        ) : (
-          <p role="alert">请先在 Steam 中打开目标游戏的库页面，再来导入。</p>
-        )}
-        <p style={{ opacity: 0.75 }}>
+          <PhoneImport disabled={locked} onLink={changeLink} />
+          {games.length ? (
+            <DropdownItem
+              label="保存到游戏"
+              selectedOption={appId}
+              rgOptions={games}
+              disabled={locked}
+              onChange={(option) => {
+                setAppId(String(option.data));
+                resetFeedback();
+              }}
+            />
+          ) : (
+            <DialogBodyText>
+              <div role="alert">
+                请先在 Steam 中打开目标游戏的库页面，再来导入。
+              </div>
+            </DialogBodyText>
+          )}
+        </DialogControlsSection>
+        <DialogBodyText>
           导入时临时加载网页，正文和全部图片保存后才算完成。关闭此窗口不取消下载。
-        </p>
-        <div role="status" aria-live="polite">
-          {busy && (
-            <BusyLabel>
-              {task.phase === "canceling"
-                ? "正在取消…"
-                : !progress
-                  ? "正在渲染文章、收集完整图片…"
-                  : progress.publishing
-                    ? "正在保存完整离线版本…"
-                    : progress.total === 0
-                      ? "正文已就绪，无需下载图片…"
-                      : `正在下载图片 ${progress.completed}/${progress.total}`}
-            </BusyLabel>
-          )}
-          {task?.phase === "complete" &&
-            "正文和图片已完整保存。在游戏内按 Y 即可切换到这篇攻略。"}
-          {task?.phase === "canceled" && "已取消，原有离线版本保留。"}
-        </div>
+        </DialogBodyText>
+        <DialogBodyText>
+          <div role="status" aria-live="polite">
+            {busy && (
+              <BusyLabel>
+                {task.phase === "canceling"
+                  ? "正在取消…"
+                  : !progress
+                    ? "正在渲染文章、收集完整图片…"
+                    : progress.publishing
+                      ? "正在保存完整离线版本…"
+                      : progress.total === 0
+                        ? "正文已就绪，无需下载图片…"
+                        : `正在下载图片 ${progress.completed}/${progress.total}`}
+              </BusyLabel>
+            )}
+            {task?.phase === "complete" &&
+              "正文和图片已完整保存。在游戏内按 Y 即可切换到这篇攻略。"}
+            {task?.phase === "canceled" && "已取消，原有离线版本保留。"}
+          </div>
+        </DialogBodyText>
         {task?.phase === "downloading" && progress && progress.total > 0 && (
-          <progress
+          <div
+            role="progressbar"
             aria-label="图片下载进度"
-            value={progress.completed}
-            max={progress.total}
-            style={{ width: "100%", marginTop: 12, accentColor: "#66c0f4" }}
-          />
+            aria-valuemin={0}
+            aria-valuenow={progress.completed}
+            aria-valuemax={progress.total}
+          >
+            <ProgressBar indeterminate focusable={false} />
+          </div>
         )}
-        {(error || task?.error) && <p role="alert">{error || task?.error}</p>}
-        <div
-          style={{ display: "flex", flexWrap: "wrap", gap: 12, marginTop: 20 }}
-        >
-          <Button disabled={locked || !appId || !text.trim()} onClick={start}>
-            {task?.phase === "failed" ? "重试导入" : "保存完整图文"}
+        {(error || task?.error) && (
+          <DialogBodyText>
+            <div role="alert">{error || task?.error}</div>
+          </DialogBodyText>
+        )}
+      </DialogBody>
+      <DialogFooter>
+        <Button disabled={locked || !appId || !text.trim()} onClick={start}>
+          {task?.phase === "failed" ? "重试导入" : "保存完整图文"}
+        </Button>
+        {busy && (
+          <Button
+            disabled={task.phase === "canceling" || task.progress?.publishing}
+            onClick={() => identity && downloads.cancel(identity.guideId)}
+          >
+            取消导入
           </Button>
-          {busy && (
-            <Button
-              disabled={task.phase === "canceling" || task.progress?.publishing}
-              onClick={() => identity && downloads.cancel(identity.guideId)}
-            >
-              取消导入
-            </Button>
-          )}
-          {task?.phase === "complete" && identity && (
-            <Button
-              disabled={opening}
-              aria-busy={opening}
-              onClick={() => void open()}
-            >
-              {opening ? <BusyLabel>正在打开…</BusyLabel> : "立即阅读"}
-            </Button>
-          )}
-          <Button onClick={closeModal}>关闭</Button>
-        </div>
-      </div>
+        )}
+        {task?.phase === "complete" && identity && (
+          <Button
+            disabled={opening}
+            aria-busy={opening}
+            onClick={() => void open()}
+          >
+            {opening ? <BusyLabel>正在打开…</BusyLabel> : "立即阅读"}
+          </Button>
+        )}
+        <Button onClick={closeModal}>关闭</Button>
+      </DialogFooter>
     </ModalRoot>
   );
 }

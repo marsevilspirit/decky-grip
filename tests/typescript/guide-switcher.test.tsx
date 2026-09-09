@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { act, createElement } from "react";
+import { act, createElement, forwardRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -58,8 +58,28 @@ vi.mock("@decky/ui", async () => {
       },
     };
   };
+  const Button = mockDeckyElement("button", keyboard);
   return {
-    Button: mockDeckyElement("button", keyboard),
+    Button,
+    DialogButton: forwardRef<HTMLElement, MockDeckyProps>((props, ref) =>
+      createElement(Button, {
+        ...props,
+        ref,
+        type: "button",
+        className: `DialogButton ${props.className ?? ""}`,
+      }),
+    ),
+    DialogHeader: (props: MockDeckyProps) =>
+      createElement("div", {
+        ...props,
+        className: "DialogHeader",
+        role: "heading",
+      }),
+    DialogBodyText: (props: MockDeckyProps) =>
+      createElement("div", { ...props, className: "DialogBodyText" }),
+    gamepadDialogClasses: {
+      GamepadDialogContent: "SteamDialogContent",
+    },
     Focusable: mockDeckyElement("div", keyboard),
     GamepadButton,
     Spinner: () => createElement("span"),
@@ -341,22 +361,49 @@ describe("GuideSwitcher", () => {
     expect(dialog().textContent).toContain("还没有已记录的指南");
   });
 
-  it("exposes focus and pressed feedback while respecting reduced motion", async () => {
-    await render();
+  it("uses native Steam controls without repainting their focus or pressed states", async () => {
+    const longEntry = entry("2");
+    longEntry.cache!.title = "很长的指南标题".repeat(30);
+    await render({ entries: [entry("1"), longEntry, entry("3")] });
     const target = choice("2");
-    expect(target.getAttribute("data-focused")).toBe("true");
+    expect(dialog().classList.contains("SteamDialogContent")).toBe(true);
+    expect(dialog().classList.contains("DialogContent")).toBe(true);
+    expect(dialog().classList.contains("_DialogLayout")).toBe(true);
+    expect(container.querySelector(".DialogHeader")?.textContent).toBe(
+      "本游戏指南",
+    );
+    expect(target.classList.contains("DialogButton")).toBe(true);
+    expect(target.type).toBe("button");
+    expect(target.textContent).toContain(longEntry.cache!.title);
+    expect(target.textContent).toContain("作者 2");
+    expect(target.querySelector('[class*="FieldDescription"]')).toBeNull();
+    expect(
+      [...target.querySelectorAll("div")].every((node) => !node.style.color),
+    ).toBe(true);
+    expect(document.activeElement).toBe(target);
     await key(target, "Enter");
-    expect(target.getAttribute("data-pressed")).toBe("true");
+    expect(props.onChoose).toHaveBeenCalledExactlyOnceWith(longEntry);
     await key(target, "Enter", "keyup");
     expect(target.hasAttribute("data-pressed")).toBe(false);
     await act(async () => choice("3").focus());
     expect(target.hasAttribute("data-focused")).toBe(false);
     const css = container.querySelector("style")!.textContent!;
-    expect(css).toContain("prefers-reduced-motion: no-preference");
-    expect(css).toContain("prefers-reduced-motion: reduce");
-    expect(css).toContain(
-      "animation: none; transition: none; transform: none;",
+    expect(css).toContain("white-space: normal");
+    expect(css).toContain("overflow-wrap: anywhere");
+    expect(css).not.toMatch(
+      /background|color|border|shadow|animation|transition|transform|:focus|:active/,
     );
+    expect(dialog().style.background).toBe("");
+    await manage("2");
+    const confirmation = container.querySelector('[role="alertdialog"]')!;
+    expect(confirmation.querySelector(".DialogHeader")?.textContent).toBe(
+      longEntry.cache!.title,
+    );
+    expect(
+      confirmation.querySelector(".DialogBodyText")?.textContent,
+    ).toContain("来源：Steam");
+    expect(button("取消").classList.contains("DialogButton")).toBe(true);
+    expect(button("确认卸载").classList.contains("DialogButton")).toBe(true);
   });
 
   it("keeps focused cards visible and supports bounded arrow/Home/End navigation", async () => {

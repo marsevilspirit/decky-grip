@@ -1,4 +1,4 @@
-import { DialogButton as Button } from "@decky/ui";
+import { DialogBodyText, DialogButton as Button } from "@decky/ui";
 import { useEffect, useRef, useState } from "react";
 import qrcode from "qrcode-generator";
 
@@ -125,7 +125,7 @@ export function PhoneImport({
     }
   };
   return (
-    <div style={{ marginBlock: 12 }}>
+    <>
       <Button
         disabled={disabled || busy !== null}
         aria-busy={busy !== null}
@@ -170,9 +170,13 @@ export function PhoneImport({
             style={{ width: 200, height: 200, imageRendering: "pixelated" }}
           />
           <div>
-            <p role="status">等待手机发送链接…</p>
-            <p>手机和 Deck 需在同一可信 Wi-Fi，Deck 保持唤醒。</p>
-            <p>
+            <DialogBodyText>
+              <div role="status">等待手机发送链接…</div>
+            </DialogBodyText>
+            <DialogBodyText>
+              手机和 Deck 需在同一可信 Wi-Fi，Deck 保持唤醒。
+            </DialogBodyText>
+            <DialogBodyText>
               接收窗口将在{" "}
               {new Date(session.expiresAt).toLocaleTimeString([], {
                 hour: "2-digit",
@@ -180,11 +184,15 @@ export function PhoneImport({
               })}{" "}
               失效，使用局域网 HTTP。扫码只传链接；网页渲染和完整下载由 Deck
               完成。
-            </p>
+            </DialogBodyText>
           </div>
         </div>
       )}
-      {message && <p role="status">{message}</p>}
-    </div>
+      {message && (
+        <DialogBodyText>
+          <div role="status">{message}</div>
+        </DialogBodyText>
+      )}
+    </>
   );
 }

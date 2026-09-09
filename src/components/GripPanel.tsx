@@ -6,6 +6,7 @@ import {
   PanelSection,
   PanelSectionRow,
   ToggleField,
+  gamepadDialogClasses,
   showModal,
 } from "@decky/ui";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
@@ -332,8 +333,10 @@ export function GripPanel({
         </PanelSectionRow>
         {status.positionWarning && (
           <PanelSectionRow>
-            <div style={{ color: "#f0b35a" }}>
-              <div>{status.positionWarning}</div>
+            <div>
+              <div className={gamepadDialogClasses.FieldDescription}>
+                {status.positionWarning}
+              </div>
               <ButtonItem
                 disabled={positionBusy !== null}
                 label={
@@ -367,26 +370,34 @@ export function GripPanel({
         )}
         {repairMessage && (
           <PanelSectionRow>
-            <div role="status" style={{ color: "#f0b35a", opacity: 0.88 }}>
+            <div
+              role="status"
+              className={gamepadDialogClasses.FieldDescription}
+            >
               {repairMessage}
             </div>
           </PanelSectionRow>
         )}
         {cacheMessage && (
           <PanelSectionRow>
-            <div role="status" style={{ opacity: 0.82 }}>
+            <div
+              role="status"
+              className={gamepadDialogClasses.FieldDescription}
+            >
               {cacheMessage}
             </div>
           </PanelSectionRow>
         )}
         {status.phase === "error" && (
           <PanelSectionRow>
-            <div style={{ color: "#ff6b6b" }}>{status.message}</div>
+            <div role="alert" className={gamepadDialogClasses.FieldDescription}>
+              {status.message}
+            </div>
           </PanelSectionRow>
         )}
         {readerError && (
           <PanelSectionRow>
-            <div role="alert" style={{ color: "#ff6b6b" }}>
+            <div role="alert" className={gamepadDialogClasses.FieldDescription}>
               {readerError}
             </div>
           </PanelSectionRow>
@@ -404,10 +415,12 @@ export function GripPanel({
         <>
           <PanelSection title="游戏内快捷键">
             <PanelSectionRow>
-              <div>L4（左侧上背键）：按一次打开，再按一次关闭</div>
+              <div className={gamepadDialogClasses.FieldDescription}>
+                L4（左侧上背键）：按一次打开，再按一次关闭
+              </div>
             </PanelSectionRow>
             <PanelSectionRow>
-              <div style={{ opacity: 0.75 }}>
+              <div className={gamepadDialogClasses.FieldDescription}>
                 {hotkeyStatus?.available
                   ? "硬件监听已就绪"
                   : "尚未检测到 Steam Deck 背键"}
@@ -416,7 +429,7 @@ export function GripPanel({
               </div>
             </PanelSectionRow>
             <PanelSectionRow>
-              <div style={{ opacity: 0.82 }}>
+              <div className={gamepadDialogClasses.FieldDescription}>
                 {performanceSnapshot.gate === "collecting"
                   ? `L4 检测后首屏门禁采集中：${performanceSnapshot.warmAttempts}/${performanceSnapshot.minimumSamples} 次暖缓存尝试（成功样本 ${performanceSnapshot.warmSamples} 次），打开失败 ${performanceSnapshot.warmOpenFailureCount} 次`
                   : `L4 检测后首屏门禁${performanceSnapshot.gate === "pass" ? "通过" : "失败"}：P95 ${Math.round(performanceSnapshot.warmP95Ms ?? 0)} ms，spinner ${performanceSnapshot.warmSpinnerCount} 次，位置失败 ${performanceSnapshot.warmPositionFailureCount} 次，打开失败 ${performanceSnapshot.warmOpenFailureCount} 次`}
@@ -426,7 +439,7 @@ export function GripPanel({
             </PanelSectionRow>
             {performanceSnapshot.latest && (
               <PanelSectionRow>
-                <div style={{ opacity: 0.72 }}>
+                <div className={gamepadDialogClasses.FieldDescription}>
                   最近一次：首屏{" "}
                   {Math.round(performanceSnapshot.latest.firstScreenMs)}
                   ms · 路由{" "}
@@ -443,7 +456,7 @@ export function GripPanel({
             )}
             {performanceSnapshot.latestFailure && (
               <PanelSectionRow>
-                <div style={{ color: "#f0b35a", opacity: 0.82 }}>
+                <div className={gamepadDialogClasses.FieldDescription}>
                   最近失败：{performanceSnapshot.latestFailure.reason}（
                   {Math.round(performanceSnapshot.latestFailure.failedAtMs)}{" "}
                   ms）
@@ -481,7 +494,7 @@ export function GripPanel({
               />
             </PanelSectionRow>
             <PanelSectionRow>
-              <div style={{ opacity: 0.78 }}>
+              <div className={gamepadDialogClasses.FieldDescription}>
                 {cacheStats
                   ? `指南 ${cacheStats.guides.files} 个 / ${formatBytes(cacheStats.guides.bytes)}（自动缓存额度 ${formatBytes(cacheStats.guides.diskLimitBytes)}，已下载正文不自动删除）；图片 ${cacheStats.images.files} 个 / ${formatBytes(cacheStats.images.diskBytes)}（其中离线 ${formatBytes(cacheStats.images.offlineBytes)}，上限 ${formatBytes(cacheStats.images.diskLimitBytes)}）`
                   : cacheStatsError
@@ -553,15 +566,19 @@ export function GripPanel({
           <PanelSection title="详细状态">
             {status.phase !== "error" && (
               <PanelSectionRow>
-                <div>{status.message}</div>
+                <div className={gamepadDialogClasses.FieldDescription}>
+                  {status.message}
+                </div>
               </PanelSectionRow>
             )}
             <PanelSectionRow>
-              <div>已保存 {status.savedCount} 个原生 Steam 指南位置</div>
+              <div className={gamepadDialogClasses.FieldDescription}>
+                已保存 {status.savedCount} 个原生 Steam 指南位置
+              </div>
             </PanelSectionRow>
             {status.activeGuide && (
               <PanelSectionRow>
-                <div style={{ opacity: 0.82 }}>
+                <div className={gamepadDialogClasses.FieldDescription}>
                   当前指南：游戏 {status.activeGuide.appId}，指南{" "}
                   {status.activeGuide.guideId}
                 </div>
@@ -569,7 +586,9 @@ export function GripPanel({
             )}
             {lastAction && (
               <PanelSectionRow>
-                <div style={{ opacity: 0.72 }}>{lastAction}</div>
+                <div className={gamepadDialogClasses.FieldDescription}>
+                  {lastAction}
+                </div>
               </PanelSectionRow>
             )}
           </PanelSection>

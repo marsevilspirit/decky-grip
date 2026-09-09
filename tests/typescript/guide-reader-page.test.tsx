@@ -100,7 +100,13 @@ vi.mock("@decky/ui", async () => {
   };
 
   return {
-    Button: mockDeckyElement("button", keyboard),
+    DialogButton: mockDeckyElement("button", keyboard),
+    DialogHeader: mockDeckyElement("div"),
+    DialogBodyText: mockDeckyElement("div"),
+    gamepadDialogClasses: {
+      GamepadDialogContent: "steam-dialog-content",
+      FieldDescription: "steam-field-description",
+    },
     Focusable: mockDeckyElement("div", keyboard),
     GamepadButton,
     Spinner: () => createElement("span"),
@@ -1292,13 +1298,13 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(first.style.overflowWrap).toBe("anywhere");
     expect(toc.style.position).toBe("absolute");
     expect(toc.style.width).toBe("340px");
-    expect(scroller.style.marginRight).toBe("88px");
+    expect(scroller.style.marginRight).toBe("172px");
     expect(toc.getAttribute("aria-modal")).toBe("true");
     expect(scroller.scrollTop).toBe(650);
     expect(scroller.querySelector("[data-guide-search-body]")).toBe(body);
     await act(async () => pressKey(first, "Escape"));
     await flushFrame();
-    expect(toc.style.width).toBe("88px");
+    expect(toc.style.width).toBe("172px");
     expect(document.activeElement).toBe(scroller);
     expect(scroller.scrollTop).toBe(650);
   });
@@ -2184,7 +2190,9 @@ describe("GuideReaderPage position lifecycle", () => {
     const currentGuide = dialog?.querySelector('[aria-current="page"]');
     expect(currentGuide?.tagName).toBe("BUTTON");
     expect(currentGuide?.textContent).toContain("正在阅读 · 组件回归指南");
-    expect(container?.querySelector(".grip-reader-guide-enter")).not.toBeNull();
+    expect(container?.querySelector(".grip-reader-guide-enter")).toBeNull();
+    expect(page?.classList.contains("steam-dialog-content")).toBe(true);
+    expect(dialog?.classList.contains("steam-dialog-content")).toBe(true);
     await act(async () => (currentGuide as HTMLButtonElement).click());
     await flushFrame();
     expect(container?.querySelector('[aria-label="切换指南"]')).toBeNull();

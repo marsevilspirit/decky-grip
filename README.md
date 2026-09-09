@@ -95,6 +95,12 @@ traces in `test-results/browser/`. The browser dependency is development-only.
 
 ### Code boundaries
 
+Plugin controls use Steam's `@decky/ui` dialog, panel, text, progress, and focus
+components. Do not add a GRIP color palette, button skin, focus ring, or custom
+animation. Reader CSS is only for document layout (including safe image/table
+sizes and BBCode structure); the browser adapter does not reproduce Steam's
+stylesheet, so local browser tests are not native-style visual acceptance.
+
 `GuideReaderPage` owns the UI and saves checkpoints. `reader/viewport.ts` owns
 document observers, image residency, retry hosts, and frame-coalesced measurement;
 `reader/positioning.ts` shares one cancellable lifecycle for restoration and

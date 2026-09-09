@@ -15,9 +15,11 @@ vi.mock("@decky/ui", async () => {
   const { GamepadButton } = await import("./helpers/decky-gamepad");
   const { mockDeckyElement } = await import("./helpers/decky-ui");
   return {
-    Button: mockDeckyElement("button"),
+    DialogButton: mockDeckyElement("button"),
+    DialogBodyText: mockDeckyElement("div"),
     Focusable: mockDeckyElement("div"),
     GamepadButton,
+    gamepadDialogClasses: { GamepadDialogContent: "native-dialog-content" },
   };
 });
 
@@ -318,6 +320,7 @@ describe("full-screen image viewer interaction", () => {
     expect(capture).toHaveBeenCalledWith(1);
     expect(document.activeElement).toBe(viewport());
     expect(viewport().dataset.dragging).toBe("true");
+    expect(viewport().style.cursor).toBe("grabbing");
     pointer("pointermove", 2, 200, 0);
     expect(viewport().scrollTop).toBe(0);
     pointer("pointerup", 2, 200, 0);
@@ -329,6 +332,7 @@ describe("full-screen image viewer interaction", () => {
     expect(viewport().scrollTop).toBe(0);
     pointer("pointercancel", 1, 200, 1000);
     expect(viewport().dataset.dragging).toBe("false");
+    expect(viewport().style.cursor).toBe("grab");
     pointer("pointermove", 1, 200, 0);
     expect(viewport().scrollTop).toBe(0);
     pointer("pointerdown", 3, 200, 400);
@@ -436,17 +440,22 @@ describe("full-screen image viewer interaction", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("provides visible focus and press feedback, with animations gated by motion preference", () => {
+  it("uses native dialog styling without overriding focus, press, disabled or animation feedback", () => {
     render();
-    const css = host.querySelector("style")!.textContent!;
-    expect(css).toContain(":focus-visible");
-    expect(css).toContain(".grip-image-control:active");
-    expect(css).toContain(".grip-image-control:disabled");
-    expect(css).toContain('data-dragging="true"');
-    expect(css).toContain(".grip-image-viewport:is(:focus-visible, .gpfocus)");
-    expect(css).toContain("@media (prefers-reduced-motion: no-preference)");
-    expect(css).toMatch(/no-preference[^]*transition:[^]*animation:/);
-    expect(css).toMatch(/no-preference[^]*\.grip-image-feedback[^]*animation:/);
+    expect(dialog().classList.contains("native-dialog-content")).toBe(true);
+    expect(host.querySelector("style")).toBeNull();
+    for (const element of [
+      dialog(),
+      viewport(),
+      ...host.querySelectorAll("button"),
+    ]) {
+      expect(element.style.background).toBe("");
+      expect(element.style.color).toBe("");
+      expect(element.style.outline).toBe("");
+      expect(element.style.animation).toBe("");
+      expect(element.style.transition).toBe("");
+    }
+    expect(viewport().style.cursor).toBe("grab");
     expect(dialog().textContent).toContain("38%");
     expect(dialog().textContent).toContain("L1 / R1 缩放");
     expect(dialog().textContent).toContain("X 适屏 · B 返回");

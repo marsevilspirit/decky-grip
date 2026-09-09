@@ -42,6 +42,20 @@ vi.mock("@decky/ui", () => ({
   Button: (props: Record<string, unknown>) => createElement("button", props),
   DialogButton: (props: Record<string, unknown>) =>
     createElement("button", { type: "button", ...props }),
+  DialogHeader: (props: Record<string, unknown>) =>
+    createElement("div", { ...props, className: "DialogHeader" }),
+  DialogBody: (props: Record<string, unknown>) =>
+    createElement("div", { ...props, className: "DialogBody" }),
+  DialogBodyText: (props: Record<string, unknown>) =>
+    createElement("div", { ...props, className: "DialogBodyText" }),
+  DialogControlsSection: (props: Record<string, unknown>) =>
+    createElement("div", { ...props, className: "DialogControlsSection" }),
+  DialogFooter: (props: Record<string, unknown>) =>
+    createElement("div", { ...props, className: "DialogFooter" }),
+  ProgressBar: ({ indeterminate }: { indeterminate?: boolean }) =>
+    createElement("div", {
+      "data-steam-progress": indeterminate ? "indeterminate" : "determinate",
+    }),
   Spinner: () => createElement("span", null, "busy"),
   TextField: ({ label, ...props }: { label: string }) =>
     createElement("input", { "aria-label": label, ...props }),
@@ -124,6 +138,15 @@ it("confirms the game, shows immediate rendering feedback, and waits for the off
   );
   await share();
   await act(async () => button("保存完整图文").click());
+  expect(host.querySelector(".DialogHeader")?.textContent).toBe(
+    "导入小黑盒攻略",
+  );
+  expect(
+    host.querySelector(".DialogBody .DialogControlsSection"),
+  ).not.toBeNull();
+  expect(
+    host.querySelector(".DialogFooter")?.contains(button("取消导入")),
+  ).toBe(true);
   expect(save).toHaveBeenCalledWith(
     { appId: "1113000", guideId: "heybox-249c72219fed" },
     expect.any(Function),
@@ -261,16 +284,22 @@ it("shows image progress without implying that zero images or publication means 
   await act(async () => report({ completed: 0, total: 0 }));
   expect(host.textContent).toContain("无需下载图片");
   expect(host.textContent).not.toContain("0/0");
-  expect(host.querySelector("progress")).toBeNull();
+  expect(host.querySelector('[role="progressbar"]')).toBeNull();
   await act(async () => report({ completed: 2, total: 4 }));
-  expect(host.querySelector("progress")?.value).toBe(2);
-  expect(host.querySelector("progress")?.max).toBe(4);
+  const progress = host.querySelector('[role="progressbar"]');
+  expect(progress?.getAttribute("aria-valuenow")).toBe("2");
+  expect(progress?.getAttribute("aria-valuemax")).toBe("4");
+  expect(
+    progress?.querySelector('[data-steam-progress="indeterminate"]'),
+  ).not.toBeNull();
+  expect(host.querySelector("progress")).toBeNull();
+  expect(host.textContent).toContain("正在下载图片 2/4");
   await act(async () => report({ completed: 4, total: 4, publishing: true }));
   expect(host.textContent).toContain("正在保存完整离线版本");
   expect(button("取消导入").disabled).toBe(true);
   expect(host.textContent).not.toContain("正文和图片已完整保存");
   await act(async () => finish());
-  expect(host.querySelector("progress")).toBeNull();
+  expect(host.querySelector('[role="progressbar"]')).toBeNull();
   expect(host.textContent).toContain("正文和图片已完整保存");
 });
 
@@ -345,7 +374,7 @@ it("shows cancellation immediately and waits for cleanup before allowing another
   expect(host.textContent).toContain("正在取消");
   expect(button("保存完整图文").disabled).toBe(true);
   expect(button("取消导入").disabled).toBe(true);
-  expect(host.querySelector("progress")).toBeNull();
+  expect(host.querySelector('[role="progressbar"]')).toBeNull();
   expect(close).not.toHaveBeenCalled();
   await act(async () => cleanup());
   expect(host.textContent).toContain("已取消，原有离线版本保留");

@@ -18,6 +18,8 @@ vi.mock("@decky/ui", () => ({
   Button: (props: Record<string, unknown>) => createElement("button", props),
   DialogButton: (props: Record<string, unknown>) =>
     createElement("button", { type: "button", ...props }),
+  DialogBodyText: (props: Record<string, unknown>) =>
+    createElement("div", { ...props, className: "DialogBodyText" }),
   Spinner: () => createElement("span", null, "busy"),
 }));
 const session = {

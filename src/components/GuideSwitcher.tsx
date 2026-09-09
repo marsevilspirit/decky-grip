@@ -1,4 +1,11 @@
-import { Button, Focusable, GamepadButton, type GamepadEvent } from "@decky/ui";
+import {
+  DialogBodyText,
+  DialogButton,
+  DialogHeader,
+  Focusable,
+  gamepadDialogClasses,
+  type GamepadEvent,
+} from "@decky/ui";
 import { useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 
 import type { CacheClearResult, GuideLibraryEntry } from "../backend";
@@ -22,27 +29,8 @@ export interface GuideSwitcherProps {
 const SWITCHER_CSS = `
 .grip-guide-row { display: flex; margin-bottom: 12px; }
 .grip-reader-guide-switcher .grip-guide-choice {
-  box-sizing: border-box; flex: 1; min-width: 0; min-height: 100px;
-  padding: 14px 18px; text-align: left; white-space: normal; overflow-wrap: anywhere;
-  color: #dcdedf; background: #1d2b38; border: 2px solid transparent; border-radius: 8px;
-}
-.grip-reader-guide-switcher .grip-guide-choice[data-current="true"] { border-color: #406078; }
-.grip-reader-guide-switcher .grip-guide-choice:focus, .grip-reader-guide-switcher .grip-guide-choice[data-focused="true"] {
-  color: #fff; background: #29475f; border-color: #89d3ff;
-  box-shadow: 0 0 0 2px #89d3ff55;
-}
-.grip-reader-guide-switcher .grip-guide-choice:active, .grip-reader-guide-switcher .grip-guide-choice[data-pressed="true"] { background: #365e7a; }
-.grip-guide-choice-status { font-size: 13px; line-height: 1.5; margin-top: 7px; color: #a9d9f4; }
-.grip-guide-choice [role="alert"] { color: #ffc4b8; }
-@keyframes grip-switcher-enter { from { opacity: 0; transform: translateY(8px); } }
-@media (prefers-reduced-motion: no-preference) {
-  .grip-reader-guide-switcher { animation: grip-switcher-enter 120ms ease-out; }
-  .grip-reader-guide-switcher .grip-guide-choice { transition: background 100ms ease-out, border-color 100ms ease-out, box-shadow 100ms ease-out, transform 80ms ease-out; }
-  .grip-reader-guide-switcher .grip-guide-choice:focus, .grip-reader-guide-switcher .grip-guide-choice[data-focused="true"] { transform: translateX(3px); }
-  .grip-reader-guide-switcher .grip-guide-choice:active, .grip-reader-guide-switcher .grip-guide-choice[data-pressed="true"] { transform: scale(0.99); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .grip-reader-guide-switcher, .grip-reader-guide-switcher .grip-guide-choice { animation: none; transition: none; transform: none; }
+  flex: 1; min-width: 0; height: auto;
+  text-align: left; white-space: normal; overflow-wrap: anywhere;
 }
 `;
 
@@ -87,8 +75,6 @@ export function GuideSwitcher({
     Record<string, CacheClearResult>
   >({});
   const [chosenKey, setChosenKey] = useState<string | null>(null);
-  const [focusedKey, setFocusedKey] = useState<string | null>(null);
-  const [pressedKey, setPressedKey] = useState<string | null>(null);
   const confirming = removeMode !== null;
   const removedEntry = (entry: GuideLibraryEntry) =>
     (removed && entry.guideId === currentGuideId) ||
@@ -205,7 +191,7 @@ export function GuideSwitcher({
       role="dialog"
       aria-label="切换指南"
       aria-modal="true"
-      className="grip-reader-guide-switcher"
+      className={`grip-reader-guide-switcher DialogContent _DialogLayout ${gamepadDialogClasses.GamepadDialogContent}`}
       tabIndex={0}
       onCancel={cancel}
       onFocusCapture={(event) => revealChoice(event.target as HTMLElement)}
@@ -295,7 +281,6 @@ export function GuideSwitcher({
         event.stopPropagation();
       }}
       style={{
-        background: "linear-gradient(180deg, #16202b 0%, #0d141c 100%)",
         position: "absolute",
         top: 40,
         bottom: 0,
@@ -310,9 +295,7 @@ export function GuideSwitcher({
       }}
     >
       <style>{SWITCHER_CSS}</style>
-      <h2 style={{ fontSize: 24, margin: "0 0 16px", flexShrink: 0 }}>
-        本游戏指南
-      </h2>
+      <DialogHeader style={{ flexShrink: 0 }}>本游戏指南</DialogHeader>
       <div
         data-grip-guide-list="true"
         hidden={confirming}
@@ -329,9 +312,9 @@ export function GuideSwitcher({
           </div>
         )}
         {listError && (
-          <div role="alert" style={{ color: "#ffc4b8", marginBottom: 12 }}>
-            <p>{listError}</p>
-            <Button
+          <div role="alert" style={{ marginBottom: 12 }}>
+            <DialogBodyText>{listError}</DialogBodyText>
+            <DialogButton
               data-grip-guide-list-retry="true"
               aria-disabled={pendingKey !== null}
               onClick={() => {
@@ -340,12 +323,16 @@ export function GuideSwitcher({
               }}
             >
               重新读取指南列表
-            </Button>
+            </DialogButton>
           </div>
         )}
-        {error && !failedEntry && <p role="alert">{error}</p>}
+        {error && !failedEntry && (
+          <div role="alert">
+            <DialogBodyText>{error}</DialogBodyText>
+          </div>
+        )}
         {entries?.length === 0 && !listError && !error && (
-          <p>本游戏还没有已记录的指南。</p>
+          <DialogBodyText>本游戏还没有已记录的指南。</DialogBodyText>
         )}
         {entries?.map((entry) => {
           const key = makeGuideKey(entry);
@@ -355,12 +342,10 @@ export function GuideSwitcher({
           const result = removeResults[entry.guideId];
           return (
             <div key={key} className="grip-guide-row" data-grip-guide-row={key}>
-              <Button
+              <DialogButton
                 className="grip-guide-choice"
                 data-grip-guide-choice={key}
                 data-current={current ? "true" : undefined}
-                data-focused={focusedKey === key ? "true" : undefined}
-                data-pressed={pressedKey === key ? "true" : undefined}
                 aria-current={current ? "page" : undefined}
                 aria-busy={pending}
                 aria-disabled={!current && pendingKey !== null}
@@ -376,20 +361,7 @@ export function GuideSwitcher({
                   if (!event.detail.is_repeat) openManagement(entry);
                 }}
                 onGamepadFocus={(event) => {
-                  setFocusedKey(key);
                   revealChoice(event.target as HTMLElement);
-                }}
-                onGamepadBlur={() => {
-                  setFocusedKey((value) => (value === key ? null : value));
-                  setPressedKey((value) => (value === key ? null : value));
-                }}
-                onButtonDown={(event) => {
-                  if (event.detail.button === GamepadButton.OK)
-                    setPressedKey(key);
-                }}
-                onButtonUp={(event) => {
-                  if (event.detail.button === GamepadButton.OK)
-                    setPressedKey(null);
                 }}
                 onClick={() => {
                   if (removalInFlight.current || confirming) return;
@@ -402,41 +374,41 @@ export function GuideSwitcher({
                   onChoose(entry);
                 }}
               >
-                <div style={{ fontSize: 19, fontWeight: 700, lineHeight: 1.4 }}>
-                  {current ? "正在阅读 · " : ""}
-                  {titleFor(entry)}
-                </div>
-                {entry.cache?.author && (
-                  <div style={{ fontSize: 14, marginTop: 5, opacity: 0.8 }}>
-                    {isHeyboxGuideId(entry.guideId) ? "小黑盒 · " : ""}作者：
-                    {entry.cache.author}
+                <div style={{ minWidth: 0, width: "100%" }}>
+                  <div>
+                    {current ? "正在阅读 · " : ""}
+                    {titleFor(entry)}
                   </div>
-                )}
-                {entry.cache?.sectionTitle && (
-                  <div style={{ fontSize: 14, marginTop: 4, opacity: 0.8 }}>
-                    上次：{entry.cache.sectionTitle}
-                  </div>
-                )}
-                <div className="grip-guide-choice-status">
-                  {pending ? (
-                    <BusyLabel>正在准备并打开…</BusyLabel>
-                  ) : failed ? (
-                    <span role="alert">{error} · 按 A 重试打开</span>
-                  ) : removedEntry(entry) ? (
-                    `离线副本已卸载${result ? `，释放 ${(result.bytesRemoved / 1024 / 1024).toFixed(1)} MiB` : ""}${current ? "，当前会话仍可阅读" : "，阅读位置已保留"}`
-                  ) : current ? (
-                    "按 A 返回当前阅读位置"
-                  ) : entry.cache ? (
-                    entry.cache.stale ? (
-                      "已缓存正文，可继续阅读"
-                    ) : (
-                      "已缓存正文"
-                    )
-                  ) : (
-                    "未下载离线副本，打开时将下载正文"
+                  {entry.cache?.author && (
+                    <div>
+                      {isHeyboxGuideId(entry.guideId) ? "小黑盒 · " : ""}作者：
+                      {entry.cache.author}
+                    </div>
                   )}
+                  {entry.cache?.sectionTitle && (
+                    <div>上次：{entry.cache.sectionTitle}</div>
+                  )}
+                  <div>
+                    {pending ? (
+                      <BusyLabel>正在准备并打开…</BusyLabel>
+                    ) : failed ? (
+                      <span role="alert">{error} · 按 A 重试打开</span>
+                    ) : removedEntry(entry) ? (
+                      `离线副本已卸载${result ? `，释放 ${(result.bytesRemoved / 1024 / 1024).toFixed(1)} MiB` : ""}${current ? "，当前会话仍可阅读" : "，阅读位置已保留"}`
+                    ) : current ? (
+                      "按 A 返回当前阅读位置"
+                    ) : entry.cache ? (
+                      entry.cache.stale ? (
+                        "已缓存正文，可继续阅读"
+                      ) : (
+                        "已缓存正文"
+                      )
+                    ) : (
+                      "未下载离线副本，打开时将下载正文"
+                    )}
+                  </div>
                 </div>
-              </Button>
+              </DialogButton>
             </div>
           );
         })}
@@ -448,31 +420,35 @@ export function GuideSwitcher({
           aria-busy={removeMode === "busy"}
           style={{ flex: 1, minHeight: 0, overflowY: "auto" }}
         >
-          <h3>{titleFor(removeTarget)}</h3>
-          <p>
+          <DialogHeader>{titleFor(removeTarget)}</DialogHeader>
+          <DialogBodyText>
             来源：{isHeyboxGuideId(removeTarget.guideId) ? "小黑盒" : "Steam"}
-          </p>
+          </DialogBodyText>
           {removeTarget.cache?.author && (
-            <p>作者：{removeTarget.cache.author}</p>
+            <DialogBodyText>作者：{removeTarget.cache.author}</DialogBodyText>
           )}
-          <p>
+          <DialogBodyText>
             {cleanupOnly
               ? "正文未缓存，是否清理未完成卸载留下的图片？"
               : "卸载这篇指南的正文和独有图片？"}
             阅读位置及其他指南共用的图片会保留。同一篇指南在其他游戏中的离线副本也会卸载。
-          </p>
+          </DialogBodyText>
           {(!targetInLibrary?.cache || removedEntry(removeTarget)) && (
-            <p role="status">
-              {removedEntry(removeTarget)
-                ? "这篇指南的离线副本已卸载。"
-                : "可重试完成剩余离线文件的清理。"}
-            </p>
+            <div role="status">
+              <DialogBodyText>
+                {removedEntry(removeTarget)
+                  ? "这篇指南的离线副本已卸载。"
+                  : "可重试完成剩余离线文件的清理。"}
+              </DialogBodyText>
+            </div>
           )}
           {removeDisabled && (
-            <p role="status">请等待下载或更新完成后再卸载。</p>
+            <div role="status">
+              <DialogBodyText>请等待下载或更新完成后再卸载。</DialogBodyText>
+            </div>
           )}
           <div style={{ display: "flex", gap: 12 }}>
-            <Button
+            <DialogButton
               ref={cancelRef}
               preferredFocus
               aria-disabled={removeMode === "busy"}
@@ -481,8 +457,8 @@ export function GuideSwitcher({
               }}
             >
               取消
-            </Button>
-            <Button
+            </DialogButton>
+            <DialogButton
               aria-disabled={removeMode === "busy" || cannotRemove}
               onClick={() => void remove()}
             >
@@ -493,12 +469,12 @@ export function GuideSwitcher({
               ) : (
                 "确认卸载"
               )}
-            </Button>
+            </DialogButton>
           </div>
           {removeError && (
-            <p role="alert" style={{ color: "#ffc4b8" }}>
-              {removeError}
-            </p>
+            <div role="alert">
+              <DialogBodyText>{removeError}</DialogBodyText>
+            </div>
           )}
         </div>
       )}

@@ -24,6 +24,9 @@ chapter for dense-image viewport work checks. The default fixture remains the
 18-chapter table/image layout case. No fixture replaces DOM geometry or decoding.
 
 The adapter replaces only Decky primitives and the router/backend boundary.
+Dialog components remain structural stand-ins: a system-color surface provides
+occlusion for layout tests, not a copy of Steam's styles. Do not treat fixture
+screenshots as native Steam visual acceptance.
 F2 and F3 dispatch the existing Y/X callbacks; they do not validate Steam spatial
 navigation, actual Decky styling, controller hardware, offline networking or device performance.
 No Steam Deck connection is required or attempted.

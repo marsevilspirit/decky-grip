@@ -14,8 +14,6 @@
       }
       body {
         font-family: sans-serif;
-        background: #0d141c;
-        color: #dcdedf;
       }
       button,
       input {
@@ -23,7 +21,6 @@
       }
       button {
         border: 0;
-        border-radius: 4px;
         padding: 8px;
         cursor: pointer;
       }
@@ -34,6 +31,11 @@
         box-sizing: border-box;
         width: 100%;
         padding: 8px;
+      }
+      /* Opaque surfaces for geometry/occlusion checks, not a Steam theme preview. */
+      .fixture-dialog-content.DialogContent._DialogLayout {
+        background: Canvas;
+        color: CanvasText;
       }
     </style>
   </head>

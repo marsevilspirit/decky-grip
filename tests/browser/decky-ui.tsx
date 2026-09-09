@@ -93,7 +93,14 @@ const element = (tag: "button" | "div") =>
     return createElement(tag, { ...dom, ref }, props.children as ReactNode);
   });
 
-export const Button = element("button");
+// Structural stand-ins only. These classes do not reproduce Steam's proprietary stylesheet.
+export const gamepadDialogClasses = {
+  GamepadDialogContent: "fixture-dialog-content",
+  FieldDescription: "fixture-field-description",
+};
+export const DialogButton = element("button");
+export const DialogHeader = element("div");
+export const DialogBodyText = element("div");
 export const Focusable = element("div");
 export const Spinner = () => <span role="status">正在处理…</span>;
 export const ReaderRoute = createContext({ appId: "", guideId: "" });

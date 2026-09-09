@@ -1,7 +1,10 @@
 import {
-  Button,
+  DialogButton,
+  DialogBodyText,
+  DialogHeader,
   Focusable,
   GamepadButton,
+  gamepadDialogClasses,
   Spinner,
   TextField,
   useParams,
@@ -52,22 +55,11 @@ import { GuideSwitcher } from "./GuideSwitcher";
 
 const SAVE_DELAY_MS = 400;
 const STEAM_TOP_BAR_HEIGHT = 40;
+// Steam buttons need 160 px, plus the rail's 6 px padding on each side.
+const TOC_RAIL_WIDTH = 172;
 const LOADING_INDICATOR_DELAY_MS = 180;
 const SECTION_RENDER_BATCH = 8;
 const SEARCH_HIGHLIGHT_MS = 1_800;
-const READER_CSS = `
-@keyframes grip-guide-content-enter { from { opacity: 0.35; transform: translateX(12px); } }
-@media (prefers-reduced-motion: no-preference) {
-  .grip-reader-guide-enter { animation: grip-guide-content-enter 180ms ease-out; }
-  .grip-reader-control { transition: background 100ms ease-out, box-shadow 100ms ease-out, transform 100ms ease-out; }
-}
-.grip-reader-control { border-radius: 6px; }
-.grip-reader-control:focus, .grip-reader-control.gpfocus, .grip-reader-control.grip-is-focused { background: #dceefa !important; color: #102131 !important; box-shadow: inset 0 0 0 2px #67c1f5; }
-.grip-reader-control:active { transform: scale(0.98); }
-.grip-reader-toc[data-expanded="true"] { box-shadow: -12px 0 30px #0007; }
-@media (prefers-reduced-motion: reduce) { .grip-reader-control:active { transform: none; } }
-.grip-reader-toc [aria-current="location"] { box-shadow: inset 3px 0 #67c1f5; font-weight: 700; }
-`;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -217,9 +209,6 @@ export function GuideReaderPage({
     retryImage: visibleRetryImage,
     previewImage: visiblePreviewImage,
   } = viewportState;
-  const [focusedTocSection, setFocusedTocSection] = useState<string | null>(
-    null,
-  );
   const [imageRetryError, setImageRetryError] = useState<string | null>(null);
   const [activeGuideSearchResultIndex, setActiveGuideSearchResultIndex] =
     useState<number | null>(null);
@@ -299,17 +288,12 @@ export function GuideReaderPage({
     );
   };
 
-  const hideTocTitle = () => {
-    setFocusedTocSection(null);
-  };
-
   const openGuideSwitcher = () => {
     if (guideSwitcherOpen) {
       return;
     }
     cancelPendingFocus();
     setNavigationMode("collapsed");
-    hideTocTitle();
     setGuideSwitcherOpen(true);
   };
 
@@ -337,7 +321,6 @@ export function GuideReaderPage({
         index: buildGuideSearchIndex(guide),
       };
     }
-    hideTocTitle();
     setNavigationMode("search");
   };
 
@@ -363,7 +346,6 @@ export function GuideReaderPage({
 
   const closeNavigation = () => {
     setNavigationMode("collapsed");
-    hideTocTitle();
     scheduleFocus(() => focusWithoutScrolling(scrollerRef.current));
   };
 
@@ -405,7 +387,6 @@ export function GuideReaderPage({
   const openImagePreview = (image: HTMLImageElement) => {
     if (image.dataset.gripImageState !== "ready") return;
     cancelPendingFocus();
-    hideTocTitle();
     previewReturnFocusRef.current =
       document.activeElement instanceof HTMLElement &&
       scrollerRef.current?.contains(document.activeElement)
@@ -725,11 +706,6 @@ export function GuideReaderPage({
     imageCacheControl,
     performance,
   ]);
-
-  const showTocTitle = (sectionId: string) => {
-    setFocusedTocSection(sectionId);
-    expandNavigation();
-  };
 
   const retryImage = (image: HTMLImageElement) => {
     imageCacheControl.resume();
@@ -1244,10 +1220,14 @@ export function GuideReaderPage({
 
   if (!identity) {
     return (
-      <div style={{ color: "white", padding: 48 }}>
-        <h1>GRIP Reader</h1>
-        <p>尚未选择指南。请从 Decky 打开 GRIP，然后选择“继续阅读”。</p>
-        <Button onClick={onClose}>返回</Button>
+      <div
+        className={`DialogContent _DialogLayout ${gamepadDialogClasses.GamepadDialogContent}`}
+      >
+        <DialogHeader>GRIP Reader</DialogHeader>
+        <DialogBodyText>
+          尚未选择指南。请从 Decky 打开 GRIP，然后选择“继续阅读”。
+        </DialogBodyText>
+        <DialogButton onClick={onClose}>返回</DialogButton>
       </div>
     );
   }
@@ -1297,7 +1277,7 @@ export function GuideReaderPage({
 
   return (
     <Focusable
-      className="grip-reader"
+      className={`grip-reader DialogContent _DialogLayout ${gamepadDialogClasses.GamepadDialogContent}`}
       onCancel={cancelReader}
       onSecondaryActionDescription={
         !previewImage && !guideSwitcherOpen && loaded
@@ -1353,18 +1333,17 @@ export function GuideReaderPage({
         }
       }}
       style={{
-        background: "linear-gradient(180deg, #16202b 0%, #0d141c 100%)",
         boxSizing: "border-box",
-        color: "#dcdedf",
         display: "flex",
         flexDirection: "column",
         height: "100vh",
         overflow: "hidden",
         paddingTop: STEAM_TOP_BAR_HEIGHT,
+        paddingInline: 0,
+        paddingBottom: 0,
         position: "relative",
       }}
     >
-      <style>{READER_CSS}</style>
       {previewImage && (
         <GuideImageViewer
           image={previewImage}
@@ -1416,16 +1395,15 @@ export function GuideReaderPage({
           inert={readerCovered || navigationOpen ? true : undefined}
           style={{
             alignItems: "center",
-            background: "#5c471f",
             display: "flex",
             gap: 10,
             padding: "8px 28px",
           }}
         >
-          <div style={{ flex: 1 }}>{readerWarning}</div>
+          <DialogBodyText style={{ flex: 1 }}>{readerWarning}</DialogBodyText>
           {loaded?.positionWarning && (
             <>
-              <Button
+              <DialogButton
                 disabled={positionRepairBusy}
                 onClick={() => void retryReaderPosition(false)}
               >
@@ -1434,8 +1412,8 @@ export function GuideReaderPage({
                 ) : (
                   "重试位置"
                 )}
-              </Button>
-              <Button
+              </DialogButton>
+              <DialogButton
                 disabled={positionRepairBusy}
                 onClick={() => void retryReaderPosition(true)}
               >
@@ -1444,7 +1422,7 @@ export function GuideReaderPage({
                 ) : (
                   "备份并重置"
                 )}
-              </Button>
+              </DialogButton>
             </>
           )}
         </div>
@@ -1474,11 +1452,14 @@ export function GuideReaderPage({
           inert={readerCovered ? true : undefined}
           style={{ padding: 48 }}
         >
-          <h2>无法打开该指南</h2>
-          <p>{error}</p>
-          <Button disabled={refreshPending} onClick={() => void refreshGuide()}>
+          <DialogHeader>无法打开该指南</DialogHeader>
+          <DialogBodyText>{error}</DialogBodyText>
+          <DialogButton
+            disabled={refreshPending}
+            onClick={() => void refreshGuide()}
+          >
             {refreshPending ? <BusyLabel>重试中…</BusyLabel> : "重试"}
-          </Button>
+          </DialogButton>
         </div>
       ) : loaded ? (
         <div
@@ -1535,9 +1516,8 @@ export function GuideReaderPage({
             }}
             style={{
               flex: 1,
-              marginRight: 88,
+              marginRight: TOC_RAIL_WIDTH,
               minWidth: 0,
-              outline: "none",
               overflowY: loading || guideSwitcherOpen ? "hidden" : "auto",
               scrollBehavior: "auto",
             }}
@@ -1551,7 +1531,7 @@ export function GuideReaderPage({
             />
             {imageRetries.map(({ image, host, key, busy }) =>
               createPortal(
-                <Button
+                <DialogButton
                   aria-label={`重试图片：${image.alt || image.title || key}`}
                   aria-live="polite"
                   data-grip-image-retry="true"
@@ -1573,7 +1553,7 @@ export function GuideReaderPage({
                       ? "图片内存已满，优先显示此图"
                       : "图片读取失败，重试此图"))
                   )}
-                </Button>,
+                </DialogButton>,
                 host,
                 key,
               ),
@@ -1583,16 +1563,8 @@ export function GuideReaderPage({
             aria-label={guideSearchOpen ? "指南搜索" : "指南目录"}
             aria-modal={navigationMode === "toc" || undefined}
             data-expanded={navigationOpen ? "true" : "false"}
-            className="grip-reader-toc"
-            onFocusCapture={(event) => {
-              expandNavigation();
-              const target = (event.target as HTMLElement).closest<HTMLElement>(
-                "[data-grip-toc-section]",
-              );
-              if (target?.dataset.gripTocSection)
-                showTocTitle(target.dataset.gripTocSection);
-            }}
-            onBlurCapture={hideTocTitle}
+            className={`grip-reader-toc DialogContent _DialogLayout ${gamepadDialogClasses.GamepadDialogContent}`}
+            onFocusCapture={expandNavigation}
             ref={tocRef}
             role={
               guideSearchOpen
@@ -1654,14 +1626,13 @@ export function GuideReaderPage({
               }
             }}
             style={{
-              background: navigationOpen ? "#14212d" : "rgba(7, 12, 18, 0.48)",
-              borderLeft: "1px solid #314252",
               boxSizing: "border-box",
               position: "absolute",
               right: 0,
               top: 0,
               bottom: 0,
-              width: navigationOpen ? 340 : 88,
+              width: navigationOpen ? 340 : TOC_RAIL_WIDTH,
+              minWidth: 0,
               maxWidth: "calc(100% - 40px)",
               zIndex: navigationOpen ? 6 : 1,
               overflowY: "auto",
@@ -1670,42 +1641,33 @@ export function GuideReaderPage({
           >
             {navigationMode === "toc" && (
               <div style={{ marginBottom: 14 }}>
-                <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 6 }}>
-                  章节目录
-                </div>
-                <div
-                  style={{ fontSize: 13, color: "#a7becf", marginBottom: 12 }}
-                >
+                <DialogHeader>章节目录</DialogHeader>
+                <DialogBodyText>
                   {loaded.guide.title} · {loaded.guide.sections.length} 章
-                </div>
-                <Button
-                  className="grip-reader-control"
+                </DialogBodyText>
+                <DialogButton
                   onClick={closeNavigation}
-                  style={{ width: "100%", minHeight: 44 }}
+                  style={{ width: "100%" }}
                 >
                   返回正文
-                </Button>
+                </DialogButton>
               </div>
             )}
             {guideSearchOpen ? (
               <>
-                <Button
-                  className="grip-reader-control"
+                <DialogButton
                   onClick={closeGuideSearch}
                   ref={guideSearchButtonRef}
                   style={{
                     boxSizing: "border-box",
-                    fontSize: 16,
-                    lineHeight: "22px",
                     marginBottom: 12,
                     minWidth: 0,
                     overflow: "hidden",
-                    padding: "8px",
                     width: "100%",
                   }}
                 >
                   关闭搜索
-                </Button>
+                </DialogButton>
                 <TextField
                   bShowClearAction
                   focusOnMount
@@ -1720,13 +1682,9 @@ export function GuideReaderPage({
                   value={guideSearchQuery}
                 />
                 {guideSearchQuery.trim().length === 0 ? (
-                  <div style={{ margin: "14px 8px", opacity: 0.72 }}>
-                    输入标题、章节或正文关键词。
-                  </div>
+                  <DialogBodyText>输入标题、章节或正文关键词。</DialogBodyText>
                 ) : guideSearchResults.length === 0 ? (
-                  <div style={{ margin: "14px 8px", opacity: 0.72 }}>
-                    没有匹配的正文。
-                  </div>
+                  <DialogBodyText>没有匹配的正文。</DialogBodyText>
                 ) : (
                   <>
                     <div
@@ -1737,9 +1695,9 @@ export function GuideReaderPage({
                         margin: "12px 0",
                       }}
                     >
-                      <Button
-                        className="grip-reader-control"
+                      <DialogButton
                         aria-label="上一个搜索命中"
+                        style={{ minWidth: 0, width: "auto" }}
                         disabled={
                           loading ||
                           activeGuideSearchResultIndex === null ||
@@ -1748,7 +1706,7 @@ export function GuideReaderPage({
                         onClick={() => moveGuideSearchResult(-1)}
                       >
                         上一个
-                      </Button>
+                      </DialogButton>
                       <div
                         aria-live="polite"
                         style={{ flex: 1, textAlign: "center" }}
@@ -1757,9 +1715,9 @@ export function GuideReaderPage({
                           ? `共 ${guideSearchResults.length} 个`
                           : `${activeGuideSearchResultIndex + 1} / ${guideSearchResults.length}`}
                       </div>
-                      <Button
-                        className="grip-reader-control"
+                      <DialogButton
                         aria-label="下一个搜索命中"
+                        style={{ minWidth: 0, width: "auto" }}
                         disabled={
                           loading ||
                           activeGuideSearchResultIndex ===
@@ -1768,20 +1726,18 @@ export function GuideReaderPage({
                         onClick={() => moveGuideSearchResult(1)}
                       >
                         下一个
-                      </Button>
+                      </DialogButton>
                     </div>
                     {guideSearchResponse.truncated && (
-                      <div
-                        role="status"
-                        style={{ margin: "8px", opacity: 0.72 }}
-                      >
-                        匹配过多，仅显示前 {guideSearchResults.length}{" "}
-                        个，请继续输入关键词。
+                      <div role="status">
+                        <DialogBodyText>
+                          匹配过多，仅显示前 {guideSearchResults.length}{" "}
+                          个，请继续输入关键词。
+                        </DialogBodyText>
                       </div>
                     )}
                     {guideSearchResults.map((result, index) => (
-                      <Button
-                        className="grip-reader-control"
+                      <DialogButton
                         aria-current={
                           activeGuideSearchResultIndex === index
                             ? "location"
@@ -1795,57 +1751,45 @@ export function GuideReaderPage({
                           boxSizing: "border-box",
                           marginBottom: 8,
                           minWidth: 0,
-                          padding: "10px",
                           textAlign: "left",
+                          whiteSpace: "normal",
+                          overflowWrap: "anywhere",
                           width: "100%",
                         }}
                       >
-                        <div style={{ fontWeight: 700 }}>{result.title}</div>
-                        <div style={{ fontSize: 13, opacity: 0.7 }}>
+                        <div>{result.title}</div>
+                        <div>
                           {result.kind === "guide-title"
                             ? "指南标题"
                             : result.kind === "section-title"
                               ? "章节标题"
                               : "正文匹配"}
                         </div>
-                        <div
-                          style={{
-                            fontSize: 13,
-                            marginTop: 4,
-                            opacity: 0.82,
-                          }}
-                        >
-                          {result.snippet}
-                        </div>
-                      </Button>
+                        <div>{result.snippet}</div>
+                      </DialogButton>
                     ))}
                   </>
                 )}
               </>
             ) : (
               <>
-                <Button
+                <DialogButton
                   disabled={loading}
-                  className="grip-reader-control"
                   aria-label="搜索指南正文"
                   onClick={openGuideSearch}
                   ref={guideSearchButtonRef}
                   style={{
                     boxSizing: "border-box",
-                    fontSize: 16,
-                    lineHeight: "22px",
                     marginBottom: 8,
                     minWidth: 0,
                     overflow: "hidden",
-                    padding: "8px 2px",
                     whiteSpace: "nowrap",
                     width: "100%",
                   }}
                 >
                   搜索
-                </Button>
-                <Button
-                  className="grip-reader-control"
+                </DialogButton>
+                <DialogButton
                   aria-label={
                     (canCancelUpdate ? "取消更新" : "更新指南") +
                     (downloadActive && downloadProgress
@@ -1865,12 +1809,9 @@ export function GuideReaderPage({
                   }}
                   style={{
                     boxSizing: "border-box",
-                    fontSize: 16,
-                    lineHeight: "22px",
                     marginBottom: 16,
                     minWidth: 0,
                     overflow: "hidden",
-                    padding: "8px 2px",
                     whiteSpace: "nowrap",
                     width: "100%",
                   }}
@@ -1894,12 +1835,11 @@ export function GuideReaderPage({
                   ) : (
                     "更新"
                   )}
-                </Button>
+                </DialogButton>
                 {loaded.guide.sections
                   .slice(0, renderedSectionCount)
                   .map((section) => (
-                    <Button
-                      className={`grip-reader-control${focusedTocSection === section.id ? " grip-is-focused" : ""}`}
+                    <DialogButton
                       aria-current={
                         activeSectionId === section.id ? "location" : undefined
                       }
@@ -1908,17 +1848,12 @@ export function GuideReaderPage({
                       disabled={loading}
                       key={section.id}
                       onClick={() => jumpToSection(section.id)}
-                      onGamepadFocus={() => showTocTitle(section.id)}
-                      onGamepadBlur={hideTocTitle}
+                      onGamepadFocus={expandNavigation}
                       style={{
                         boxSizing: "border-box",
-                        fontSize: 16,
-                        minHeight: 44,
-                        lineHeight: "22px",
                         marginBottom: 8,
                         minWidth: 0,
                         overflow: "hidden",
-                        padding: navigationOpen ? "12px" : "8px 2px",
                         textAlign: navigationOpen ? "left" : "center",
                         whiteSpace: navigationOpen ? "normal" : "nowrap",
                         overflowWrap: "anywhere",
@@ -1928,7 +1863,7 @@ export function GuideReaderPage({
                       {navigationOpen
                         ? section.title
                         : shortSectionTitle(section.title)}
-                    </Button>
+                    </DialogButton>
                   ))}
               </>
             )}
@@ -1938,11 +1873,11 @@ export function GuideReaderPage({
 
       {saveError && (
         <div
+          className={`DialogContent _DialogLayout ${gamepadDialogClasses.GamepadDialogContent}`}
           aria-hidden={readerCovered || navigationOpen}
           inert={readerCovered || navigationOpen ? true : undefined}
           role="alert"
           style={{
-            background: "#6d2525",
             bottom: 64,
             padding: "8px 14px",
             position: "absolute",
@@ -1950,13 +1885,13 @@ export function GuideReaderPage({
             zIndex: 2,
           }}
         >
-          阅读位置保存失败：{saveError}
-          <Button
+          <DialogBodyText>阅读位置保存失败：{saveError}</DialogBodyText>
+          <DialogButton
             disabled={saveRetryPending}
             onClick={() => void retrySavePosition()}
           >
             {saveRetryPending ? <BusyLabel>正在保存…</BusyLabel> : "重试保存"}
-          </Button>
+          </DialogButton>
         </div>
       )}
     </Focusable>

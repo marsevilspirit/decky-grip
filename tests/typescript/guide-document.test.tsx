@@ -2,9 +2,17 @@
 
 import { act, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 import { GuideDocument } from "../../src/components/GuideDocument";
+
+vi.mock("@decky/ui", async () => {
+  const { mockDeckyElement } = await import("./helpers/decky-ui");
+  return {
+    DialogHeader: mockDeckyElement("div"),
+    DialogBodyText: mockDeckyElement("div"),
+  };
+});
 
 let container: HTMLDivElement;
 let root: Root;

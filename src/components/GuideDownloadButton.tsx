@@ -1,4 +1,4 @@
-import { DialogButton } from "@decky/ui";
+import { DialogBodyText, DialogButton, ProgressBar } from "@decky/ui";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 
@@ -242,48 +242,52 @@ function GuideDownloadButtonForGuide({
           )}
         </DialogButton>
         {downloading && (
-          <div data-grip-download-progress="true" style={{ fontSize: 14 }}>
+          <div data-grip-download-progress="true">
             {total > 0 && (
-              <progress
+              <div
+                role="progressbar"
                 aria-label="离线图片下载进度"
-                max={total}
-                value={completed}
-                style={{ width: "100%", accentColor: "#67c1f5" }}
-              />
+                aria-valuemin={0}
+                aria-valuemax={total}
+                aria-valuenow={completed}
+              >
+                <ProgressBar indeterminate focusable={false} />
+              </div>
             )}
-            <div role="status">{progressText}</div>
+            <DialogBodyText>
+              <div role="status">{progressText}</div>
+            </DialogBodyText>
           </div>
         )}
         {!checking && !downloading && downloadStatus?.state === "complete" && (
-          <div role="status" style={{ fontSize: 14 }}>
-            正文和图片已完整离线，按 A 本地阅读
-          </div>
+          <DialogBodyText>
+            <div role="status">正文和图片已完整离线，按 A 本地阅读</div>
+          </DialogBodyText>
         )}
         {checkError && (
-          <div role="status" style={{ color: "#ffc582", fontSize: 14 }}>
-            本地状态读取失败：{checkError}
-          </div>
+          <DialogBodyText>
+            <div role="status">本地状态读取失败：{checkError}</div>
+          </DialogBodyText>
         )}
         {openError && (
-          <div role="alert" style={{ color: "#ffc582", fontSize: 14 }}>
-            本地阅读打开失败：{openError}
-          </div>
+          <DialogBodyText>
+            <div role="alert">本地阅读打开失败：{openError}</div>
+          </DialogBodyText>
         )}
         {(progress?.error || task?.error) && (
-          <div
-            role="status"
-            style={{ color: "#ffc582", fontSize: 14, padding: "6px 0" }}
-          >
-            {progress?.stopped
-              ? "已暂停："
-              : progress?.failed
-                ? `${progress.failed} 张图片失败：`
-                : ""}
-            {progress?.error ?? task?.error}
-            {downloading && !progress?.stopped
-              ? "；其余图片继续下载，完成后可重试失败图片。"
-              : "；已下载内容保留。"}
-          </div>
+          <DialogBodyText>
+            <div role="status">
+              {progress?.stopped
+                ? "已暂停："
+                : progress?.failed
+                  ? `${progress.failed} 张图片失败：`
+                  : ""}
+              {progress?.error ?? task?.error}
+              {downloading && !progress?.stopped
+                ? "；其余图片继续下载，完成后可重试失败图片。"
+                : "；已下载内容保留。"}
+            </div>
+          </DialogBodyText>
         )}
       </div>
     </NavigationProvider>,

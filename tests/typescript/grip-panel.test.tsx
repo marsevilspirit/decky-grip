@@ -35,6 +35,7 @@ vi.mock("@decky/ui", () => {
   }
 
   return {
+    gamepadDialogClasses: { FieldDescription: "native-field-description" },
     ConfirmModal: () => null,
     showModal: vi.fn(() => ({ Close: vi.fn(), Update: vi.fn() })),
     DropdownItem: ({

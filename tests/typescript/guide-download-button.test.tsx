@@ -40,6 +40,12 @@ vi.mock("@decky/ui", () => ({
       },
       children,
     ),
+  DialogBodyText: (props: Record<string, unknown>) =>
+    createElement("div", { ...props, className: "DialogBodyText" }),
+  ProgressBar: ({ indeterminate }: { indeterminate?: boolean }) =>
+    createElement("div", {
+      "data-steam-progress": indeterminate ? "indeterminate" : "determinate",
+    }),
   Spinner: () => createElement("span"),
 }));
 
@@ -122,9 +128,13 @@ describe("GuideDownloadButton", () => {
     primary.focus();
     expect(primary.textContent).toBe("取消下载");
     expect(portalTarget.textContent).toContain("图片 13/61 · 21%");
-    const progress = portalTarget.querySelector("progress")!;
-    expect(progress.max).toBe(61);
-    expect(progress.value).toBe(13);
+    const progress = portalTarget.querySelector('[role="progressbar"]')!;
+    expect(progress.getAttribute("aria-valuemax")).toBe("61");
+    expect(progress.getAttribute("aria-valuenow")).toBe("13");
+    expect(
+      progress.querySelector('[data-steam-progress="indeterminate"]'),
+    ).not.toBeNull();
+    expect(portalTarget.querySelector("progress")).toBeNull();
     expect(getDownloadStatus).not.toHaveBeenCalled();
     await act(async () =>
       report({ completed: 13, total: 61, failed: 1, error: "网络中断" }),
@@ -414,10 +424,14 @@ describe("GuideDownloadButton", () => {
     });
     expect(primary.textContent).toBe("取消下载");
     expect(cancel).not.toHaveBeenCalled();
-    expect(portalTarget.querySelector("progress")).toBeNull();
+    expect(portalTarget.querySelector('[role="progressbar"]')).toBeNull();
     expect(portalTarget.textContent).not.toContain("NaN");
     await act(async () => report({ completed: 1, total: 2 }));
-    expect(portalTarget.querySelector("progress")?.value).toBe(1);
+    expect(
+      portalTarget
+        .querySelector('[role="progressbar"]')
+        ?.getAttribute("aria-valuenow"),
+    ).toBe("1");
     expect(portalTarget.textContent).toContain("图片 1/2 · 50%");
     await act(async () => {
       // Publication can arrive before React commits the previous cancel label.
