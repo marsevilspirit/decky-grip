@@ -90,6 +90,88 @@ test("installed Valve components retain the GRIP native UI contracts", async (t)
   t.diagnostic(`Valve bundle: ${bundle.path}; SHA256 ${sha256(bundle.source)}`);
 
   await t.test(
+    "DialogContent separates its flex outer and column inner",
+    () => {
+      const cssDirectory = join(steamUiDirectory, "css");
+      const sheets = readdirSync(cssDirectory)
+        .filter((name) => name.endsWith(".css"))
+        .sort()
+        .map((name) => readFileSync(join(cssDirectory, name), "utf8"));
+      // Only exact simple class selectors: this is not a CSS cascade emulator.
+      const layout = (className) => {
+        const rules = sheets.flatMap((source) =>
+          [...source.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+            .filter((rule) =>
+              rule[1]
+                .split(",")
+                .some((selector) => selector.trim() === `.${className}`),
+            )
+            .map((rule) => rule[2]),
+        );
+        assert.ok(rules.length, `Missing Steam CSS class ${className}`);
+        return Object.fromEntries(
+          rules.flatMap((rule) =>
+            [
+              ...rule.matchAll(
+                /(?:^|;)\s*(display|flex-direction)\s*:\s*([^;]+)/g,
+              ),
+            ].map(([, name, value]) => [name, value.trim()]),
+          ),
+        );
+      };
+      const [gamepadClass, gamepadInnerClass] = symbols(
+        bundle.source,
+        /GamepadDialogContent:"([^"]+)",GamepadDialogContent_InnerWidth:"([^"]+)"/,
+      );
+      assert.deepEqual(layout("DialogContent"), { display: "flex" });
+      assert.deepEqual(layout("DialogContent_InnerWidth"), {
+        display: "flex",
+        "flex-direction": "column",
+      });
+      assert.equal(layout(gamepadClass)["flex-direction"], undefined);
+
+      const code = nativeFunction(bundle.source, ".GamepadDialogContent,");
+      const context = {};
+      bind(context, symbols(code, /\b([$\w]+)\.(jsx)\b/), element);
+      bind(context, symbols(code, /\w+=\(0,([$\w]+)\.([$\w]+)\)/), classNames);
+      const [styles] = symbols(code, /\b([$\w]+)\(\)\.GamepadDialogContent\b/);
+      context[styles] = () => ({
+        GamepadDialogContent: gamepadClass,
+        GamepadDialogContent_InnerWidth: gamepadInnerClass,
+      });
+      bind(
+        context,
+        symbols(code, /navRef:\w+}=\(0,([$\w]+)\.([$\w]+)\)/),
+        () => ({}),
+      );
+      bind(
+        context,
+        symbols(code, /\w+=\(0,([$\w]+)\.([$\w]+)\)\(\w+,\w+\)/),
+        () => null,
+      );
+      bind(
+        context,
+        symbols(code, /\(0,[$\w]+\.jsx\)\(([$\w]+)\.([$\w]+),/),
+        "Focusable",
+      );
+      const child = { content: "guide controls" };
+      const output = render(code, context, { children: child });
+      assert.equal(output.type, "Focusable");
+      assert.equal(
+        output.props.className,
+        `${gamepadClass} DialogContent _DialogLayout`,
+      );
+      assert.equal(output.props.children.type, "Focusable");
+      assert.equal(
+        output.props.children.props.className,
+        `${gamepadInnerClass} DialogContent_InnerWidth`,
+      );
+      assert.equal(output.props.children.props.children, child);
+      t.diagnostic(`DialogContent function SHA256 ${sha256(code)}`);
+    },
+  );
+
+  await t.test(
     "ProgressBar uses percent values and needs zero for indeterminate mode",
     () => {
       const code = nativeFunction(bundle.source, progressLocator);

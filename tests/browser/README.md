@@ -37,8 +37,12 @@ does not validate live Xiaoheihe capture, real phone cameras or Deck networking.
 
 The adapter replaces only Decky primitives and the router/backend boundary.
 Dialog components remain structural stand-ins: a system-color surface provides
-occlusion for layout tests, not a copy of Steam's styles. Do not treat fixture
-screenshots as native Steam visual acceptance.
+occlusion for layout tests, not a copy of Steam's styles. The adapter includes
+Steam's `DialogContent` flex-row layout contract, so reader panels must explicitly
+own their vertical layout instead of relying on focus-navigation props. Tests
+cover chapter/search rows, the empty state and save-error layout; the installed
+Steam contract test also checks the native outer/inner container structure.
+Do not treat fixture screenshots as native Steam visual acceptance.
 F2 and F3 dispatch the existing Y/X callbacks; they do not validate Steam spatial
 navigation, actual Decky styling, controller hardware, offline networking or device performance.
 No Steam Deck connection is required or attempted.

@@ -1247,6 +1247,7 @@ export function GuideReaderPage({
     return (
       <div
         className={`DialogContent _DialogLayout ${gamepadDialogClasses.GamepadDialogContent}`}
+        style={{ display: "block" }}
       >
         <DialogHeader>GRIP Reader</DialogHeader>
         <DialogBodyText>
@@ -1631,6 +1632,8 @@ export function GuideReaderPage({
             }}
             style={{
               boxSizing: "border-box",
+              // DialogContent is a flex row; flow-children only controls focus navigation.
+              display: "block",
               position: "absolute",
               right: 0,
               top: 0,
@@ -1884,6 +1887,7 @@ export function GuideReaderPage({
           role="alert"
           style={{
             bottom: 64,
+            display: "block",
             padding: "8px 14px",
             position: "absolute",
             right: 12,

@@ -207,6 +207,16 @@ test("a failed position write can be retried and survives a cold page reload", a
   await expect(page.getByRole("alert")).toContainText(
     "本地位置写入失败（测试注入）",
   );
+  const alertLayout = await page.getByRole("alert").evaluate((element) => {
+    const [message, retry] = [...element.children].map((child) =>
+      child.getBoundingClientRect(),
+    );
+    return {
+      stacked: retry.top >= message.bottom,
+      fits: element.scrollWidth <= element.clientWidth,
+    };
+  });
+  expect(alertLayout).toEqual({ stacked: true, fits: true });
   expect(await savedPosition(page, guideA)).toBeNull();
   const scrollTop = await reader(page).evaluate((element) => element.scrollTop);
   await page.getByRole("button", { name: "重试保存" }).click();

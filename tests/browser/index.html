@@ -32,6 +32,10 @@
         width: 100%;
         padding: 8px;
       }
+      /* Native library.css layout contract; flow-children is navigation, not CSS. */
+      .DialogContent {
+        display: flex;
+      }
       /* Opaque surfaces for geometry/occlusion checks, not a Steam theme preview. */
       .fixture-dialog-content.DialogContent._DialogLayout {
         background: Canvas;

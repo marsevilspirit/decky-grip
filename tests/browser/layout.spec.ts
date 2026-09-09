@@ -35,6 +35,27 @@ const expectChoiceInsideList = async (choice: Locator) => {
     .toBe(true);
 };
 
+test("1280×800: native dialog layout stacks the empty reader message and return button", async ({
+  page,
+}) => {
+  await page.goto("/?guideId=invalid");
+  const rows = [
+    page.getByText("GRIP Reader", { exact: true }),
+    page.getByText("尚未选择指南。请从 Decky 打开 GRIP，然后选择“继续阅读”。"),
+    page.getByRole("button", { name: "返回", exact: true }),
+  ];
+  for (const row of rows) await expect(row).toBeInViewport({ ratio: 1 });
+  const bounds = await Promise.all(rows.map((row) => row.boundingBox()));
+  for (let index = 1; index < bounds.length; index++)
+    expect(bounds[index]!.y).toBeGreaterThanOrEqual(
+      bounds[index - 1]!.y + bounds[index - 1]!.height,
+    );
+  await rows[2].click();
+  await expect(
+    page.getByRole("heading", { name: "阅读器已关闭" }),
+  ).toBeVisible();
+});
+
 test("1280×800: browser focus and Tab reveal long-list cards without scrolling the reader", async ({
   page,
 }) => {
@@ -269,10 +290,52 @@ test("1280×800: a search hit stays visible after a delayed local image really l
   }
 });
 
-test("1280×800: opening and closing the chapter panel keeps the article width and reading position", async ({
+test("1280×800: native dialog layout keeps long chapter and search lists vertical without moving the article", async ({
   page,
 }) => {
   await openReader(page);
+  const panel = page.locator(".grip-reader-toc");
+  const expectVerticalRows = async () => {
+    const layout = await panel.evaluate((element) => {
+      const style = getComputedStyle(element);
+      const bounds = element.getBoundingClientRect();
+      return {
+        width: element.clientWidth,
+        scrollWidth: element.scrollWidth,
+        height: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+        contentWidth:
+          element.clientWidth -
+          parseFloat(style.paddingLeft) -
+          parseFloat(style.paddingRight),
+        rows: [...element.querySelectorAll(":scope > button")].map((button) => {
+          const rect = button.getBoundingClientRect();
+          return {
+            left: rect.left - bounds.left,
+            right: rect.right - bounds.left,
+            top: rect.top,
+            bottom: rect.bottom,
+            width: rect.width,
+            height: rect.height,
+          };
+        }),
+      };
+    });
+    expect(layout.rows.length).toBeGreaterThan(10);
+    expect(layout.scrollWidth).toBeLessThanOrEqual(layout.width + 1);
+    expect(layout.scrollHeight).toBeGreaterThan(layout.height);
+    for (const [index, row] of layout.rows.entries()) {
+      expect(row.left).toBeGreaterThanOrEqual(0);
+      expect(row.right).toBeLessThanOrEqual(layout.width + 1);
+      expect(Math.abs(row.width - layout.contentWidth)).toBeLessThanOrEqual(1);
+      // These one-to-three-line fixture labels must not stretch to the panel height.
+      expect(row.height).toBeGreaterThan(20);
+      expect(row.height).toBeLessThan(layout.height / 3);
+      if (index > 0)
+        expect(row.top).toBeGreaterThanOrEqual(layout.rows[index - 1].bottom);
+    }
+  };
+  await expectVerticalRows();
   for (let index = 0; index < 8; index++)
     await page.keyboard.press("ArrowDown");
   const measure = () =>
@@ -303,6 +366,14 @@ test("1280×800: opening and closing the chapter panel keeps the article width a
   ).toBe(true);
   await page.keyboard.press("ArrowRight");
   await expect(page.getByRole("dialog", { name: "指南目录" })).toBeVisible();
+  await expectVerticalRows();
+  const lastChapter = panel.locator("[data-grip-toc-section]").last();
+  await expect(lastChapter).toHaveText("第 18 章：长标题与离线正文排版");
+  await lastChapter.focus();
+  await expect(lastChapter).toBeInViewport({ ratio: 1 });
+  expect(await panel.evaluate((element) => element.scrollTop)).toBeGreaterThan(
+    0,
+  );
   await page
     .locator('[data-grip-toc-section]:not([aria-current="location"])')
     .first()
@@ -318,6 +389,30 @@ test("1280×800: opening and closing the chapter panel keeps the article width a
   await expect(
     page.getByRole("navigation", { name: "指南目录" }),
   ).toBeVisible();
+  await expect(reader(page)).toBeFocused();
+  expect(await measure()).toEqual(before);
+
+  await page.keyboard.press("Control+f");
+  const input = page.getByRole("textbox", { name: "搜索指南正文" });
+  await input.fill("章节");
+  await expect(
+    panel.getByRole("button", { name: /^跳转到搜索结果 1：/ }),
+  ).toBeVisible();
+  await expectVerticalRows();
+  const lastResult = panel
+    .getByRole("button", { name: /^跳转到搜索结果 / })
+    .last();
+  await lastResult.focus();
+  await expect(lastResult).toBeInViewport({ ratio: 1 });
+  expect(await panel.evaluate((element) => element.scrollTop)).toBeGreaterThan(
+    0,
+  );
+  expect(await measure()).toEqual(before);
+  await page.keyboard.press("Escape");
+  await expect(
+    panel.getByRole("button", { name: "搜索指南正文", exact: true }),
+  ).toBeFocused();
+  await page.keyboard.press("Escape");
   await expect(reader(page)).toBeFocused();
   expect(await measure()).toEqual(before);
 });
