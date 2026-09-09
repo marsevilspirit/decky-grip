@@ -1,6 +1,6 @@
 //! Capture only the marked, disposable CEF page owned by GRIP.
 
-use crate::{guides::GuideError, read_bounded_regular_file};
+use crate::{guides::GuideError, storage::read_bounded_regular_file};
 use serde_json::{Value, json};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};

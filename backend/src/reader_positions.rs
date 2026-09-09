@@ -1,8 +1,9 @@
-use super::{
-    AtomicReplaceError, JAVASCRIPT_MAX_SAFE_INTEGER, MAX_POSITIONS, MAX_SCROLL_TOP, ReadError,
-    SCHEMA_VERSION, StoreError, acquire_store_lock, atomic_replace, backup_corrupt_file,
-    read_bounded_regular_file, valid_reader_guide_key as valid_guide_key,
-    validate_reader_guide_key as validate_guide_key,
+use crate::positions::{
+    JAVASCRIPT_MAX_SAFE_INTEGER, MAX_POSITIONS, MAX_SCROLL_TOP, SCHEMA_VERSION, valid_id,
+};
+use crate::storage::{
+    AtomicReplaceError, ReadError, StoreError, acquire_store_lock, atomic_replace,
+    backup_corrupt_file, read_bounded_regular_file,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -10,6 +11,22 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+fn valid_guide_key(value: &str) -> bool {
+    value.split_once(':').is_some_and(|(app_id, guide_id)| {
+        valid_id(app_id) && crate::guide_html::valid_resource_id(guide_id)
+    })
+}
+
+pub(crate) fn validate_guide_key(value: &str) -> Result<&str, StoreError> {
+    if valid_guide_key(value) {
+        Ok(value)
+    } else {
+        Err(StoreError::Validation(
+            "reader guide_key must have the form <app_id>:<resource_id>",
+        ))
+    }
+}
 
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_ANCHOR_OFFSET: f64 = 1_000_000_000.0;
@@ -1017,7 +1034,7 @@ mod tests {
             );
         }
         let payload = serde_json::to_vec(&document.to_value()).unwrap();
-        assert!(payload.len() as u64 > crate::MAX_FILE_BYTES);
+        assert!(payload.len() as u64 > crate::positions::MAX_FILE_BYTES);
         assert!(payload.len() as u64 <= MAX_FILE_BYTES);
         fs::write(&path, payload).unwrap();
 

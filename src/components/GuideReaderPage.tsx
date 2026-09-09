@@ -20,16 +20,13 @@ import { createPortal } from "react-dom";
 
 import type { CacheClearResult, GuideLibraryEntry } from "../backend";
 import type { GuideDownloadTasks } from "../reader/download";
+import { captureReaderPosition } from "../reader/anchor";
+import { ReaderCheckpoint } from "../reader/checkpoint";
 import {
-  captureReaderPosition,
-  ReaderAnchorIndex,
-  restoreReaderPosition,
-} from "../reader/anchor";
-import {
-  isReaderScrollInteraction,
-  ReaderCheckpoint,
-  readerRestoreCanSettle,
-} from "../reader/checkpoint";
+  ReaderViewport,
+  type ReaderViewportSnapshot,
+} from "../reader/viewport";
+import { ReaderPositioning } from "../reader/positioning";
 import type { ReaderImageHydrator } from "../reader/image-hydrator";
 import type { ReaderImageCacheControl } from "../reader/image-cache-control";
 import type { ReaderPerformanceTracker } from "../reader/performance";
@@ -55,16 +52,9 @@ import { GuideSwitcher } from "./GuideSwitcher";
 
 const SAVE_DELAY_MS = 400;
 const STEAM_TOP_BAR_HEIGHT = 40;
-const RESTORE_STABLE_MS = 100;
-const RESTORE_TIMEOUT_MS = 10_000;
 const LOADING_INDICATOR_DELAY_MS = 180;
-const MAX_ACTIVE_GUIDE_IMAGES = 512;
-const RETRY_IMAGE_SELECTOR =
-  'img[data-grip-image-state="unavailable"], img[data-grip-image-state="capacity"]';
 const SECTION_RENDER_BATCH = 8;
 const SEARCH_HIGHLIGHT_MS = 1_800;
-const SEARCH_ALIGNMENT_TIMEOUT_MS = RESTORE_TIMEOUT_MS;
-const SEARCH_SCROLL_MARGIN = 48;
 const READER_CSS = `
 @keyframes grip-guide-content-enter { from { opacity: 0.35; transform: translateX(12px); } }
 @media (prefers-reduced-motion: no-preference) {
@@ -200,8 +190,6 @@ export function GuideReaderPage({
   );
   const [previewImages, setPreviewImages] = useState<ReaderPreviewImage[]>([]);
   const previewReturnFocusRef = useRef<HTMLElement | null>(null);
-  const [visiblePreviewImage, setVisiblePreviewImage] =
-    useState<HTMLImageElement | null>(null);
   const [guideLibrary, setGuideLibrary] = useState<GuideLibraryEntry[] | null>(
     null,
   );
@@ -214,24 +202,24 @@ export function GuideReaderPage({
   const [guideSwitcherRevision, setGuideSwitcherRevision] = useState(0);
   const [switchPending, setSwitchPending] = useState<string | null>(null);
   const [guideSearchQuery, setGuideSearchQuery] = useState("");
-  const [activeSectionId, setActiveSectionId] = useState<string | null>(
-    initialSnapshot?.position?.sectionId ??
+  const [viewportState, setViewportState] = useState<ReaderViewportSnapshot>({
+    activeSectionId:
+      initialSnapshot?.position?.sectionId ??
       initialSnapshot?.guide.sections[0]?.id ??
       null,
-  );
+    retries: [],
+    retryImage: null,
+    previewImage: null,
+  });
+  const {
+    activeSectionId,
+    retries: imageRetries,
+    retryImage: visibleRetryImage,
+    previewImage: visiblePreviewImage,
+  } = viewportState;
   const [focusedTocSection, setFocusedTocSection] = useState<string | null>(
     null,
   );
-  const [imageRetries, setImageRetries] = useState<
-    Array<{
-      image: HTMLImageElement;
-      host: HTMLSpanElement;
-      key: number;
-      busy: boolean;
-    }>
-  >([]);
-  const [visibleRetryImage, setVisibleRetryImage] =
-    useState<HTMLImageElement | null>(null);
   const [imageRetryError, setImageRetryError] = useState<string | null>(null);
   const [activeGuideSearchResultIndex, setActiveGuideSearchResultIndex] =
     useState<number | null>(null);
@@ -249,25 +237,18 @@ export function GuideReaderPage({
     index: GuideSearchIndex;
   } | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
-  const anchorIndexRef = useRef<ReaderAnchorIndex | null>(null);
-  const anchorGuideRef = useRef<ReaderSessionSnapshot["guide"] | null>(null);
   const pendingSectionJumpRef = useRef<string | null>(null);
   const pendingGuideSearchJumpRef = useRef<GuideSearchResult | null>(null);
   const guideSearchHighlightRangeRef = useRef<Range | null>(null);
   const guideSearchHighlightTimerRef = useRef<ReturnType<
     typeof setTimeout
   > | null>(null);
-  const guideSearchAlignmentStopRef = useRef<(() => void) | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [checkpoint] = useState(() => new ReaderCheckpoint());
-  const imageCachePausedRef = useRef(imageCacheControl.getSnapshot().paused);
-  const imageObserverRef = useRef<IntersectionObserver | null>(null);
-  const observedImageSectionsRef = useRef<WeakSet<Element>>(new WeakSet());
-  const nearImagesRef = useRef<Set<HTMLImageElement>>(new Set());
-  const visibleImagesRef = useRef<Set<HTMLImageElement>>(new Set());
-  const pendingObservedImagesRef = useRef<Set<HTMLImageElement>>(new Set());
-  const imageViewportChangeRef = useRef<() => void>(() => undefined);
-  const viewportFrameRef = useRef<number | null>(null);
+  const readerRef = useRef<{
+    viewport: ReaderViewport;
+    positioning: ReaderPositioning;
+  } | null>(null);
   const loadedRef = useRef(loaded);
   loadedRef.current = loaded;
   const switchRequestRef = useRef<object | null>(null);
@@ -287,8 +268,7 @@ export function GuideReaderPage({
   useEffect(() => cancelPendingFocus, [identity?.appId, identity?.guideId]);
 
   const stopGuideSearchAlignment = () => {
-    guideSearchAlignmentStopRef.current?.();
-    guideSearchAlignmentStopRef.current = null;
+    readerRef.current?.positioning.stopSearch();
   };
 
   const clearGuideSearchHighlight = () => {
@@ -438,7 +418,10 @@ export function GuideReaderPage({
       height: element.naturalHeight || element.height || 1,
     });
     const candidates = new Map<string, HTMLImageElement>();
-    for (const element of [...visibleImagesRef.current, image]) {
+    for (const element of [
+      ...(readerRef.current?.viewport.visibleImages ?? []),
+      image,
+    ]) {
       if (element.isConnected && element.dataset.gripImageState === "ready")
         candidates.set(element.currentSrc || element.src, element);
     }
@@ -453,8 +436,6 @@ export function GuideReaderPage({
     );
     setPreviewImage(toPreview(image));
   };
-  const restoringRef = useRef(false);
-  const stopRestoreRef = useRef<(() => void) | null>(null);
   const lastSavedSignatureRef = useRef<string | null>(null);
   const latestQueuedSaveRef = useRef<{
     signature: string;
@@ -470,145 +451,10 @@ export function GuideReaderPage({
     }
   }, [identity?.appId, identity?.guideId, performance]);
 
-  const updateVisibleImageRetry = useCallback(() => {
-    let retry: HTMLImageElement | null = null;
-    let ready: HTMLImageElement | null = null;
-    for (const image of visibleImagesRef.current) {
-      if (!image.isConnected) continue;
-      const precedes = (other: HTMLImageElement | null) =>
-        !other ||
-        Boolean(
-          image.compareDocumentPosition(other) &
-          Node.DOCUMENT_POSITION_FOLLOWING,
-        );
-      const state = image.dataset.gripImageState;
-      if ((state === "unavailable" || state === "capacity") && precedes(retry))
-        retry = image;
-      if (state === "ready" && precedes(ready)) ready = image;
-    }
-    setVisibleRetryImage(retry);
-    setVisiblePreviewImage(ready);
-  }, []);
-
-  const updateActiveSection = useCallback((viewportTop: number) => {
-    // GuideDocument owns these direct section children; no full-tree query per scroll.
-    const sections = contentRef.current?.children;
-    if (!sections) return;
-    let low = 0;
-    let high = sections.length;
-    while (low < high) {
-      const middle = (low + high) >>> 1;
-      if (sections[middle].getBoundingClientRect().top <= viewportTop + 1)
-        low = middle + 1;
-      else high = middle;
-    }
-    setActiveSectionId(
-      (sections[Math.max(0, low - 1)] as HTMLElement | undefined)?.dataset
-        .guideSectionId ?? null,
-    );
-  }, []);
-
-  const hydrateNearImages = useCallback(() => {
-    const scroller = scrollerRef.current;
-    if (!contentRef.current || !scroller) return;
-    const connected = [...nearImagesRef.current].filter(
-      (image) => image.isConnected,
-    );
-    nearImagesRef.current = new Set(connected);
-    const viewport = scroller.getBoundingClientRect();
-    const measured = connected.map((image) => {
-      const rect = image.getBoundingClientRect();
-      return {
-        image,
-        visible: rect.bottom > viewport.top && rect.top < viewport.bottom,
-        distance: Math.max(
-          viewport.top - rect.bottom,
-          rect.top - viewport.bottom,
-          0,
-        ),
-      };
-    });
-    visibleImagesRef.current = new Set(
-      measured.filter(({ visible }) => visible).map(({ image }) => image),
-    );
-    if (!imageCachePausedRef.current) {
-      // Reusing an existing Blob needs no RPC/decoded budget, including repeated table icons beyond the active limit.
-      imageHydrator.hydrateImages(connected, true);
-    }
-    const active = measured
-      .filter(
-        ({ image }) =>
-          image.dataset.gripImageState !== "ready" &&
-          image.dataset.gripImageState !== "unavailable",
-      )
-      .sort(
-        (left, right) =>
-          Number(right.visible) - Number(left.visible) ||
-          Number(left.image.dataset.gripImageState === "capacity") -
-            Number(right.image.dataset.gripImageState === "capacity") ||
-          left.distance - right.distance,
-      )
-      .slice(0, MAX_ACTIVE_GUIDE_IMAGES);
-    const candidates = active.map(({ image }) => image);
-    imageHydrator.setPinnedImages(visibleImagesRef.current, candidates);
-    if (!imageCachePausedRef.current) {
-      imageHydrator.hydrateImages(candidates);
-    }
-    updateActiveSection(viewport.top);
-    updateVisibleImageRetry();
-  }, [imageHydrator, updateActiveSection, updateVisibleImageRetry]);
-
-  const scheduleViewport = useCallback(() => {
-    if (viewportFrameRef.current !== null) return;
-    viewportFrameRef.current = requestAnimationFrame(() => {
-      viewportFrameRef.current = null;
-      hydrateNearImages();
-      imageViewportChangeRef.current();
-    });
-  }, [hydrateNearImages]);
-
-  useEffect(() => {
-    const cancelViewport = () => {
-      if (viewportFrameRef.current !== null)
-        cancelAnimationFrame(viewportFrameRef.current);
-      viewportFrameRef.current = null;
-    };
-    const scroller = scrollerRef.current;
-    const content = contentRef.current;
-    if (!scroller || !content) return cancelViewport;
-    const resize = new ResizeObserver(scheduleViewport);
-    resize.observe(scroller);
-    resize.observe(content);
-    content.addEventListener("load", scheduleViewport, true);
-    return () => {
-      content.removeEventListener("load", scheduleViewport, true);
-      resize.disconnect();
-      cancelViewport();
-    };
-  }, [scheduleViewport, loaded?.guide]);
-
-  useEffect(() => {
-    const synchronize = () => {
-      const paused = imageCacheControl.getSnapshot().paused;
-      imageCachePausedRef.current = paused;
-      if (paused) {
-        imageHydrator.clear();
-      } else {
-        scheduleViewport();
-      }
-    };
-    const unsubscribe = imageCacheControl.subscribe(synchronize);
-    imageCacheControl.resume();
-    synchronize();
-    return () => {
-      unsubscribe();
-      imageObserverRef.current?.disconnect();
-    };
-  }, [scheduleViewport, imageCacheControl, imageHydrator]);
-
-  useEffect(() => {
-    imageCacheControl.resume();
-  }, [identity?.appId, identity?.guideId, imageCacheControl]);
+  const scheduleViewport = useCallback(
+    () => readerRef.current?.viewport.schedule(),
+    [],
+  );
 
   useEffect(() => {
     if (!loading || loaded) {
@@ -716,7 +562,7 @@ export function GuideReaderPage({
             const captured = captureReaderPosition(
               scrollerRef.current,
               contentRef.current,
-              anchorIndexRef.current ?? undefined,
+              readerRef.current?.viewport.anchors ?? undefined,
             );
             void persistPosition(captured);
             displaySnapshot = {
@@ -799,7 +645,6 @@ export function GuideReaderPage({
       ? sectionRenderState.count
       : Math.min(loaded.guide.sections.length, 1)
     : 0;
-  const renderedSectionCountRef = useRef(renderedSectionCount);
 
   useEffect(() => {
     const guide = loaded?.guide ?? null;
@@ -836,103 +681,55 @@ export function GuideReaderPage({
   }, [loaded?.guide]);
 
   useLayoutEffect(() => {
-    renderedSectionCountRef.current = renderedSectionCount;
-    const guide = loaded?.guide ?? null;
+    const scroller = scrollerRef.current;
     const content = contentRef.current;
-    if (!guide || !content) {
-      anchorGuideRef.current = null;
-      anchorIndexRef.current = null;
+    if (!scroller || !content || !loaded) {
+      readerRef.current = null;
+      checkpoint.block();
       return;
     }
-    if (
-      anchorGuideRef.current !== guide ||
-      anchorIndexRef.current?.content !== content
-    ) {
-      anchorGuideRef.current = guide;
-      anchorIndexRef.current = new ReaderAnchorIndex(content);
-    } else {
-      anchorIndexRef.current.refresh();
-    }
-  }, [loaded?.guide, renderedSectionCount]);
+    let positioning: ReaderPositioning | undefined;
+    const viewport = new ReaderViewport(
+      scroller,
+      content,
+      imageHydrator,
+      imageCacheControl,
+      setViewportState,
+      () => positioning?.layoutChanged(),
+    );
+    positioning = new ReaderPositioning(viewport, checkpoint, (reason) => {
+      if (identity) performance.failIdentity(identity, reason);
+    });
+    const reader = { viewport, positioning };
+    readerRef.current = reader;
+    return () => {
+      reader.positioning.dispose();
+      viewport.dispose();
+    };
+  }, [
+    checkpoint,
+    identity?.appId,
+    identity?.guideId,
+    loaded?.guide,
+    imageHydrator,
+    imageCacheControl,
+    performance,
+  ]);
 
   useLayoutEffect(() => {
-    scheduleViewport();
-  }, [loaded?.guide, renderedSectionCount, scheduleViewport]);
+    readerRef.current?.viewport.syncSections();
+  }, [
+    loaded?.guide,
+    renderedSectionCount,
+    imageHydrator,
+    imageCacheControl,
+    performance,
+  ]);
 
   const showTocTitle = (sectionId: string) => {
     setFocusedTocSection(sectionId);
     expandNavigation();
   };
-
-  useEffect(() => {
-    const content = contentRef.current;
-    if (!content) return;
-    const controls = new Map<
-      HTMLImageElement,
-      { host: HTMLSpanElement; key: number }
-    >();
-    let nextKey = 0;
-    const synchronize = () => {
-      for (const image of content.querySelectorAll<HTMLImageElement>(
-        RETRY_IMAGE_SELECTOR,
-      )) {
-        if (controls.has(image)) continue;
-        const host = image.ownerDocument.createElement("span");
-        host.style.display = "block";
-        image.after(host);
-        controls.set(image, { host, key: ++nextKey });
-      }
-      const next: typeof imageRetries = [];
-      for (const [image, control] of controls) {
-        const state = image.dataset.gripImageState;
-        const busy =
-          state === "queued" || state === "loading" || state === "deferred";
-        if (
-          !image.isConnected ||
-          (!busy && state !== "unavailable" && state !== "capacity")
-        ) {
-          if (control.host.contains(control.host.ownerDocument.activeElement)) {
-            focusWithoutScrolling(scrollerRef.current);
-          }
-          control.host.remove();
-          controls.delete(image);
-        } else {
-          next.push({ image, ...control, busy });
-        }
-      }
-      setImageRetries((current) =>
-        current.length === next.length &&
-        current.every(
-          (entry, index) =>
-            entry.image === next[index].image &&
-            entry.host === next[index].host &&
-            entry.busy === next[index].busy,
-        )
-          ? current
-          : next,
-      );
-      updateVisibleImageRetry();
-    };
-    const onImageError = (event: Event) => {
-      const image = event.target as HTMLImageElement | null;
-      if (image?.tagName === "IMG" && image.dataset.gripImageUrl) {
-        image.dataset.gripImageState = "unavailable";
-      }
-    };
-    const observer = new MutationObserver(synchronize);
-    observer.observe(content, {
-      subtree: true,
-      attributes: true,
-      attributeFilter: ["data-grip-image-state"],
-    });
-    content.addEventListener("error", onImageError, true);
-    synchronize();
-    return () => {
-      observer.disconnect();
-      content.removeEventListener("error", onImageError, true);
-      for (const { host } of controls.values()) host.remove();
-    };
-  }, [loaded?.guide, updateVisibleImageRetry]);
 
   const retryImage = (image: HTMLImageElement) => {
     imageCacheControl.resume();
@@ -943,96 +740,6 @@ export function GuideReaderPage({
     setImageRetryError(null);
     imageHydrator.retryImage(image);
   };
-
-  useLayoutEffect(() => {
-    const guide = loaded?.guide ?? null;
-    const content = contentRef.current;
-    const scroller = scrollerRef.current;
-    imageObserverRef.current?.disconnect();
-    imageObserverRef.current = null;
-    observedImageSectionsRef.current = new WeakSet();
-    nearImagesRef.current.clear();
-    visibleImagesRef.current.clear();
-    pendingObservedImagesRef.current.clear();
-    imageHydrator.releaseImages();
-    if (!guide || !content || !scroller) {
-      return;
-    }
-
-    if (typeof IntersectionObserver === "undefined") {
-      return () => imageHydrator.releaseImages();
-    }
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          const image = entry.target as HTMLImageElement;
-          pendingObservedImagesRef.current.delete(image);
-          if (entry.isIntersecting && image.isConnected) {
-            nearImagesRef.current.add(image);
-          } else {
-            nearImagesRef.current.delete(image);
-          }
-        }
-        hydrateNearImages();
-        imageViewportChangeRef.current();
-      },
-      { root: scroller, rootMargin: "150% 0px 150% 0px" },
-    );
-    imageObserverRef.current = observer;
-    return () => {
-      observer.disconnect();
-      if (imageObserverRef.current === observer) {
-        imageObserverRef.current = null;
-      }
-      observedImageSectionsRef.current = new WeakSet();
-      nearImagesRef.current.clear();
-      visibleImagesRef.current.clear();
-      pendingObservedImagesRef.current.clear();
-      imageHydrator.releaseImages();
-    };
-  }, [hydrateNearImages, imageHydrator, loaded?.guide]);
-
-  useLayoutEffect(() => {
-    const guide = loaded?.guide ?? null;
-    const content = contentRef.current;
-    if (!guide || !content) {
-      return;
-    }
-    const observer = imageObserverRef.current;
-    const sections = content.querySelectorAll<Element>(
-      "[data-guide-section-id]",
-    );
-    const newlyMountedImages: HTMLImageElement[] = [];
-    for (const section of sections) {
-      if (observedImageSectionsRef.current.has(section)) {
-        continue;
-      }
-      observedImageSectionsRef.current.add(section);
-      const images = [
-        ...section.querySelectorAll<HTMLImageElement>(
-          "img[data-grip-image-url]",
-        ),
-      ];
-      newlyMountedImages.push(...images);
-    }
-
-    // Known dimensions must be applied before observing the inert placeholders,
-    // otherwise collapsed images below the viewport look visible on first open.
-    if (!imageCachePausedRef.current) {
-      imageHydrator.hydrateImages(newlyMountedImages, true);
-    }
-    if (!observer) {
-      for (const image of newlyMountedImages) {
-        nearImagesRef.current.add(image);
-      }
-      hydrateNearImages();
-      return;
-    }
-    for (const image of newlyMountedImages) {
-      pendingObservedImagesRef.current.add(image);
-      observer.observe(image);
-    }
-  }, [hydrateNearImages, imageHydrator, loaded?.guide, renderedSectionCount]);
 
   useLayoutEffect(() => {
     if (!identity || !loaded) {
@@ -1061,7 +768,7 @@ export function GuideReaderPage({
         captureReaderPosition(
           scrollerRef.current,
           contentRef.current,
-          anchorIndexRef.current ?? undefined,
+          readerRef.current?.viewport.anchors ?? undefined,
         );
       const signature = JSON.stringify(captured);
       if (latestQueuedSaveRef.current?.signature === signature) {
@@ -1114,7 +821,7 @@ export function GuideReaderPage({
         ? captureReaderPosition(
             scrollerRef.current,
             contentRef.current,
-            anchorIndexRef.current ?? undefined,
+            readerRef.current?.viewport.anchors ?? undefined,
           )
         : null;
     if (captured) void persistPosition(captured);
@@ -1145,254 +852,46 @@ export function GuideReaderPage({
     }
   };
 
-  const cancelRestore = useCallback(() => {
-    stopRestoreRef.current?.();
-    stopRestoreRef.current = null;
-    restoringRef.current = false;
-  }, []);
-
-  const failAndCancelRestore = useCallback(
-    (reason: string) => {
-      if (restoringRef.current && identity) {
-        performance.failIdentity(identity, reason);
-      }
-      cancelRestore();
-    },
-    [cancelRestore, identity?.appId, identity?.guideId, performance],
+  const cancelRestore = useCallback(
+    () => readerRef.current?.positioning.cancelRestore(),
+    [],
   );
 
+  const failAndCancelRestore = useCallback((reason: string) => {
+    readerRef.current?.positioning.cancelRestore(reason);
+  }, []);
+
   useLayoutEffect(() => {
-    const scroller = scrollerRef.current;
-    const content = contentRef.current;
-    const savedPosition = loaded?.position;
-    if (!scroller || !content || !loaded) {
-      restoringRef.current = false;
+    const reader = readerRef.current;
+    if (!loaded || !reader) {
       checkpoint.block();
       return;
     }
-    const position = savedPosition ?? {
-      scrollTop: 0,
-      sectionId: null,
-      anchorText: null,
-      anchorOffset: 0,
-      updatedAt: 0,
-    };
-
-    cancelRestore();
-    checkpoint.block();
-    if (!savedPosition && loaded.positionWarning === null) checkpoint.settle();
-    restoringRef.current = true;
-    let stopped = false;
-    let cleaned = false;
-    let performanceTimedOut = false;
-    let stableTimer: ReturnType<typeof setTimeout> | null = null;
-    let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
-    let animationFrame = 0;
-    let lastAppliedScrollTop: number | null = null;
-    const clearStableTimer = () => {
-      if (stableTimer !== null) {
-        clearTimeout(stableTimer);
-        stableTimer = null;
-      }
-    };
-    const positionIsReady = () => {
-      if (!savedPosition)
-        return (
-          renderedSectionCountRef.current >= loaded.guide.sections.length ||
-          scroller.scrollHeight >= scroller.clientHeight
-        );
-      const index = anchorIndexRef.current;
-      const anchorReady =
-        !position.anchorText ||
-        (index?.candidates(position.anchorText, position.sectionId).length ??
-          0) > 0;
-      const allSectionsRendered =
-        renderedSectionCountRef.current >= loaded.guide.sections.length;
-      const maxScrollTop = Math.max(
-        0,
-        scroller.scrollHeight - scroller.clientHeight,
-      );
-      const target = Math.min(position.scrollTop, maxScrollTop);
-      const pixelFallbackReady = Math.abs(scroller.scrollTop - target) <= 1;
-      return readerRestoreCanSettle(
-        allSectionsRendered,
-        position.anchorText !== null,
-        anchorReady,
-        pixelFallbackReady,
-      );
-    };
-    const visibleImagesAreReady = () => {
-      if (pendingObservedImagesRef.current.size > 0) {
-        return false;
-      }
-      const images = [...visibleImagesRef.current].filter(
-        (image) => image.isConnected,
-      );
-      return images.every((image) => {
-        const state = image.dataset.gripImageState;
-        return (
-          state === "unavailable" ||
-          state === "capacity" ||
-          (state === "ready" && image.complete)
-        );
-      });
-    };
-    const applyRestore = () => {
-      const restored = savedPosition
-        ? restoreReaderPosition(
-            scroller,
-            content,
-            position,
-            anchorIndexRef.current ?? undefined,
-          )
-        : scroller.scrollTop;
-      hydrateNearImages();
-      return restored;
-    };
-    const stop = () => {
-      if (cleaned) {
-        return;
-      }
-      cleaned = true;
-      stopped = true;
-      cancelAnimationFrame(animationFrame);
-      clearStableTimer();
-      if (timeoutTimer !== null) {
-        clearTimeout(timeoutTimer);
-      }
-      observer.disconnect();
-      content.removeEventListener("load", onLayoutChange, true);
-      content.removeEventListener("error", onImageError, true);
-      if (imageViewportChangeRef.current === finishIfStable) {
-        imageViewportChangeRef.current = () => undefined;
-      }
-    };
-    const finishIfStable = () => {
-      if (stopped) {
-        return;
-      }
-      const restored = applyRestore();
-      const moved =
-        lastAppliedScrollTop !== null &&
-        Math.abs(restored - lastAppliedScrollTop) > 1;
-      lastAppliedScrollTop = restored;
-      if (!positionIsReady() || !visibleImagesAreReady()) {
-        clearStableTimer();
-        return;
-      }
-      if (moved) {
-        clearStableTimer();
-      }
-      if (stableTimer === null) {
-        stableTimer = setTimeout(
-          () => {
-            stableTimer = null;
-            if (stopped) {
-              return;
-            }
-            const confirmed = applyRestore();
-            const shifted =
-              lastAppliedScrollTop !== null &&
-              Math.abs(confirmed - lastAppliedScrollTop) > 1;
-            lastAppliedScrollTop = confirmed;
-            if (shifted || !positionIsReady() || !visibleImagesAreReady()) {
-              finishIfStable();
-              return;
-            }
-            if (!performanceTimedOut && identity) {
-              performance.markPositionSettled(
-                identity,
-                loaded.positionWarning ||
-                  [...visibleImagesRef.current].some(
-                    (image) =>
-                      image.isConnected &&
-                      image.dataset.gripImageState !== "ready",
-                  )
-                  ? "unavailable"
-                  : savedPosition
-                    ? "restored"
-                    : "skipped",
-              );
-            }
-            setRestoreWarning(null);
-            stop();
-            if (loaded.positionWarning === null) checkpoint.settle();
-            restoringRef.current = false;
-            if (stopRestoreRef.current === stop) {
-              stopRestoreRef.current = null;
-            }
-          },
-          savedPosition || visibleImagesRef.current.size > 0
-            ? RESTORE_STABLE_MS
-            : 0,
-        );
-      }
-    };
-    imageViewportChangeRef.current = finishIfStable;
-    function onLayoutChange() {
-      finishIfStable();
-    }
-    function onImageError(event: Event) {
-      const image = event.target as HTMLImageElement | null;
-      if (image?.dataset.gripImageUrl) {
-        image.dataset.gripImageState = "unavailable";
-      }
-      finishIfStable();
-    }
-    const observer = new ResizeObserver(onLayoutChange);
-    observer.observe(content);
-    content.addEventListener("load", onLayoutChange, true);
-    content.addEventListener("error", onImageError, true);
-    animationFrame = requestAnimationFrame(() => {
-      animationFrame = requestAnimationFrame(finishIfStable);
+    reader.positioning.restore(loaded, {
+      onOutcome: (outcome) => {
+        if (identity) performance.markPositionSettled(identity, outcome);
+      },
+      onTimeout: () =>
+        setRestoreWarning(
+          "阅读位置在 10 秒内未稳定；正文已显示，GRIP 会继续尝试恢复。",
+        ),
+      onStable: () => setRestoreWarning(null),
     });
-    timeoutTimer = setTimeout(() => {
-      if (stopped) {
-        return;
-      }
-      performanceTimedOut = true;
-      if (identity) {
-        performance.markPositionSettled(identity, "unavailable");
-      }
-      setRestoreWarning(
-        "阅读位置在 10 秒内未稳定；正文已显示，GRIP 会继续尝试恢复。",
-      );
-      finishIfStable();
-    }, RESTORE_TIMEOUT_MS);
-    stopRestoreRef.current = stop;
-
-    const interactionEvents = ["wheel", "touchmove", "pointerdown", "keydown"];
-    const onInteraction = (event: Event) => {
-      if (!isReaderScrollInteraction(event, scroller)) {
-        return;
-      }
-      checkpoint.intendScroll();
-      failAndCancelRestore("用户在阅读位置稳定前开始操作");
-    };
-    for (const event of interactionEvents) {
-      scroller.addEventListener(event, onInteraction, true);
-    }
-    if (!tocRef.current?.contains(scroller.ownerDocument.activeElement))
-      focusWithoutScrolling(scroller);
-
-    return () => {
-      stop();
-      if (stopRestoreRef.current === stop) {
-        stopRestoreRef.current = null;
-      }
-      for (const event of interactionEvents) {
-        scroller.removeEventListener(event, onInteraction, true);
-      }
-    };
+    if (
+      !tocRef.current?.contains(
+        reader.viewport.scroller.ownerDocument.activeElement,
+      )
+    )
+      focusWithoutScrolling(reader.viewport.scroller);
+    return () => reader.positioning.cancelRestore();
   }, [
-    cancelRestore,
     checkpoint,
-    failAndCancelRestore,
-    hydrateNearImages,
     identity?.appId,
     identity?.guideId,
     loaded,
     performance,
+    imageHydrator,
+    imageCacheControl,
   ]);
 
   useLayoutEffect(
@@ -1420,7 +919,7 @@ export function GuideReaderPage({
 
   const onScroll = () => {
     scheduleViewport();
-    if (restoringRef.current || loading) {
+    if (readerRef.current?.positioning.restoring || loading) {
       return;
     }
     checkpoint.didScroll();
@@ -1500,7 +999,7 @@ export function GuideReaderPage({
     imageCacheControl.resume();
     refreshScrolledRef.current = false;
     setRefreshPending(true);
-    if (!restoringRef.current) {
+    if (!readerRef.current?.positioning.restoring) {
       if (saveTimerRef.current !== null) {
         clearTimeout(saveTimerRef.current);
         saveTimerRef.current = null;
@@ -1593,7 +1092,7 @@ export function GuideReaderPage({
     if (!scroller || !content) {
       return false;
     }
-    const index = anchorIndexRef.current;
+    const index = readerRef.current?.viewport.anchors;
     index?.refresh();
     const section = index?.sectionElement(sectionId) ?? null;
     if (section) {
@@ -1658,9 +1157,11 @@ export function GuideReaderPage({
       onScroll();
       return true;
     }
-    anchorIndexRef.current?.refresh();
+    readerRef.current?.viewport.anchors?.refresh();
     const section = result.sectionId
-      ? (anchorIndexRef.current?.sectionElement(result.sectionId) ?? null)
+      ? (readerRef.current?.viewport.anchors?.sectionElement(
+          result.sectionId,
+        ) ?? null)
       : null;
     const target =
       result.kind === "section-title"
@@ -1680,80 +1181,7 @@ export function GuideReaderPage({
 
     stopGuideSearchAlignment();
     highlightGuideSearchRange(range);
-    const align = (force: boolean) => {
-      if (!range.startContainer.isConnected) {
-        return;
-      }
-      const nextScrollTop = Math.max(
-        0,
-        Math.min(
-          scroller.scrollTop +
-            range.getBoundingClientRect().top -
-            scroller.getBoundingClientRect().top -
-            SEARCH_SCROLL_MARGIN,
-          Math.max(0, scroller.scrollHeight - scroller.clientHeight),
-        ),
-      );
-      if (!force && Math.abs(nextScrollTop - scroller.scrollTop) <= 1) {
-        return;
-      }
-      checkpoint.intendScroll();
-      scroller.scrollTop = nextScrollTop;
-      onScroll();
-    };
-    align(true);
-
-    const content = contentRef.current;
-    if (content) {
-      const onLayoutChange = () => align(false);
-      const observer = new ResizeObserver(onLayoutChange);
-      let stopped = false;
-      let deadline: ReturnType<typeof setTimeout> | null = null;
-      const interactionEvents = [
-        "wheel",
-        "touchmove",
-        "pointerdown",
-        "keydown",
-      ];
-      const stop = () => {
-        if (stopped) {
-          return;
-        }
-        stopped = true;
-        if (deadline !== null) {
-          clearTimeout(deadline);
-        }
-        observer.disconnect();
-        content.removeEventListener("load", onLayoutChange, true);
-        content.removeEventListener("error", onLayoutChange, true);
-        for (const event of interactionEvents) {
-          scroller.removeEventListener(event, onInteraction, true);
-        }
-        if (imageViewportChangeRef.current === onLayoutChange) {
-          imageViewportChangeRef.current = () => undefined;
-        }
-        if (guideSearchAlignmentStopRef.current === stop) {
-          guideSearchAlignmentStopRef.current = null;
-        }
-      };
-      const onInteraction = (event: Event) => {
-        if (isReaderScrollInteraction(event, scroller)) {
-          stop();
-        }
-      };
-      observer.observe(content);
-      content.addEventListener("load", onLayoutChange, true);
-      content.addEventListener("error", onLayoutChange, true);
-      for (const event of interactionEvents) {
-        scroller.addEventListener(event, onInteraction, true);
-      }
-      imageViewportChangeRef.current = onLayoutChange;
-      guideSearchAlignmentStopRef.current = stop;
-      deadline = setTimeout(() => {
-        align(false);
-        stop();
-      }, SEARCH_ALIGNMENT_TIMEOUT_MS);
-    }
+    readerRef.current?.positioning.search(range, onScroll);
     return true;
   };
 

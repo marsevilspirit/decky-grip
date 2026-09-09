@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { act, createElement, forwardRef, type ReactNode } from "react";
+import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -10,88 +10,57 @@ import {
   type GuideSwitcherProps,
 } from "../../src/components/GuideSwitcher";
 import { GamepadButton, gamepadEvent } from "./helpers/decky-gamepad";
+import type { MockDeckyProps } from "./helpers/decky-ui";
 
 vi.mock("@decky/ui", async () => {
-  const { GamepadButton, gamepadRef } = await import("./helpers/decky-gamepad");
+  const { GamepadButton } = await import("./helpers/decky-gamepad");
+  const { mockDeckyElement } = await import("./helpers/decky-ui");
   type GamepadHandler = (event: {
     detail: { button: number; is_repeat: boolean; source: number };
     preventDefault(): void;
     stopPropagation(): void;
   }) => void;
-  interface MockProps {
-    children?: ReactNode;
+  interface MockProps extends MockDeckyProps {
     onCancel?: GamepadHandler;
     onKeyDown?: (event: KeyboardEvent) => void;
     onButtonDown?: GamepadHandler;
     onButtonUp?: GamepadHandler;
-    onGamepadFocus?: () => void;
-    onGamepadBlur?: () => void;
     onClick?: () => void;
-    [key: string]: unknown;
   }
-  const element = (tag: "div" | "button") =>
-    forwardRef<HTMLElement, MockProps>((props, ref) => {
-      const value = props as MockProps;
-      const {
-        children,
-        onCancel,
-        onButtonDown,
-        onButtonUp,
-        onGamepadFocus,
-        onGamepadBlur,
-        onKeyDown,
-        ...dom
-      } = value;
-      dom["data-secondary-action"] = dom.onSecondaryActionDescription;
-      for (const name of [
-        "preferredFocus",
-        "onCancelActionDescription",
-        "onOptionsButton",
-        "onSecondaryButton",
-        "onSecondaryActionDescription",
-      ])
-        delete dom[name];
-      dom["data-ok-action"] = dom.onOKActionDescription;
-      delete dom.onOKActionDescription;
-      const gamepad = (event: KeyboardEvent) => ({
-        detail: {
-          button: GamepadButton.OK,
-          is_repeat: event.repeat,
-          source: 0,
-        },
-        preventDefault: () => event.preventDefault(),
-        stopPropagation: () => event.stopPropagation(),
-      });
-      return createElement(
-        tag,
-        {
-          ...dom,
-          ref: gamepadRef(ref, props),
-          onFocus: onGamepadFocus,
-          onBlur: onGamepadBlur,
-          onKeyDown: (event: KeyboardEvent) => {
-            onKeyDown?.(event);
-            if (event.defaultPrevented) return;
-            if (event.key === "GamepadCancel") {
-              const cancel = gamepad(event);
-              cancel.detail.button = GamepadButton.CANCEL;
-              onCancel?.(cancel);
-            }
-            if (event.key === "Enter") {
-              onButtonDown?.(gamepad(event));
-              if (tag === "button" && !event.repeat) value.onClick?.();
-            }
-          },
-          onKeyUp: (event: KeyboardEvent) => {
-            if (event.key === "Enter") onButtonUp?.(gamepad(event));
-          },
-        },
-        children,
-      );
+  const keyboard = (props: MockDeckyProps, tag: "div" | "button") => {
+    const value = props as MockProps;
+    const { onCancel, onButtonDown, onButtonUp, onKeyDown } = value;
+    const gamepad = (event: KeyboardEvent) => ({
+      detail: {
+        button: GamepadButton.OK,
+        is_repeat: event.repeat,
+        source: 0,
+      },
+      preventDefault: () => event.preventDefault(),
+      stopPropagation: () => event.stopPropagation(),
     });
+    return {
+      onKeyDown: (event: KeyboardEvent) => {
+        onKeyDown?.(event);
+        if (event.defaultPrevented) return;
+        if (event.key === "GamepadCancel") {
+          const cancel = gamepad(event);
+          cancel.detail.button = GamepadButton.CANCEL;
+          onCancel?.(cancel);
+        }
+        if (event.key === "Enter") {
+          onButtonDown?.(gamepad(event));
+          if (tag === "button" && !event.repeat) value.onClick?.();
+        }
+      },
+      onKeyUp: (event: KeyboardEvent) => {
+        if (event.key === "Enter") onButtonUp?.(gamepad(event));
+      },
+    };
+  };
   return {
-    Button: element("button"),
-    Focusable: element("div"),
+    Button: mockDeckyElement("button", keyboard),
+    Focusable: mockDeckyElement("div", keyboard),
     GamepadButton,
     Spinner: () => createElement("span"),
   };

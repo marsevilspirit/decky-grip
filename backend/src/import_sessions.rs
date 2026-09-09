@@ -1,8 +1,8 @@
 //! Temporary import resources owned by one sidecar lifetime.
 use crate::guides::GuideError;
 use crate::heybox_renderer;
-use crate::lock;
 use crate::phone_import::PhoneImportSession;
+use crate::storage::lock;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;

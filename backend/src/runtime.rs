@@ -1,12 +1,14 @@
-use super::{
-    MAX_REQUEST_BYTES, PositionStore, ReaderPositionStore, StoreError, dispatch, empty_params,
-    lock, params_with_fields, protocol_info, request_fields, valid_id,
-};
 use crate::guide_html::localized_image_urls;
 use crate::guide_images::{GuideImageCache, ImageError, ImageErrorKind};
 use crate::guides::{GuideError, GuideErrorKind, GuideReader};
 use crate::hotkey::{HotkeyEvent, L4HotkeyMonitor};
 use crate::import_sessions::{CaptureJob, ImportSessions};
+use crate::positions::{PositionStore, valid_id};
+use crate::protocol::{
+    MAX_REQUEST_BYTES, dispatch, empty_params, params_with_fields, protocol_info, request_fields,
+};
+use crate::reader_positions::ReaderPositionStore;
+use crate::storage::{StoreError, lock};
 use serde_json::{Value, json};
 use std::collections::{HashSet, VecDeque};
 use std::io::{self, BufRead, Read, Write};
@@ -304,7 +306,7 @@ fn dispatch_general(
                     StoreError::Validation("app_id must be a positive decimal string"),
                 )?;
                 let guide_key = format!("{app_id}:{guide_id}");
-                crate::validate_reader_guide_key(&guide_key)?;
+                crate::reader_positions::validate_guide_key(&guide_key)?;
                 // Reject invalid/corrupt association storage before publishing. The
                 // final touch reads again under flock, preserving concurrent scrolls.
                 reader_store.get(&guide_key)?;
@@ -919,7 +921,7 @@ mod tests {
         Arc::new(GuideImageCache::new(std::env::temp_dir().join(format!(
             "grip-runtime-images-{}-{}",
             std::process::id(),
-            crate::TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            crate::test_support::TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
         ))))
     }
 
@@ -1021,7 +1023,7 @@ mod tests {
         );
         assert!(guides.get_cached(id).unwrap().is_none());
         // A valid, full store passes preflight but cannot add another game entry.
-        let positions: serde_json::Map<_, _> = (1..=crate::MAX_POSITIONS).map(|id| (format!("1:{id}"), json!({"scroll_top": 0, "section_id": null, "anchor_text": null, "anchor_offset": 0, "updated_at_ms": 1}))).collect();
+        let positions: serde_json::Map<_, _> = (1..=crate::positions::MAX_POSITIONS).map(|id| (format!("1:{id}"), json!({"scroll_top": 0, "section_id": null, "anchor_text": null, "anchor_offset": 0, "updated_at_ms": 1}))).collect();
         let bytes =
             serde_json::to_vec(&json!({"schema_version": 1, "positions": positions})).unwrap();
         std::fs::write(directory.path(), &bytes).unwrap();
@@ -1247,7 +1249,7 @@ mod tests {
         let test_root = std::env::temp_dir().join(format!(
             "grip-runtime-concurrency-{}-{}",
             std::process::id(),
-            crate::TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            crate::test_support::TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         let (started, started_receiver) = mpsc::channel();
         let (release, release_receiver) = mpsc::channel();
@@ -1348,7 +1350,7 @@ mod tests {
         let test_root = std::env::temp_dir().join(format!(
             "grip-runtime-guide-scheduling-{}-{}",
             std::process::id(),
-            crate::TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            crate::test_support::TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         let (started, started_receiver) = mpsc::channel();
         let (release, release_receiver) = mpsc::channel();
@@ -1478,7 +1480,7 @@ mod tests {
         let test_root = std::env::temp_dir().join(format!(
             "grip-runtime-image-scheduling-{}-{}",
             std::process::id(),
-            crate::TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            crate::test_support::TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         let (started, started_receiver) = mpsc::channel();
         let (release, release_receiver) = mpsc::channel();
@@ -1590,7 +1592,7 @@ mod tests {
         let test_root = std::env::temp_dir().join(format!(
             "grip-runtime-out-of-order-{}-{}",
             std::process::id(),
-            crate::TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+            crate::test_support::TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         let (events, _event_receiver) = mpsc::channel();
         let (device_root, sysfs_root, proc_root) = missing_roots();

@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { GamepadButton } from "@decky/ui";
-import { act, type ComponentProps, type ReactNode } from "react";
+import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -12,42 +12,11 @@ import {
 import { gamepadEvent, type GamepadHandler } from "./helpers/decky-gamepad";
 
 vi.mock("@decky/ui", async () => {
-  const { createElement, forwardRef } = await import("react");
-  const { GamepadButton, gamepadRef } = await import("./helpers/decky-gamepad");
-  const element = (tag: "button" | "div") =>
-    forwardRef<HTMLElement, Record<string, unknown>>((props, ref) => {
-      const domProps = { ...props };
-      for (const key of Object.keys(domProps)) {
-        if (
-          key.startsWith("onGamepad") ||
-          key.endsWith("ActionDescription") ||
-          [
-            "onButtonDown",
-            "onButtonUp",
-            "onSecondaryButton",
-            "onOptionsButton",
-            "onCancel",
-            "preferredFocus",
-            "actionDescriptionMap",
-            "focusClassName",
-            "focusWithinClassName",
-            "noFocusRing",
-          ].includes(key)
-        )
-          delete domProps[key];
-      }
-      return createElement(
-        tag,
-        {
-          ...domProps,
-          ref: gamepadRef(ref, props),
-        },
-        props.children as ReactNode,
-      );
-    });
+  const { GamepadButton } = await import("./helpers/decky-gamepad");
+  const { mockDeckyElement } = await import("./helpers/decky-ui");
   return {
-    Button: element("button"),
-    Focusable: element("div"),
+    Button: mockDeckyElement("button"),
+    Focusable: mockDeckyElement("div"),
     GamepadButton,
   };
 });

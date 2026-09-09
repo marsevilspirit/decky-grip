@@ -1,12 +1,6 @@
 // @vitest-environment happy-dom
 
-import {
-  act,
-  createElement,
-  forwardRef,
-  type ChangeEventHandler,
-  type ReactNode,
-} from "react";
+import { act, createElement, type ChangeEventHandler } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as DeckyUI from "@decky/ui";
@@ -31,57 +25,38 @@ import {
 import type { DownloadedGuide, ReaderPosition } from "../../src/reader/types";
 import type { GuideIdentity } from "../../src/steam/guide-key";
 import { GamepadButton, gamepadEvent } from "./helpers/decky-gamepad";
+import type { MockDeckyProps as MockProps } from "./helpers/decky-ui";
 
 vi.mock("@decky/ui", async () => {
-  const { GamepadButton, gamepadRef } = await import("./helpers/decky-gamepad");
-  interface MockProps {
-    children?: ReactNode;
-    [key: string]: unknown;
-  }
-
-  const element = (tag: "button" | "div") =>
-    forwardRef<HTMLElement, MockProps>((props, ref) => {
-      const domProps = { ...props };
-      const children = domProps.children as ReactNode;
-      const onCancel = domProps.onCancel as
-        ((event: CustomEvent) => void) | undefined;
-      const onOptionsButton = domProps.onOptionsButton as
-        | ((event: {
-            detail: { button: number; is_repeat: boolean; source: number };
-            preventDefault(): void;
-            stopPropagation(): void;
-          }) => void)
-        | undefined;
-      const onOKButton = domProps.onOKButton as typeof onOptionsButton;
-      const onSecondaryButton =
-        domProps.onSecondaryButton as typeof onOptionsButton;
-      const onButtonDown = domProps.onButtonDown as typeof onOptionsButton;
-      const onKeyDown = domProps.onKeyDown as
-        ((event: KeyboardEvent) => void) | undefined;
-      const onGamepadDirection =
-        domProps.onGamepadDirection as typeof onOptionsButton;
-      const onGamepadFocus = domProps.onGamepadFocus as
-        (() => void) | undefined;
-      const onGamepadBlur = domProps.onGamepadBlur as (() => void) | undefined;
-      if (onGamepadFocus) domProps.onFocus = onGamepadFocus;
-      if (onGamepadBlur) domProps.onBlur = onGamepadBlur;
-      if (domProps.onOKActionDescription)
-        domProps["data-ok-action"] = domProps.onOKActionDescription;
-      if (domProps.onOptionsActionDescription) {
-        domProps["data-options-action"] = domProps.onOptionsActionDescription;
-      }
-      if (domProps.onSecondaryActionDescription)
-        domProps["data-secondary-action"] =
-          domProps.onSecondaryActionDescription;
-      if (
-        onCancel ||
-        onOptionsButton ||
-        onOKButton ||
-        onGamepadDirection ||
-        onSecondaryButton ||
-        onButtonDown
-      ) {
-        domProps.onKeyDown = (event: KeyboardEvent) => {
+  const { GamepadButton } = await import("./helpers/decky-gamepad");
+  const { mockDeckyElement } = await import("./helpers/decky-ui");
+  const keyboard = (props: MockProps) => {
+    const onCancel = props.onCancel as
+      ((event: CustomEvent) => void) | undefined;
+    const onOptionsButton = props.onOptionsButton as
+      | ((event: {
+          detail: { button: number; is_repeat: boolean; source: number };
+          preventDefault(): void;
+          stopPropagation(): void;
+        }) => void)
+      | undefined;
+    const onOKButton = props.onOKButton as typeof onOptionsButton;
+    const onSecondaryButton = props.onSecondaryButton as typeof onOptionsButton;
+    const onButtonDown = props.onButtonDown as typeof onOptionsButton;
+    const onKeyDown = props.onKeyDown as
+      ((event: KeyboardEvent) => void) | undefined;
+    const onGamepadDirection =
+      props.onGamepadDirection as typeof onOptionsButton;
+    if (
+      onCancel ||
+      onOptionsButton ||
+      onOKButton ||
+      onGamepadDirection ||
+      onSecondaryButton ||
+      onButtonDown
+    ) {
+      return {
+        onKeyDown: (event: KeyboardEvent) => {
           onKeyDown?.(event);
           if (event.defaultPrevented) return;
           const gamepadEvent = (button: number) => ({
@@ -118,39 +93,15 @@ vi.mock("@decky/ui", async () => {
           } else if (event.key === "TriggerLeft" && onButtonDown) {
             onButtonDown(gamepadEvent(GamepadButton.TRIGGER_LEFT));
           }
-        };
-      }
-      for (const name of [
-        "children",
-        "flow-children",
-        "onButtonDown",
-        "onButtonUp",
-        "onCancel",
-        "onGamepadDirection",
-        "onOptionsActionDescription",
-        "onOptionsButton",
-        "onSecondaryButton",
-        "onSecondaryActionDescription",
-        "actionDescriptionMap",
-        "onOKButton",
-        "onOKActionDescription",
-        "onCancelActionDescription",
-        "onGamepadFocus",
-        "onGamepadBlur",
-        "preferredFocus",
-      ]) {
-        delete domProps[name];
-      }
-      return createElement(
-        tag,
-        { ...domProps, ref: gamepadRef(ref, props) },
-        children,
-      );
-    });
+        },
+      };
+    }
+    return {};
+  };
 
   return {
-    Button: element("button"),
-    Focusable: element("div"),
+    Button: mockDeckyElement("button", keyboard),
+    Focusable: mockDeckyElement("div", keyboard),
     GamepadButton,
     Spinner: () => createElement("span"),
     TextField: ({ label, onChange, value }: MockProps) =>
@@ -2777,6 +2728,7 @@ describe("GuideReaderPage position lifecycle", () => {
     searchLayoutShift = 300;
     const savesBeforeLayoutShift = savedScrollTops.length;
     const observersWhileAligning = resizeCallbacks.size;
+    expect(observersWhileAligning).toBe(1);
     notifyResize();
     expect(scroller.scrollTop).toBe(4_252);
     await act(async () => {
@@ -2823,7 +2775,8 @@ describe("GuideReaderPage position lifecycle", () => {
     await act(async () => {
       vi.advanceTimersByTime(8_200);
     });
-    expect(resizeCallbacks).toHaveLength(observersWhileAligning - 1);
+    // Layout observation is shared for the document's lifetime; only the search task stops.
+    expect(resizeCallbacks).toHaveLength(observersWhileAligning);
     searchLayoutShift = 900;
     notifyResize();
     expect(scroller.scrollTop).toBe(4_652);
@@ -2834,12 +2787,12 @@ describe("GuideReaderPage position lifecycle", () => {
     await act(async () => {
       vi.advanceTimersByTime(10_000);
     });
-    expect(resizeCallbacks).toHaveLength(observersWhileAligning - 1);
+    expect(resizeCallbacks).toHaveLength(observersWhileAligning);
 
     await act(async () => results[0]?.click());
     expect(resizeCallbacks).toHaveLength(observersWhileAligning);
     await act(async () => scroller.dispatchEvent(new Event("wheel")));
-    expect(resizeCallbacks).toHaveLength(observersWhileAligning - 1);
+    expect(resizeCallbacks).toHaveLength(observersWhileAligning);
 
     await act(async () => {
       const setValue = Object.getOwnPropertyDescriptor(

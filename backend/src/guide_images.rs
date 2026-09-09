@@ -1,11 +1,12 @@
-use crate::{
+use crate::byte_lru::ByteLru;
+use crate::storage::{
     FileSignature, KeyLockPool, atomic_replace, lock, read_bounded_regular_file, signature,
 };
 use base64::Engine as _;
 use image::{ImageDecoder, ImageFormat, ImageReader, Limits};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File, FileTimes, OpenOptions};
@@ -117,54 +118,16 @@ struct ValidatedImage {
 
 #[derive(Default)]
 struct MemoryState {
-    entries: HashMap<String, Arc<ImageData>>,
-    order: VecDeque<String>,
-    bytes: usize,
+    cache: ByteLru<Arc<ImageData>>,
     generation: u64,
     clearing: bool,
 }
 
 impl MemoryState {
     fn get(&mut self, url: &str) -> Option<Arc<ImageData>> {
-        let value = Arc::clone(self.entries.get(url)?);
-        self.touch(url);
+        let value = Arc::clone(self.cache.peek(url)?);
+        self.cache.touch(url);
         Some(value)
-    }
-
-    fn touch(&mut self, url: &str) {
-        if let Some(index) = self.order.iter().position(|candidate| candidate == url) {
-            self.order.remove(index);
-        }
-        self.order.push_back(url.to_owned());
-    }
-
-    fn store(&mut self, url: &str, value: Arc<ImageData>, limit: usize) {
-        if let Some(old) = self.entries.remove(url) {
-            self.bytes = self.bytes.saturating_sub(old.body.len());
-            if let Some(index) = self.order.iter().position(|candidate| candidate == url) {
-                self.order.remove(index);
-            }
-        }
-        if limit == 0 || value.body.len() > limit {
-            return;
-        }
-        self.bytes = self.bytes.saturating_add(value.body.len());
-        self.entries.insert(url.to_owned(), value);
-        self.order.push_back(url.to_owned());
-        while self.bytes > limit {
-            let Some(oldest) = self.order.pop_front() else {
-                break;
-            };
-            if let Some(removed) = self.entries.remove(&oldest) {
-                self.bytes = self.bytes.saturating_sub(removed.body.len());
-            }
-        }
-    }
-
-    fn clear_memory(&mut self) {
-        self.entries.clear();
-        self.order.clear();
-        self.bytes = 0;
     }
 }
 
@@ -406,7 +369,7 @@ impl GuideImageCache {
             }
             let mut state = lock(&self.state);
             let removed = state
-                .entries
+                .cache
                 .keys()
                 .filter(|url| {
                     !self
@@ -417,10 +380,7 @@ impl GuideImageCache {
                 .cloned()
                 .collect::<Vec<_>>();
             for url in removed {
-                if let Some(value) = state.entries.remove(&url) {
-                    state.bytes -= value.body.len();
-                }
-                state.order.retain(|entry| entry != &url);
+                state.cache.remove(&url);
             }
             drop(state);
             // Do not bump the global generation: unrelated pending downloads remain valid.
@@ -438,13 +398,9 @@ impl GuideImageCache {
         offline: bool,
     ) -> Result<Option<Value>, ImageError> {
         let normalized_url = canonical_image_url(url)?;
-        let key_lock = self.key_locks.retain(&normalized_url);
-        let result = {
-            let _key = lock(&key_lock);
+        self.key_locks.with(&normalized_url, || {
             self.get_locked(&normalized_url, allow_download, offline)
-        };
-        self.key_locks.release(&normalized_url, &key_lock);
-        result
+        })
     }
 
     fn get_locked(
@@ -497,7 +453,7 @@ impl GuideImageCache {
             let mut state = lock(&self.state);
             state.generation = state.generation.wrapping_add(1);
             state.clearing = true;
-            state.clear_memory();
+            state.cache.clear();
         }
 
         let mut files_removed = 0_u64;
@@ -515,7 +471,7 @@ impl GuideImageCache {
 
         {
             let mut state = lock(&self.state);
-            state.clear_memory();
+            state.cache.clear();
             state.clearing = false;
         }
         json!({
@@ -527,7 +483,7 @@ impl GuideImageCache {
     pub fn stats(&self) -> Value {
         let (memory_entries, memory_bytes) = {
             let state = lock(&self.state);
-            (state.entries.len() as u64, state.bytes as u64)
+            (state.cache.len() as u64, state.cache.bytes() as u64)
         };
         let entries = {
             let _disk = lock(&self.disk_lock);
@@ -547,7 +503,10 @@ impl GuideImageCache {
     fn store_memory_if_current(&self, url: &str, value: Arc<ImageData>, generation: u64) {
         let mut state = lock(&self.state);
         if state.generation == generation && !state.clearing {
-            state.store(url, value, self.limits.max_memory_bytes);
+            let bytes = value.body.len();
+            state
+                .cache
+                .insert(url, value, bytes, self.limits.max_memory_bytes);
         }
     }
 

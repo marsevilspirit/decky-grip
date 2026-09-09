@@ -1,3 +1,4 @@
+use crate::byte_lru::ByteLru;
 use crate::guide_html::{
     MAX_LABEL_CHARS, MAX_PAGE_NODES, MAX_PAGE_TEXT_CHARS, MAX_SANITIZED_HTML_BYTES, MAX_SECTIONS,
     heybox_id, localize_guide_images, localized_image_urls, parse_guide_html,
@@ -5,12 +6,12 @@ use crate::guide_html::{
     valid_guide_id, valid_resource_id,
 };
 use crate::guide_images::{GuideImageCache, OrphanImages};
-use crate::{
+use crate::storage::{
     AtomicReplaceError, FileSignature, KeyLockPool, ReadError, atomic_replace, lock,
     read_bounded_regular_file, signature, sync_directory,
 };
 use serde_json::{Map, Value, json};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, FileTimes, OpenOptions};
@@ -97,19 +98,13 @@ impl Error for GuideError {}
 struct MemoEntry {
     signature: FileSignature,
     document: Value,
-    bytes: usize,
 }
 
-#[derive(Default)]
-struct MemoState {
-    entries: HashMap<String, MemoEntry>,
-    order: VecDeque<String>,
-    bytes: usize,
-}
+type MemoState = ByteLru<MemoEntry>;
 
 impl MemoState {
     fn signature(&self, guide_id: &str) -> Option<FileSignature> {
-        Some(self.entries.get(guide_id)?.signature)
+        Some(self.peek(guide_id)?.signature)
     }
 
     fn clone_if_signature(
@@ -119,7 +114,7 @@ impl MemoState {
         updated: FileSignature,
         promote: bool,
     ) -> Option<Value> {
-        let entry = self.entries.get_mut(guide_id)?;
+        let entry = self.peek_mut(guide_id)?;
         if entry.signature != expected {
             return None;
         }
@@ -131,50 +126,9 @@ impl MemoState {
         Some(document)
     }
 
-    fn store(&mut self, guide_id: &str, entry: MemoEntry, limit: usize) {
-        self.remove(guide_id);
-        if limit == 0 || entry.bytes > limit {
-            return;
-        }
-        self.bytes = self.bytes.saturating_add(entry.bytes);
-        self.entries.insert(guide_id.to_owned(), entry);
-        self.order.push_back(guide_id.to_owned());
-        while self.bytes > limit {
-            let Some(oldest) = self.order.pop_front() else {
-                break;
-            };
-            if let Some(removed) = self.entries.remove(&oldest) {
-                self.bytes = self.bytes.saturating_sub(removed.bytes);
-            }
-        }
-    }
-
-    fn remove(&mut self, guide_id: &str) {
-        if let Some(removed) = self.entries.remove(guide_id) {
-            self.bytes = self.bytes.saturating_sub(removed.bytes);
-        }
-        if let Some(index) = self.order.iter().position(|entry| entry == guide_id) {
-            self.order.remove(index);
-        }
-    }
-
-    fn clear(&mut self) {
-        self.entries.clear();
-        self.order.clear();
-        self.bytes = 0;
-    }
-
     #[cfg(test)]
     fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    fn touch(&mut self, guide_id: &str) {
-        // ponytail: O(n) over a byte-bounded cache; use an intrusive list only if profiling says so.
-        if let Some(index) = self.order.iter().position(|entry| entry == guide_id) {
-            self.order.remove(index);
-        }
-        self.order.push_back(guide_id.to_owned());
+        self.len() == 0
     }
 }
 
@@ -272,13 +226,8 @@ impl GuideReader {
 
     pub fn get(&self, guide_id: &str, force_refresh: bool) -> Result<Value, GuideError> {
         validate_guide_id(guide_id)?;
-        let guide_lock = self.guide_locks.retain(guide_id);
-        let result = {
-            let _guard = lock(&guide_lock);
-            self.get_locked(guide_id, force_refresh)
-        };
-        self.guide_locks.release(guide_id, &guide_lock);
-        result
+        self.guide_locks
+            .with(guide_id, || self.get_locked(guide_id, force_refresh))
     }
 
     pub fn get_cached(&self, guide_id: &str) -> Result<Option<Value>, GuideError> {
@@ -302,24 +251,18 @@ impl GuideReader {
         images: &GuideImageCache,
     ) -> Result<Value, GuideError> {
         validate_guide_id(guide_id)?;
-        let guide_lock = self.guide_locks.retain(guide_id);
-        let result = {
-            let _guide = lock(&guide_lock);
-            (|| {
-                let generation = *lock(&self.generation);
-                let (document, from_cache) = if force_refresh {
-                    (self.fetch_and_validate(guide_id, (self.now_ms)())?, false)
-                } else {
-                    match self.read_cache(guide_id)? {
-                        Some(document) => (document, true),
-                        None => (self.fetch_and_validate(guide_id, (self.now_ms)())?, false),
-                    }
-                };
-                self.stage(document, from_cache, generation, images)
-            })()
-        };
-        self.guide_locks.release(guide_id, &guide_lock);
-        result
+        self.guide_locks.with(guide_id, || {
+            let generation = *lock(&self.generation);
+            let (document, from_cache) = if force_refresh {
+                (self.fetch_and_validate(guide_id, (self.now_ms)())?, false)
+            } else {
+                match self.read_cache(guide_id)? {
+                    Some(document) => (document, true),
+                    None => (self.fetch_and_validate(guide_id, (self.now_ms)())?, false),
+                }
+            };
+            self.stage(document, from_cache, generation, images)
+        })
     }
 
     /// Stage untrusted browser output; only commit can publish it after all images are durable.
@@ -355,65 +298,59 @@ impl GuideReader {
         if object["sourceUrl"].as_str() != Some(guide_source_url(guide_id).as_str()) {
             return Err(GuideError::validation("小黑盒文章地址与资源 ID 不匹配"));
         }
-        let guide_lock = self.guide_locks.retain(guide_id);
-        let result = {
-            let _guide = lock(&guide_lock);
-            (|| {
-                let generation = *lock(&self.generation);
-                let sections = object["sections"]
-                    .as_array()
-                    .filter(|sections| !sections.is_empty() && sections.len() <= MAX_SECTIONS)
-                    .ok_or_else(|| GuideError::validation("导入章节无效或过多"))?;
-                let mut document = guide.clone();
-                document.as_object_mut().unwrap().remove("imageUrls");
-                let mut total_nodes = 0;
-                let mut total_text = 0;
-                let mut total_html = 0;
-                for (index, section) in sections.iter().enumerate() {
-                    exact_object(section, &["id", "title", "html"], "导入章节字段无效")
-                        .map_err(|error| GuideError::validation(error.message))?;
-                    let raw = section["html"]
-                        .as_str()
-                        .ok_or_else(|| GuideError::validation("导入正文无效"))?;
-                    let (html, stats) = sanitize_import_fragment(raw).map_err(GuideError::parse)?;
-                    total_nodes += stats.nodes;
-                    total_text += stats.text_chars;
-                    total_html += stats.output_bytes;
-                    if total_nodes > MAX_PAGE_NODES
-                        || total_text > MAX_PAGE_TEXT_CHARS
-                        || total_html > MAX_SANITIZED_HTML_BYTES
-                    {
-                        return Err(GuideError::validation("导入正文超过解析安全限制"));
-                    }
-                    document["sections"][index]["html"] = json!(html);
+        self.guide_locks.with(guide_id, || {
+            let generation = *lock(&self.generation);
+            let sections = object["sections"]
+                .as_array()
+                .filter(|sections| !sections.is_empty() && sections.len() <= MAX_SECTIONS)
+                .ok_or_else(|| GuideError::validation("导入章节无效或过多"))?;
+            let mut document = guide.clone();
+            document.as_object_mut().unwrap().remove("imageUrls");
+            let mut total_nodes = 0;
+            let mut total_text = 0;
+            let mut total_html = 0;
+            for (index, section) in sections.iter().enumerate() {
+                exact_object(section, &["id", "title", "html"], "导入章节字段无效")
+                    .map_err(|error| GuideError::validation(error.message))?;
+                let raw = section["html"]
+                    .as_str()
+                    .ok_or_else(|| GuideError::validation("导入正文无效"))?;
+                let (html, stats) = sanitize_import_fragment(raw).map_err(GuideError::parse)?;
+                total_nodes += stats.nodes;
+                total_text += stats.text_chars;
+                total_html += stats.output_bytes;
+                if total_nodes > MAX_PAGE_NODES
+                    || total_text > MAX_PAGE_TEXT_CHARS
+                    || total_html > MAX_SANITIZED_HTML_BYTES
+                {
+                    return Err(GuideError::validation("导入正文超过解析安全限制"));
                 }
-                document["schemaVersion"] = json!(CACHE_SCHEMA_VERSION);
-                document["offline"] = json!(false);
-                document["fetchedAt"] = json!((self.now_ms)());
-                let document = self.validate_cached_document(guide_id, &document)?;
-                let manifest = object["imageUrls"]
-                    .as_array()
-                    .ok_or_else(|| GuideError::validation("缺少完整图片清单"))?;
-                let mut expected = HashSet::new();
-                for value in manifest {
-                    let url = value
-                        .as_str()
-                        .and_then(|url| crate::guide_images::canonical_image_url(url).ok())
-                        .ok_or_else(|| GuideError::validation("导入图片清单无效"))?;
-                    if !expected.insert(url) {
-                        return Err(GuideError::validation("导入图片清单含重复项"));
-                    }
+                document["sections"][index]["html"] = json!(html);
+            }
+            document["schemaVersion"] = json!(CACHE_SCHEMA_VERSION);
+            document["offline"] = json!(false);
+            document["fetchedAt"] = json!((self.now_ms)());
+            let document = self.validate_cached_document(guide_id, &document)?;
+            let manifest = object["imageUrls"]
+                .as_array()
+                .ok_or_else(|| GuideError::validation("缺少完整图片清单"))?;
+            let mut expected = HashSet::new();
+            for value in manifest {
+                let url = value
+                    .as_str()
+                    .and_then(|url| crate::guide_images::canonical_image_url(url).ok())
+                    .ok_or_else(|| GuideError::validation("导入图片清单无效"))?;
+                if !expected.insert(url) {
+                    return Err(GuideError::validation("导入图片清单含重复项"));
                 }
-                if expected != document_image_urls(&document)? {
-                    return Err(GuideError::validation(
-                        "导入正文与完整图片清单不一致，未保存",
-                    ));
-                }
-                self.stage(document, false, generation, images)
-            })()
-        };
-        self.guide_locks.release(guide_id, &guide_lock);
-        result
+            }
+            if expected != document_image_urls(&document)? {
+                return Err(GuideError::validation(
+                    "导入正文与完整图片清单不一致，未保存",
+                ));
+            }
+            self.stage(document, false, generation, images)
+        })
     }
 
     fn stage(
@@ -478,33 +415,27 @@ impl GuideReader {
         images: &crate::guide_images::GuideImageCache,
     ) -> Result<Value, GuideError> {
         validate_guide_id(guide_id)?;
-        let guide_lock = self.guide_locks.retain(guide_id);
-        let result = {
-            let _guide = lock(&guide_lock);
-            (|| {
-                let _disk = lock(&self.disk_lock);
-                let mut prepared = lock(&self.prepared);
-                let candidate = prepared
-                    .get(guide_id)
-                    .filter(|candidate| {
-                        candidate.token == token && candidate.generation == *lock(&self.generation)
-                    })
-                    .ok_or_else(|| GuideError::cache("下载任务已失效，未替换原指南，请重试"))?;
-                let urls = document_image_urls(&candidate.document)?;
-                let _images = images
-                    .downloaded_guard(&urls)
-                    .map_err(|error| GuideError::cache(error.message()))?;
-                let mut document = candidate.document.clone();
-                document["offline"] = json!(true);
-                self.write_cache_unlocked(&document)?;
-                prepared.remove(guide_id);
-                drop(_images);
-                self.reclaim_images_locked(images, &prepared, OrphanImages::OfflineOnly);
-                Ok(with_cache_status(&document, true, false))
-            })()
-        };
-        self.guide_locks.release(guide_id, &guide_lock);
-        result
+        self.guide_locks.with(guide_id, || {
+            let _disk = lock(&self.disk_lock);
+            let mut prepared = lock(&self.prepared);
+            let candidate = prepared
+                .get(guide_id)
+                .filter(|candidate| {
+                    candidate.token == token && candidate.generation == *lock(&self.generation)
+                })
+                .ok_or_else(|| GuideError::cache("下载任务已失效，未替换原指南，请重试"))?;
+            let urls = document_image_urls(&candidate.document)?;
+            let _images = images
+                .downloaded_guard(&urls)
+                .map_err(|error| GuideError::cache(error.message()))?;
+            let mut document = candidate.document.clone();
+            document["offline"] = json!(true);
+            self.write_cache_unlocked(&document)?;
+            prepared.remove(guide_id);
+            drop(_images);
+            self.reclaim_images_locked(images, &prepared, OrphanImages::OfflineOnly);
+            Ok(with_cache_status(&document, true, false))
+        })
     }
 
     pub fn discard(
@@ -652,52 +583,46 @@ impl GuideReader {
         images: &crate::guide_images::GuideImageCache,
     ) -> Result<Value, GuideError> {
         validate_guide_id(guide_id)?;
-        let guide_lock = self.guide_locks.retain(guide_id);
-        let result = {
-            let _guide = lock(&guide_lock);
-            (|| {
-                let _disk = lock(&self.disk_lock);
-                let path = self.cache_path(guide_id);
-                let metadata = match fs::symlink_metadata(&path) {
-                    Ok(metadata) if metadata.is_file() => Some(metadata),
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-                    _ => {
-                        return Err(GuideError::cache(
-                            "cached guide could not be removed safely",
-                        ));
-                    }
-                };
-                let mut prepared = lock(&self.prepared);
-                let urls = self.referenced_image_urls_locked(&prepared, Some(guide_id))?;
-                let (files_removed, bytes_removed) = if let Some(metadata) = metadata {
-                    fs::remove_file(path)
-                        .map_err(|_| GuideError::cache("cached guide could not be removed"))?;
-                    lock(&self.memo).remove(guide_id);
-                    lock(&self.summaries).remove(guide_id);
-                    sync_directory(&self.cache_directory).map_err(|_| {
-                        GuideError::cache(
-                            "cached guide was removed but its directory could not be synced",
-                        )
-                    })?;
-                    (1, metadata.len())
-                } else {
-                    (0, 0)
-                };
+        self.guide_locks.with(guide_id, || {
+            let _disk = lock(&self.disk_lock);
+            let path = self.cache_path(guide_id);
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.is_file() => Some(metadata),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                _ => {
+                    return Err(GuideError::cache(
+                        "cached guide could not be removed safely",
+                    ));
+                }
+            };
+            let mut prepared = lock(&self.prepared);
+            let urls = self.referenced_image_urls_locked(&prepared, Some(guide_id))?;
+            let (files_removed, bytes_removed) = if let Some(metadata) = metadata {
+                fs::remove_file(path)
+                    .map_err(|_| GuideError::cache("cached guide could not be removed"))?;
                 lock(&self.memo).remove(guide_id);
                 lock(&self.summaries).remove(guide_id);
-                prepared.remove(guide_id);
-                // Preserve offline images until the body deletion is durable.
-                let removed_images = images
-                    .reclaim_unreferenced(&urls, OrphanImages::All)
-                    .map_err(|error| GuideError::cache(error.message()))?;
-                Ok(json!({
-                    "bytesRemoved": bytes_removed + removed_images["bytesRemoved"].as_u64().unwrap_or(0),
-                    "filesRemoved": files_removed + removed_images["filesRemoved"].as_u64().unwrap_or(0),
-                }))
-            })()
-        };
-        self.guide_locks.release(guide_id, &guide_lock);
-        result
+                sync_directory(&self.cache_directory).map_err(|_| {
+                    GuideError::cache(
+                        "cached guide was removed but its directory could not be synced",
+                    )
+                })?;
+                (1, metadata.len())
+            } else {
+                (0, 0)
+            };
+            lock(&self.memo).remove(guide_id);
+            lock(&self.summaries).remove(guide_id);
+            prepared.remove(guide_id);
+            // Preserve offline images until the body deletion is durable.
+            let removed_images = images
+                .reclaim_unreferenced(&urls, OrphanImages::All)
+                .map_err(|error| GuideError::cache(error.message()))?;
+            Ok(json!({
+                "bytesRemoved": bytes_removed + removed_images["bytesRemoved"].as_u64().unwrap_or(0),
+                "filesRemoved": files_removed + removed_images["filesRemoved"].as_u64().unwrap_or(0),
+            }))
+        })
     }
 
     pub fn cache_stats(&self) -> Result<Value, GuideError> {
@@ -710,8 +635,8 @@ impl GuideReader {
             "bytes": entries.iter().map(|entry| entry.size).sum::<u64>(),
             "diskLimitBytes": self.limits.max_disk_bytes as u64,
             "files": entries.len() as u64,
-            "memoryBytes": memo.bytes as u64,
-            "memoryEntries": memo.entries.len() as u64,
+            "memoryBytes": memo.bytes() as u64,
+            "memoryEntries": memo.len() as u64,
             "memoryLimitBytes": self.limits.max_memory_bytes as u64,
         }))
     }
@@ -912,13 +837,13 @@ impl GuideReader {
                 {
                     return Ok(Some(document));
                 }
-                lock(memo).store(
+                lock(memo).insert(
                     guide_id,
                     MemoEntry {
                         signature: touched,
                         document: document.clone(),
-                        bytes,
                     },
+                    bytes,
                     limit,
                 );
             }
@@ -1101,7 +1026,7 @@ impl GuideReader {
             return None;
         }
         let updated = signature(&touched);
-        if let Some(summary) = lock(&self.summaries).entries.get_mut(guide_id) {
+        if let Some(summary) = lock(&self.summaries).peek_mut(guide_id) {
             if summary.signature == expected {
                 summary.signature = updated;
             }
@@ -1201,13 +1126,13 @@ impl GuideReader {
         }
         match fs::symlink_metadata(&cache_path) {
             Ok(metadata) if metadata.is_file() && metadata.len() <= MAX_CACHE_BYTES => {
-                lock(&self.memo).store(
+                lock(&self.memo).insert(
                     document["guideId"].as_str().unwrap(),
                     MemoEntry {
                         signature: signature(&metadata),
                         document: document.clone(),
-                        bytes: payload.len(),
                     },
+                    payload.len(),
                     self.limits.max_memory_bytes,
                 );
             }
@@ -1565,34 +1490,28 @@ mod tests {
 
     #[test]
     fn memo_is_a_byte_bounded_lru_and_does_not_restore_cleared_entries() {
+        let directory = TestDirectory::new("signature.json");
+        fs::write(directory.path(), b"test").unwrap();
+        let file_signature = signature(&fs::metadata(directory.path()).unwrap());
         let entry = |bytes| MemoEntry {
-            signature: FileSignature {
-                device: 0,
-                inode: 0,
-                size: bytes as u64,
-                modified_seconds: 0,
-                modified_nanoseconds: 0,
-                changed_seconds: 0,
-                changed_nanoseconds: 0,
-            },
+            signature: file_signature,
             document: json!({"bytes": bytes}),
-            bytes,
         };
         let mut memo = MemoState::default();
-        memo.store("1", entry(4), 8);
-        memo.store("2", entry(4), 8);
+        memo.insert("1", entry(4), 4, 8);
+        memo.insert("2", entry(4), 4, 8);
         let first_signature = memo.signature("1").unwrap();
         assert!(
             memo.clone_if_signature("1", first_signature, first_signature, true)
                 .is_some()
         );
 
-        memo.store("3", entry(4), 8);
+        memo.insert("3", entry(4), 4, 8);
 
-        assert!(memo.entries.contains_key("1"));
-        assert!(!memo.entries.contains_key("2"));
-        assert!(memo.entries.contains_key("3"));
-        assert_eq!(memo.bytes, 8);
+        assert!(memo.peek("1").is_some());
+        assert!(memo.peek("2").is_none());
+        assert!(memo.peek("3").is_some());
+        assert_eq!(memo.bytes(), 8);
 
         memo.clear();
         assert!(
@@ -1646,7 +1565,9 @@ mod tests {
         assert_eq!(reader.validation_count.load(Ordering::Relaxed), 1);
         assert!(lock(&reader.memo).is_empty());
         assert!(
-            !lock(&reader.summaries).entries["1"]
+            !lock(&reader.summaries)
+                .peek("1")
+                .unwrap()
                 .document
                 .to_string()
                 .contains("html")
@@ -1724,7 +1645,7 @@ mod tests {
             reader.cached_summary(&id, None).unwrap().unwrap();
         };
         load(1, 32);
-        let entry_bytes = lock(&reader.summaries).bytes;
+        let entry_bytes = lock(&reader.summaries).bytes();
         let capacity = MAX_SUMMARY_CACHE_BYTES / entry_bytes;
         assert!(capacity > 1);
         for id in 2..=capacity {
@@ -1734,13 +1655,13 @@ mod tests {
         load(capacity + 1, 32);
         {
             let memo = lock(&reader.summaries);
-            assert!(memo.bytes <= MAX_SUMMARY_CACHE_BYTES);
-            assert!(memo.entries.contains_key("1"));
-            assert!(!memo.entries.contains_key("2"));
+            assert!(memo.bytes() <= MAX_SUMMARY_CACHE_BYTES);
+            assert!(memo.peek("1").is_some());
+            assert!(memo.peek("2").is_none());
         }
         load(99, MAX_SECTIONS); // An individually oversized summary is served but not retained.
-        assert!(!lock(&reader.summaries).entries.contains_key("99"));
-        assert!(lock(&reader.summaries).bytes <= MAX_SUMMARY_CACHE_BYTES);
+        assert!(lock(&reader.summaries).peek("99").is_none());
+        assert!(lock(&reader.summaries).bytes() <= MAX_SUMMARY_CACHE_BYTES);
         assert!(lock(&reader.memo).is_empty());
     }
 

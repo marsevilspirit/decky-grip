@@ -32,7 +32,9 @@ jobs:
           rustup default 1.85.1
 
       - run: pnpm install --frozen-lockfile
-      - run: pnpm run check
+
+      - name: Check and build package
+        run: node scripts/package.mjs
 
       - name: Install browser for layout regression
         run: pnpm exec playwright install --with-deps chromium
@@ -48,29 +50,11 @@ jobs:
           path: test-results/browser/
           if-no-files-found: ignore
 
-      - name: Download Decky CLI
-        run: |
-          curl -fsSL \
-            -o "$RUNNER_TEMP/decky" \
-            https://github.com/SteamDeckHomebrew/cli/releases/download/0.0.7/decky-linux-x86_64
-          echo "0d0f8c127cd3dba12b75f771c786194ca9f4f771b4787ae24de8b1af45af4294  $RUNNER_TEMP/decky" | sha256sum --check -
-          chmod +x "$RUNNER_TEMP/decky"
-
-      - name: Build Decky package
-        run: |
-          mkdir -p "$RUNNER_TEMP/grip-package"
-          sudo "$RUNNER_TEMP/decky" plugin build \
-            -b \
-            -o "$RUNNER_TEMP/grip-package" \
-            -s directory \
-            .
-
-      - name: Restore workspace ownership
-        if: always()
-        run: sudo chown -R "$(id -u):$(id -g)" .
-
       - uses: actions/upload-artifact@v4
         with:
           name: GRIP-${{ github.sha }}
-          path: ${{ runner.temp }}/grip-package/*.zip
+          path: |
+            out/package-*/*.zip
+            out/package-*/package-receipt.json
+            out/package-*/source-receipt.json
           if-no-files-found: error

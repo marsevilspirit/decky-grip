@@ -18,6 +18,32 @@ import {
   snapshotBackend,
 } from "../../scripts/package.mjs";
 
+test("CI and just package share one checked package entry point and retain validation evidence", async () => {
+  const workflow = await readFile(
+    new URL("../../.github/workflows/ci.yml", import.meta.url),
+    "utf8",
+  );
+  const recipes = await readFile(
+    new URL("../../justfile", import.meta.url),
+    "utf8",
+  );
+  assert.equal(workflow.match(/run: node scripts\/package\.mjs/g)?.length, 1);
+  assert.match(recipes, /\npackage:\n\s+node scripts\/package\.mjs\n/);
+  assert.doesNotMatch(
+    workflow,
+    /pnpm run check|Decky CLI|plugin build|\bsudo\b/,
+  );
+  for (const path of [
+    "out/package-*/*.zip",
+    "out/package-*/package-receipt.json",
+    "out/package-*/source-receipt.json",
+    "test-results/browser/",
+  ])
+    assert.ok(workflow.includes(path), `Missing artifact path: ${path}`);
+  assert.match(workflow, /run: pnpm run test:browser/);
+  assert.match(workflow, /if: failure\(\)/);
+});
+
 const elf = () => {
   const bytes = Buffer.alloc(64);
   bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);

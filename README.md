@@ -71,8 +71,8 @@ pnpm run build
 ```
 
 The frontend bundle is written to `dist/index.js`, with the fixed browser-only
-extractor in `dist/heybox-render.js`. Both must be packaged. Decky's custom-backend build
-places `backend/out/grip-sidecar` in the packaged plugin's `bin/` directory.
+extractor in `dist/heybox-render.js`. Both are packaged alongside a freshly built
+Linux x86_64 `grip-sidecar` in the plugin's `bin/` directory.
 Python tests use only the standard library.
 
 Local browser layout regressions run separately from `check`:
@@ -93,6 +93,18 @@ Steam FocusNav, CEF compatibility, physical controller input, or device network/
 CI installs Chromium and runs the same suite; failures retain screenshots and
 traces in `test-results/browser/`. The browser dependency is development-only.
 
+### Code boundaries
+
+`GuideReaderPage` owns the UI and saves checkpoints. `reader/viewport.ts` owns
+document observers, image residency, retry hosts, and frame-coalesced measurement;
+`reader/positioning.ts` shares one cancellable lifecycle for restoration and
+search, while keeping their different timeout rules.
+
+The Rust root only declares modules and exports the runtime. `positions` and
+`reader_positions` keep their distinct schemas; `protocol` validates requests,
+`storage` owns safe file operations and per-key locking, and `byte_lru` provides
+the byte accounting shared by body, summary, and image caches.
+
 ### Deploying from a Mac or Linux workstation
 
 ```bash
@@ -111,6 +123,9 @@ the existing installation at `/home/deck/homebrew/plugins/decky-grip`.
 the current working tree (including uncommitted changes) with the pinned Holo
 Linux x86_64 toolchain, and validates the package. It never ships an old
 `backend/out` binary. Docker layers and the Cargo registry are reused.
+`just package`, deployment, and CI share `scripts/package.mjs`; it runs `check`
+once, then verifies the ELF, ZIP file list, and hashes. CI also runs the browser
+suite and uploads the ZIP with its source and package receipts.
 
 The command backs up the existing plugin **and settings**, uploads and verifies
 the ZIP, then opens **Decky's native reinstall confirmation**. Confirm once on
