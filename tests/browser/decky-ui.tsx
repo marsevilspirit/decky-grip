@@ -126,6 +126,40 @@ export const DialogBodyText = element("div");
 export const DialogControlsSection = element("div");
 export const DialogFooter = element("div");
 export const Focusable = element("div");
+export const ScrollPanel = forwardRef<HTMLElement, Props>(
+  ({ scrollDirection = "y", style, ...props }, ref) => (
+    <Focusable
+      {...props}
+      ref={ref}
+      data-native-scroll-panel={scrollDirection}
+      style={{ overflowY: "auto", overflowX: "hidden", ...(style as object) }}
+    />
+  ),
+);
+export const Field = forwardRef<HTMLElement, Props>(
+  (
+    { label, description, disabled, highlightOnFocus: _highlight, ...props },
+    ref,
+  ) => (
+    <Focusable
+      {...props}
+      ref={ref}
+      data-native-field="true"
+      className={[props.className, disabled && "Disabled"]
+        .filter(Boolean)
+        .join(" ")}
+      onOKButton={props.onClick}
+    >
+      <div data-native-field-label>{label as ReactNode}</div>
+      <div data-native-field-description>{description as ReactNode}</div>
+      {props.children}
+    </Focusable>
+  ),
+);
+// Layout boundary only: Steam owns the real focus-driven marquee animation.
+export const Marquee = ({ children }: Props) => (
+  <div data-native-marquee>{children}</div>
+);
 // No installed Steam runtime in the fixture: the reader reports its compatibility fallback.
 export const findModuleExport = () => undefined;
 export const Spinner = () => <span role="status">正在处理…</span>;

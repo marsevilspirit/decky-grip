@@ -4,11 +4,15 @@ import {
   DialogBodyText,
   DialogButton,
   DialogHeader,
-  Focusable,
+  Field as SteamField,
+  Marquee,
   ModalRoot,
+  ScrollPanel as SteamScrollPanel,
   SimpleModal,
+  type FieldProps,
+  type FocusableProps,
 } from "@decky/ui";
-import { useRef, useState } from "react";
+import { useRef, useState, type FC } from "react";
 
 import type { CacheClearResult, GuideLibraryEntry } from "../backend";
 import { isHeyboxGuideId, makeGuideKey } from "../steam/guide-key";
@@ -28,13 +32,13 @@ export interface GuideSwitcherProps {
   onRemove: (entry: GuideLibraryEntry) => Promise<CacheClearResult>;
 }
 
-const SWITCHER_CSS = `
-.grip-guide-row { display: flex; margin-bottom: 12px; }
-.grip-reader-guide-switcher .grip-guide-choice {
-  flex: 1; min-width: 0; height: auto;
-  text-align: left; white-space: normal; overflow-wrap: anywhere;
-}
-`;
+// The original Steam Field forwards these navigation/DOM props; Decky's declaration omits them.
+const Field = SteamField as FC<
+  FieldProps & { role: "button"; tabIndex: number; preferredFocus?: boolean }
+>;
+const ScrollPanel = SteamScrollPanel as FC<
+  FocusableProps & { scrollDirection: "y" }
+>;
 
 function titleFor(entry: GuideLibraryEntry): string {
   return (
@@ -139,10 +143,10 @@ export function GuideSwitcher({
         closeModal={closeSwitcher}
         onCancel={closeSwitcher}
       >
-        <style>{SWITCHER_CSS}</style>
         <DialogHeader>本游戏指南</DialogHeader>
         <DialogBody>
-          <Focusable
+          <ScrollPanel
+            scrollDirection="y"
             data-grip-guide-list="true"
             flow-children="column"
             onCancel={(event) => {
@@ -157,7 +161,6 @@ export function GuideSwitcher({
             }}
             style={{
               maxHeight: "65vh",
-              overflowY: "auto",
             }}
           >
             {entries === null && !listError && !error && (
@@ -197,55 +200,57 @@ export function GuideSwitcher({
               const failed = failedEntry === entry;
               const result = removeResults[entry.guideId];
               return (
-                <div
+                <Field
                   key={key}
-                  className="grip-guide-row"
+                  role="button"
+                  tabIndex={0}
+                  highlightOnFocus
+                  focusable
+                  disabled={!current && pendingKey !== null}
                   data-grip-guide-row={key}
-                >
-                  <DialogButton
-                    className="grip-guide-choice"
-                    disabled={!current && pendingKey !== null}
-                    focusable
-                    data-grip-guide-choice={key}
-                    data-current={current ? "true" : undefined}
-                    aria-current={current ? "page" : undefined}
-                    aria-busy={pending}
-                    aria-disabled={!current && pendingKey !== null}
-                    aria-label={`${current ? "返回阅读" : "打开指南"}：${titleFor(entry)}`}
-                    preferredFocus={entry === preferredEntry}
-                    onOKActionDescription={
-                      current
-                        ? "返回阅读"
-                        : pendingKey !== null
-                          ? null
-                          : failed
-                            ? "重试打开"
-                            : "打开指南"
+                  data-grip-guide-choice={key}
+                  data-current={current ? "true" : undefined}
+                  aria-current={current ? "page" : undefined}
+                  aria-busy={pending}
+                  aria-disabled={!current && pendingKey !== null}
+                  aria-label={`${current ? "返回阅读" : "打开指南"}：${titleFor(entry)}`}
+                  preferredFocus={entry === preferredEntry}
+                  onOKActionDescription={
+                    current
+                      ? "返回阅读"
+                      : pendingKey !== null
+                        ? null
+                        : failed
+                          ? "重试打开"
+                          : "打开指南"
+                  }
+                  onSecondaryActionDescription={
+                    pendingKey === null ? "管理指南" : null
+                  }
+                  onSecondaryButton={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    if (!event.detail.is_repeat) openManagement(entry);
+                  }}
+                  onClick={() => {
+                    // Field's disabled prop only styles the row; both native A and clicks reach here.
+                    if (removalInFlight.current || confirming) return;
+                    if (current) {
+                      onClose();
+                      return;
                     }
-                    onSecondaryActionDescription={
-                      pendingKey === null ? "管理指南" : null
-                    }
-                    onSecondaryButton={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      if (!event.detail.is_repeat) openManagement(entry);
-                    }}
-                    onClick={() => {
-                      if (removalInFlight.current || confirming) return;
-                      if (current) {
-                        onClose();
-                        return;
-                      }
-                      if (pendingKey !== null) return;
-                      setChosenKey(key);
-                      onChoose(entry);
-                    }}
-                  >
-                    <div style={{ minWidth: 0, width: "100%" }}>
-                      <div>
-                        {current ? "正在阅读 · " : ""}
-                        {titleFor(entry)}
-                      </div>
+                    if (pendingKey !== null) return;
+                    setChosenKey(key);
+                    onChoose(entry);
+                  }}
+                  label={
+                    <Marquee>
+                      {current ? "正在阅读 · " : ""}
+                      {titleFor(entry)}
+                    </Marquee>
+                  }
+                  description={
+                    <>
                       {entry.cache?.author && (
                         <div>
                           {isHeyboxGuideId(entry.guideId) ? "小黑盒 · " : ""}
@@ -275,12 +280,12 @@ export function GuideSwitcher({
                           "未下载离线副本，打开时将下载正文"
                         )}
                       </div>
-                    </div>
-                  </DialogButton>
-                </div>
+                    </>
+                  }
+                />
               );
             })}
-          </Focusable>
+          </ScrollPanel>
         </DialogBody>
       </ModalRoot>
       <SimpleModal active={confirming}>

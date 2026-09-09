@@ -67,6 +67,54 @@ export function mockDeckyElement(
   });
 }
 
+export function mockScrollPanel(
+  keyboard?: Parameters<typeof mockDeckyElement>[1],
+) {
+  const Panel = mockDeckyElement("div", keyboard);
+  return forwardRef<HTMLElement, MockDeckyProps>(
+    ({ scrollDirection = "y", ...props }, ref) =>
+      createElement(Panel, {
+        ...props,
+        ref,
+        "data-native-scroll-panel": scrollDirection,
+      }),
+  );
+}
+
+// Steam Field supplies native label/description layout and maps onClick to activation.
+// Unlike DialogButton, its disabled prop does not suppress either event path.
+export function mockField(keyboard?: Parameters<typeof mockDeckyElement>[1]) {
+  const Field = mockDeckyElement("div", keyboard);
+  return forwardRef<HTMLElement, MockDeckyProps>(
+    ({ label, description, disabled, highlightOnFocus, ...props }, ref) =>
+      createElement(Field, {
+        onOKButton: props.onActivate ?? props.onClick,
+        ...props,
+        ref,
+        "data-native-field": true,
+        "data-native-highlight-on-focus": highlightOnFocus,
+        className: ["Field", props.className, disabled && "Disabled"]
+          .filter(Boolean)
+          .join(" "),
+        children: [
+          label &&
+            createElement(
+              "div",
+              { key: "label", className: "FieldLabel" },
+              label as ReactNode,
+            ),
+          description &&
+            createElement(
+              "div",
+              { key: "description", className: "FieldDescription" },
+              description as ReactNode,
+            ),
+          props.children,
+        ],
+      }),
+  );
+}
+
 // Structural test boundary only; Steam owns the real portal, focus tree and return stack.
 export function mockSimpleModal({ active = true, children }: MockDeckyProps) {
   const host = useRef<HTMLDivElement>(null);

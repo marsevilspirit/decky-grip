@@ -43,6 +43,13 @@ test("1280×800: browser focus and Tab reveal long-list cards without scrolling 
   await page.keyboard.press("F2");
   const choices = page.locator("[data-grip-guide-choice]");
   await expect(choices).toHaveCount(20);
+  await expect(page.locator("[data-grip-guide-list]")).toHaveAttribute(
+    "data-native-scroll-panel",
+    "y",
+  );
+  await expect(choices.first()).toHaveAttribute("data-native-field", "true");
+  await expect(choices.first().locator("[data-native-marquee]")).toHaveCount(1);
+  await expect(choices.first().locator("button")).toHaveCount(0);
   await expectChoiceInsideList(choices.nth(1));
   // Chromium owns this focus/scroll behavior; the fixture does not emulate Steam spatial navigation.
   await choices.last().focus();

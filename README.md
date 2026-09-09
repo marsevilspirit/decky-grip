@@ -123,6 +123,26 @@ Steam progress takes a 0–100 percentage. A disabled DialogButton retains its
 focusable DOM node; its native disabled styling and event blocking are not the
 same contract as an HTML button's `disabled` attribute.
 
+The UI composition was cross-checked against public source on 2026-09-09:
+
+- [SteamGridDB's focusable Field](https://github.com/SteamGridDB/decky-steamgriddb/blob/271c01d9ba5a775e573f5a15ad0786ff9beb00ae/src/components/qam-contents/QuickAccessSettings.tsx#L187-L203)
+  and [native Marquee titles](https://github.com/SteamGridDB/decky-steamgriddb/blob/271c01d9ba5a775e573f5a15ad0786ff9beb00ae/src/modals/GameSelectionModal.tsx#L47-L59)
+  inform the guide rows: native label/description, one activation target, and no
+  GRIP card CSS. Field's disabled state is visual only, so the action guard is
+  still required for both clicks and A. The list uses native `ScrollPanel`;
+  its resize/focus scrolling is deliberately excluded from the article.
+- [Decky's template](https://github.com/SteamDeckHomebrew/decky-plugin-template/blob/90d0780e882a17f5714fc6de044c645f22608290/src/index.tsx)
+  places each `ButtonItem` in its own `PanelSectionRow`. GRIP puts the short
+  action in the button and the explanation in `description`, not button text.
+- [TabMaster's scrolling wrapper](https://github.com/Tormak9970/TabMaster/blob/cd01770a80a37e0692e76ad8083719c15205f5d9/src/components/generic/ScrollableWindow.tsx#L49-L74)
+  explicitly disables group focus. GRIP does not adopt the extra group-enter
+  step or its custom gradients/scrollbar. Its pinned `@decky/ui` 4.12.0 includes
+  the upstream [Field locator compatibility fix](https://github.com/SteamDeckHomebrew/decky-frontend-lib/blob/247eb635ea7acdc3e7807d5f99722daf854aaa70/src/components/Field.ts#L27-L30).
+
+These are API composition references, not a copied theme or implementation.
+The browser adapters test behavior/layout, not Valve's visuals, marquee motion,
+or physical controller timing; those still require Steam Deck acceptance.
+
 `GuideReaderPage` owns the UI and saves checkpoints. `reader/viewport.ts` owns
 document observers, image residency, retry hosts, and frame-coalesced measurement;
 `reader/positioning.ts` shares one cancellable lifecycle for restoration and

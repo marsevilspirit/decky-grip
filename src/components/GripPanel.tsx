@@ -300,73 +300,69 @@ export function GripPanel({
         {openImport && (
           <PanelSectionRow>
             <ButtonItem
-              label={
-                opening === "import" ? (
-                  <BusyLabel>正在打开导入窗口…</BusyLabel>
-                ) : (
-                  "导入攻略"
-                )
-              }
+              description="从小黑盒分享链接保存完整离线图文"
               layout="below"
               disabled={readerBusy || cacheBusy}
               onClick={() => runOpen("import")}
             >
-              从小黑盒分享链接保存完整离线图文
+              {opening === "import" ? (
+                <BusyLabel>正在打开导入窗口…</BusyLabel>
+              ) : (
+                "导入攻略"
+              )}
             </ButtonItem>
           </PanelSectionRow>
         )}
         <PanelSectionRow>
           <ButtonItem
             disabled={readerBusy || cacheBusy}
-            label={
-              opening === "reader" ? (
-                <BusyLabel>正在打开 GRIP 阅读器…</BusyLabel>
-              ) : (
-                "继续当前或最近指南"
-              )
-            }
+            description="优先继续当前游戏正在查看的指南"
             layout="below"
             onClick={() => runOpen("reader")}
           >
-            优先继续当前游戏正在查看的指南
+            {opening === "reader" ? (
+              <BusyLabel>正在打开 GRIP 阅读器…</BusyLabel>
+            ) : (
+              "继续当前或最近指南"
+            )}
           </ButtonItem>
         </PanelSectionRow>
         {status.positionWarning && (
-          <PanelSectionRow>
-            <div>
+          <>
+            <PanelSectionRow>
               <div className={gamepadDialogClasses.FieldDescription}>
                 {status.positionWarning}
               </div>
+            </PanelSectionRow>
+            <PanelSectionRow>
               <ButtonItem
                 disabled={positionBusy !== null}
-                label={
-                  positionBusy === "retry" ? (
-                    <BusyLabel>正在重试…</BusyLabel>
-                  ) : (
-                    "重试读取位置"
-                  )
-                }
+                description="不会影响已缓存的指南正文"
                 layout="below"
                 onClick={() => void runPositionAction("retry")}
               >
-                不会影响已缓存的指南正文
+                {positionBusy === "retry" ? (
+                  <BusyLabel>正在重试…</BusyLabel>
+                ) : (
+                  "重试读取位置"
+                )}
               </ButtonItem>
+            </PanelSectionRow>
+            <PanelSectionRow>
               <ButtonItem
                 disabled={positionBusy !== null}
-                label={
-                  positionBusy === "repair" ? (
-                    <BusyLabel>正在备份并重置…</BusyLabel>
-                  ) : (
-                    "备份并重置损坏位置"
-                  )
-                }
+                description="仅在校验失败时备份原文件并重置"
                 layout="below"
                 onClick={() => void runPositionAction("repair")}
               >
-                仅在校验失败时备份原文件并重置
+                {positionBusy === "repair" ? (
+                  <BusyLabel>正在备份并重置…</BusyLabel>
+                ) : (
+                  "备份并重置损坏位置"
+                )}
               </ButtonItem>
-            </div>
-          </PanelSectionRow>
+            </PanelSectionRow>
+          </>
         )}
         {repairMessage && (
           <PanelSectionRow>
@@ -509,13 +505,7 @@ export function GripPanel({
               <PanelSectionRow>
                 <ButtonItem
                   disabled={cacheBusy || cacheStatsLoading}
-                  label={
-                    cacheStatsLoading ? (
-                      <BusyLabel>正在读取…</BusyLabel>
-                    ) : (
-                      "重试读取缓存用量"
-                    )
-                  }
+                  description="仅重新读取统计，不会修改缓存或阅读位置"
                   layout="below"
                   onClick={() => {
                     if (
@@ -526,40 +516,40 @@ export function GripPanel({
                       setCacheStatsRevision((value) => value + 1);
                   }}
                 >
-                  仅重新读取统计，不会修改缓存或阅读位置
+                  {cacheStatsLoading ? (
+                    <BusyLabel>正在读取…</BusyLabel>
+                  ) : (
+                    "重试读取缓存用量"
+                  )}
                 </ButtonItem>
               </PanelSectionRow>
             )}
             <PanelSectionRow>
               <ButtonItem
                 disabled={cacheBusy || readerBusy}
-                label={
-                  cacheBusyKey === "clear-guides" ? (
-                    <BusyLabel>正在清除…</BusyLabel>
-                  ) : (
-                    "清除指南正文缓存"
-                  )
-                }
+                description="包括已下载正文；保留阅读位置，下次需要联网下载"
                 layout="below"
                 onClick={() => confirmCacheAction("guides")}
               >
-                包括已下载正文；保留阅读位置，下次需要联网下载
+                {cacheBusyKey === "clear-guides" ? (
+                  <BusyLabel>正在清除…</BusyLabel>
+                ) : (
+                  "清除指南正文缓存"
+                )}
               </ButtonItem>
             </PanelSectionRow>
             <PanelSectionRow>
               <ButtonItem
                 disabled={cacheBusy || readerBusy}
-                label={
-                  cacheBusyKey === "clear-images" ? (
-                    <BusyLabel>正在清除…</BusyLabel>
-                  ) : (
-                    "清除图片缓存"
-                  )
-                }
+                description="包括离线图片；正文和阅读位置保留"
                 layout="below"
                 onClick={() => confirmCacheAction("images")}
               >
-                包括离线图片；正文和阅读位置保留
+                {cacheBusyKey === "clear-images" ? (
+                  <BusyLabel>正在清除…</BusyLabel>
+                ) : (
+                  "清除图片缓存"
+                )}
               </ButtonItem>
             </PanelSectionRow>
           </PanelSection>

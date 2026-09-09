@@ -204,6 +204,180 @@ test("installed Valve components retain the GRIP native UI contracts", async (t)
     },
   );
 
+  await t.test(
+    "Field owns row highlighting and activation, but disabled still needs an action guard",
+    () => {
+      const code = nativeFunction(
+        bundle.source,
+        "spacingBetweenLabelAndChild:",
+      );
+      assert.ok(code.includes("scrollIntoViewWhenChildFocused"));
+      const context = {};
+      const [jsx] = symbols(code, /\b([$\w]+)\.jsxs\b/);
+      context[jsx] = { jsx: element, jsxs: element };
+      const [react] = symbols(code, /\b([$\w]+)\.useRef\(/);
+      context[react] = {
+        useRef: (current) => ({ current }),
+        useCallback: (fn) => fn,
+      };
+      bind(
+        context,
+        symbols(code, /className:\(0,([$\w]+)\.([$\w]+)\)/),
+        classNames,
+      );
+      const [styles] = symbols(code, /\b([$\w]+)\(\)\.Field\b/);
+      context[styles] = () => new Proxy({}, { get: (_, name) => name });
+      bind(
+        context,
+        symbols(code, /,[$\w]+=\(0,([$\w]+)\.([$\w]+)\)\(\),P=/),
+        () => false,
+      );
+      bind(
+        context,
+        symbols(code, /const r=\(0,([$\w]+)\.([$\w]+)\)\(\)/),
+        () => ({}),
+      );
+      bind(
+        context,
+        symbols(code, /\(0,([$\w]+)\.([$\w]+)\)\(ie,e\.navRef\)/),
+        (ref) => ref,
+      );
+      bind(
+        context,
+        symbols(
+          code,
+          /return\(0,[$\w]+\.jsxs\)\(([$\w]+)\.([$\w]+),\{focusable:/,
+        ),
+        "focusable",
+      );
+      const [labelId] = symbols(code, /id:([$\w]+)\(r\)/);
+      const [descriptionId] = symbols(code, /accessibilityId:([$\w]+)\(r\)/);
+      context[labelId] = (id) => `${id}_Label`;
+      context[descriptionId] = (id) => `${id}_Description`;
+      const [description] = symbols(code, /d&&\(0,[$\w]+\.jsx\)\(([$\w]+),/);
+      context[description] = "description";
+      let activations = 0;
+      const onClick = () => {
+        activations++;
+      };
+      for (const disabled of [false, true]) {
+        const field = render(code, context, {
+          label: "Guide title",
+          description: "Author and reading position",
+          focusable: true,
+          disabled,
+          onClick,
+        });
+        assert.equal(field.type, "focusable");
+        assert.equal(field.props.focusable, true);
+        assert.equal(field.props.scrollIntoViewWhenChildFocused, true);
+        assert.ok(field.props.className.includes("HighlightOnFocus"));
+        assert.equal(
+          field.props.className.split(" ").includes("Disabled"),
+          disabled,
+        );
+        assert.equal(field.props.onClick, onClick);
+        field.props.onActivate(new Event("activate"));
+      }
+      // Native Field's disabled prop is presentation only, unlike DialogButton.
+      assert.equal(activations, 2);
+      t.diagnostic(`Field function SHA256 ${sha256(code)}`);
+    },
+  );
+
+  await t.test(
+    "ScrollPanel wraps the native focus ring without adding an A-to-enter level",
+    () => {
+      const code = nativeFunction(bundle.source, '{case"x":');
+      const context = {};
+      bind(context, symbols(code, /\b([$\w]+)\.(jsx)\b/), element);
+      const [styles] = symbols(code, /\b([$\w]+)\(\)\.ScrollX\b/);
+      context[styles] = () => ({
+        ScrollPanel: "ScrollPanel",
+        ScrollX: "ScrollX",
+        ScrollY: "ScrollY",
+        ScrollBoth: "ScrollBoth",
+      });
+      const [classes] = symbols(code, /className:([$\w]+)\(\)\(/);
+      context[classes] = () => classNames;
+      bind(
+        context,
+        symbols(code, /\.jsx\)\(([$\w]+)\.([$\w]+),\{\.\.\./),
+        "native-focusable",
+      );
+      bind(
+        context,
+        symbols(code, /children:\(0,[$\w]+\.jsx\)\(([$\w]+)\.([$\w]+),/),
+        "native-focus-ring",
+      );
+      const resizeRef = { current: null };
+      const registeredNavRef = { current: null };
+      bind(
+        context,
+        symbols(code, /navRef:[$\w]+\}=\(0,([$\w]+)\.([$\w]+)\)\(\)/),
+        () => ({ ref: resizeRef, navRef: registeredNavRef }),
+      );
+      bind(
+        context,
+        symbols(code, /\(0,([$\w]+)\.([$\w]+)\)\([$\w]+,[$\w]+\.navRef\)/),
+        (...refs) =>
+          (value) => {
+            for (const ref of refs) {
+              if (typeof ref === "function") ref(value);
+              else if (ref) ref.current = value;
+            }
+          },
+      );
+      const forwardedRef = { current: null };
+      const navRef = { current: null };
+      const onCancel = () => {};
+      const onOptionsButton = () => {};
+      const children = { type: "guide-list" };
+      const panel = new Script(
+        `(${code})(input, forwardedRef)`,
+      ).runInNewContext(
+        {
+          ...context,
+          forwardedRef,
+          input: {
+            scrollDirection: "y",
+            "flow-children": "column",
+            className: "guide-switcher-list",
+            style: { maxHeight: "65vh" },
+            onCancel,
+            onOptionsButton,
+            navRef,
+            children,
+          },
+        },
+        { timeout: 1000 },
+      );
+      assert.equal(panel.type, "native-focusable");
+      assert.equal(
+        panel.props.className,
+        "guide-switcher-list ScrollPanel ScrollY",
+      );
+      assert.equal(panel.props["flow-children"], "column");
+      assert.equal(panel.props.style.maxHeight, "65vh");
+      assert.equal(panel.props.onCancel, onCancel);
+      assert.equal(panel.props.onOptionsButton, onOptionsButton);
+      for (const prop of ["focusable", "onOKButton", "onCancelButton"]) {
+        assert.equal(Object.hasOwn(panel.props, prop), false);
+      }
+      assert.equal(panel.props.children.type, "native-focus-ring");
+      assert.equal(panel.props.children.props.children, children);
+      const domNode = {};
+      panel.props.ref(domNode);
+      assert.equal(forwardedRef.current, domNode);
+      assert.equal(resizeRef.current, domNode);
+      const navNode = {};
+      panel.props.navRef(navNode);
+      assert.equal(navRef.current, navNode);
+      assert.equal(registeredNavRef.current, navNode);
+      t.diagnostic(`ScrollPanel function SHA256 ${sha256(code)}`);
+    },
+  );
+
   const libraryPath = join(steamUiDirectory, "library.js");
   const library = readFileSync(libraryPath, "utf8");
   t.diagnostic(

@@ -40,6 +40,8 @@ vi.mock("@decky/ui", async () => {
     mockSimpleModal,
     mockModalRoot,
     mockConfirmModal,
+    mockField,
+    mockScrollPanel,
   } = await import("./helpers/decky-ui");
   const keyboard = (props: MockProps) => {
     const onCancel = props.onCancel as
@@ -122,6 +124,10 @@ vi.mock("@decky/ui", async () => {
     ConfirmModal: mockConfirmModal,
     DialogBody: mockDeckyElement("div"),
     DialogButton: mockDialogButton(keyboard),
+    Field: mockField(keyboard),
+    ScrollPanel: mockScrollPanel(keyboard),
+    Marquee: ({ children }: MockProps) =>
+      createElement("div", { "data-native-marquee": true }, children),
     DialogHeader: mockDeckyElement("div"),
     DialogBodyText: mockDeckyElement("div"),
     gamepadDialogClasses: {
@@ -2263,7 +2269,8 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(dialog?.closest("[data-native-modal]")).not.toBeNull();
     expect(dialog?.classList.contains("grip-reader-guide-switcher")).toBe(true);
     const currentGuide = dialog?.querySelector('[aria-current="page"]');
-    expect(currentGuide?.tagName).toBe("BUTTON");
+    expect(currentGuide?.getAttribute("role")).toBe("button");
+    expect(currentGuide?.getAttribute("data-native-field")).toBe("true");
     expect(currentGuide?.textContent).toContain("正在阅读 · 组件回归指南");
     expect(container?.querySelector(".grip-reader-guide-enter")).toBeNull();
     expect(page?.classList.contains("steam-dialog-content")).toBe(true);

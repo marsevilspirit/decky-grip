@@ -69,12 +69,30 @@ vi.mock("@decky/ui", () => {
           ),
         ),
       ),
-    ButtonItem: ({ children, disabled, label, onClick }: MockProps) =>
-      createElement("button", { disabled, onClick }, label, children),
+    ButtonItem: ({
+      children,
+      description,
+      disabled,
+      label,
+      onClick,
+    }: MockProps) =>
+      createElement(
+        "div",
+        { "data-native-button-item": true },
+        label &&
+          createElement("div", { "data-native-field-label": true }, label),
+        description &&
+          createElement(
+            "div",
+            { "data-native-field-description": true },
+            description,
+          ),
+        createElement("button", { disabled, onClick }, children),
+      ),
     PanelSection: ({ children, title }: MockProps) =>
       createElement("section", null, title, children),
     PanelSectionRow: ({ children }: MockProps) =>
-      createElement("div", null, children),
+      createElement("div", { "data-native-panel-row": true }, children),
     Spinner: () => createElement("span"),
     ToggleField: ({
       checked,
@@ -472,6 +490,48 @@ describe("GripPanel", () => {
     expect(panelText()).not.toContain("移除此指南的正文缓存");
     expect(panelText()).toContain("L4 检测后首屏门禁");
     expect(panelText()).toContain("从后端读到 L4 开始计时");
+  });
+
+  it("puts every QAM action in its own row with a short button and a separate native description", async () => {
+    const status = new RuntimeStatusStore("1113000");
+    status.update({ positionWarning: "位置文件损坏" });
+    await mount({
+      status,
+      openImport: async () => {},
+      getCacheStats: async () => {
+        throw new Error("统计暂不可用");
+      },
+    });
+    await act(async () => button("高级选项").click());
+    const descriptions = new Map([
+      ["导入攻略", "从小黑盒分享链接保存完整离线图文"],
+      ["继续当前或最近指南", "优先继续当前游戏正在查看的指南"],
+      ["重试读取位置", "不会影响已缓存的指南正文"],
+      ["备份并重置损坏位置", "仅在校验失败时备份原文件并重置"],
+      ["重试读取缓存用量", "仅重新读取统计，不会修改缓存或阅读位置"],
+      ["清除指南正文缓存", "包括已下载正文；保留阅读位置，下次需要联网下载"],
+      ["清除图片缓存", "包括离线图片；正文和阅读位置保留"],
+    ]);
+    const items = [...container!.querySelectorAll("[data-native-button-item]")];
+    expect(items).toHaveLength(descriptions.size);
+    for (const item of items) {
+      const action = item.querySelector("button")!;
+      const description = item.querySelector(
+        "[data-native-field-description]",
+      )!;
+      expect(descriptions.has(action.textContent!)).toBe(true);
+      expect(description.textContent).toBe(
+        descriptions.get(action.textContent!),
+      );
+      expect(action.textContent).not.toContain(description.textContent!);
+      expect(item.querySelector("[data-native-field-label]")).toBeNull();
+      expect(item.parentElement?.hasAttribute("data-native-panel-row")).toBe(
+        true,
+      );
+      expect(
+        item.parentElement?.querySelectorAll("[data-native-button-item]"),
+      ).toHaveLength(1);
+    }
   });
 
   it("keeps reader opening feedback and allows retry after a failed open", async () => {

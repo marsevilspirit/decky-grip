@@ -18,6 +18,8 @@ vi.mock("@decky/ui", async () => {
   const {
     mockDeckyElement,
     mockDialogButton,
+    mockField,
+    mockScrollPanel,
     mockSimpleModal,
     mockModalRoot,
     mockConfirmModal,
@@ -69,6 +71,10 @@ vi.mock("@decky/ui", async () => {
   return {
     Button,
     DialogButton: mockDialogButton(keyboard),
+    Field: mockField(keyboard),
+    ScrollPanel: mockScrollPanel(keyboard),
+    Marquee: ({ children }: MockDeckyProps) =>
+      createElement("div", { "data-native-marquee": true }, children),
     SimpleModal: mockSimpleModal,
     ModalRoot: mockModalRoot,
     ConfirmModal: vi.fn(mockConfirmModal),
@@ -147,7 +153,7 @@ describe("GuideSwitcher", () => {
     await act(async () => vi.advanceTimersByTimeAsync(0));
   };
   const choice = (id: string) =>
-    container.querySelector<HTMLButtonElement>(
+    container.querySelector<HTMLElement>(
       `[data-grip-guide-choice="10:${id}"]`,
     )!;
   const dialog = () =>
@@ -187,12 +193,16 @@ describe("GuideSwitcher", () => {
       node.dispatchEvent(
         value === "GamepadCancel"
           ? gamepadEvent("onCancel", GamepadButton.CANCEL, options.repeat)
-          : new KeyboardEvent(type, {
-              key: value,
-              bubbles: true,
-              cancelable: true,
-              ...options,
-            }),
+          : value === "Enter" &&
+              type === "keydown" &&
+              node.hasAttribute("data-native-field")
+            ? gamepadEvent("onOKButton", GamepadButton.OK, options.repeat)
+            : new KeyboardEvent(type, {
+                key: value,
+                bubbles: true,
+                cancelable: true,
+                ...options,
+              }),
       ),
     );
     await act(async () => vi.advanceTimersByTimeAsync(0));
@@ -205,7 +215,8 @@ describe("GuideSwitcher", () => {
     );
     expect(container.querySelector("input")).toBeNull();
     expect(container.querySelector("[data-grip-guide-manage]")).toBeNull();
-    expect(container.querySelectorAll("button")).toHaveLength(3);
+    expect(container.querySelectorAll('[role="button"]')).toHaveLength(3);
+    expect(container.querySelectorAll("button")).toHaveLength(0);
     for (const id of ["1", "2", "3"])
       expect(choice(id).getAttribute("data-secondary-action")).toBe("管理指南");
     expect(document.activeElement).toBe(choice("2"));
@@ -332,7 +343,7 @@ describe("GuideSwitcher", () => {
     await render({ pendingKey: "10:3" });
     expect(choice("3")).toBe(target);
     expect(document.activeElement).toBe(target);
-    expect(target.disabled).toBe(false);
+    expect(target.hasAttribute("disabled")).toBe(false);
     expect(target.classList.contains("Disabled")).toBe(true);
     expect(target.getAttribute("data-native-focusable")).toBe("true");
     expect(choice("2").classList.contains("Disabled")).toBe(true);
@@ -353,6 +364,7 @@ describe("GuideSwitcher", () => {
       container.querySelector('[role="dialog"][aria-label^="管理指南："]'),
     ).toBeNull();
     await click(target);
+    await key(target, "Enter");
     expect(props.onChoose).toHaveBeenCalledOnce();
     await render({ pendingKey: null, error: "指南打开失败：读取失败" });
     expect(document.activeElement).toBe(target);
@@ -410,11 +422,19 @@ describe("GuideSwitcher", () => {
     expect(container.querySelector(".DialogHeader")?.textContent).toBe(
       "本游戏指南",
     );
-    expect(target.classList.contains("DialogButton")).toBe(true);
-    expect(target.type).toBe("button");
+    expect(target.classList.contains("Field")).toBe(true);
+    expect(target.tagName).toBe("DIV");
+    expect(target.getAttribute("role")).toBe("button");
+    expect(target.tabIndex).toBe(0);
+    expect(target.getAttribute("data-native-highlight-on-focus")).toBe("true");
+    expect(
+      target.querySelector(".FieldLabel [data-native-marquee]")?.textContent,
+    ).toBe(longEntry.cache!.title);
     expect(target.textContent).toContain(longEntry.cache!.title);
     expect(target.textContent).toContain("作者 2");
-    expect(target.querySelector('[class*="FieldDescription"]')).toBeNull();
+    expect(target.querySelector(".FieldDescription")?.textContent).toContain(
+      "作者 2",
+    );
     expect(
       [...target.querySelectorAll("div")].every((node) => !node.style.color),
     ).toBe(true);
@@ -425,12 +445,7 @@ describe("GuideSwitcher", () => {
     expect(target.hasAttribute("data-pressed")).toBe(false);
     await act(async () => choice("3").focus());
     expect(target.hasAttribute("data-focused")).toBe(false);
-    const css = container.querySelector("style")!.textContent!;
-    expect(css).toContain("white-space: normal");
-    expect(css).toContain("overflow-wrap: anywhere");
-    expect(css).not.toMatch(
-      /background|color|border|shadow|animation|transition|transform|:focus|:active/,
-    );
+    expect(container.querySelector("style")).toBeNull();
     expect(dialog().style.background).toBe("");
     await manage("2");
     const confirmation = container.querySelector(
@@ -457,7 +472,8 @@ describe("GuideSwitcher", () => {
       "[data-grip-guide-list]",
     )!;
     expect(list.dataset.nativeFlow).toBe("column");
-    expect(list.style.overflowY).toBe("auto");
+    expect(list.dataset.nativeScrollPanel).toBe("y");
+    expect(list.style.overflowY).toBe("");
     for (const key of ["ArrowUp", "ArrowDown", "Home", "End", "Tab", "x"]) {
       const event = new KeyboardEvent("keydown", {
         key,
