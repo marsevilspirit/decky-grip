@@ -3,7 +3,7 @@ use crate::guide_images::{GuideImageCache, ImageError, ImageErrorKind};
 use crate::guides::{GuideError, GuideErrorKind, GuideReader};
 use crate::hotkey::{HotkeyEvent, L4HotkeyMonitor};
 use crate::import_sessions::{CaptureJob, ImportSessions};
-use crate::positions::{PositionStore, valid_id};
+use crate::positions::{MAX_POSITIONS, PositionStore, valid_id};
 use crate::protocol::{
     MAX_REQUEST_BYTES, dispatch, empty_params, params_with_fields, protocol_info, request_fields,
 };
@@ -382,16 +382,22 @@ fn dispatch_general(
                 }
             };
             let mut entries = Vec::new();
-            for entry in reader_store.recent(app_id, GUIDE_LIBRARY_LIMIT)? {
-                let cache = guides
+            for entry in reader_store.recent(app_id, MAX_POSITIONS)? {
+                let Some(cache) = guides
                     .cached_summary(&entry.guide_id, entry.section_id.as_deref())
-                    .map_err(RequestError::Guide)?;
+                    .map_err(RequestError::Guide)?
+                else {
+                    continue;
+                };
                 entries.push(json!({
                     "appId": entry.app_id,
                     "cache": cache,
                     "guideId": entry.guide_id,
                     "updatedAt": entry.updated_at_ms,
                 }));
+                if entries.len() == GUIDE_LIBRARY_LIMIT {
+                    break;
+                }
             }
             Ok(Value::Array(entries))
         }
@@ -872,6 +878,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::io::Cursor;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::atomic::AtomicUsize;
     use std::time::{Duration, Instant};
 
@@ -885,10 +892,10 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone();
-            String::from_utf8(bytes)
-                .unwrap()
-                .lines()
-                .map(|line| serde_json::from_str(line).unwrap())
+            bytes
+                .split_inclusive(|byte| *byte == b'\n')
+                .filter(|line| line.ends_with(b"\n"))
+                .map(|line| serde_json::from_slice(line).unwrap())
                 .collect()
         }
     }
@@ -905,6 +912,55 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    // Close before thread::scope joins on either normal exit or a test panic.
+    struct CloseQueueOnDrop<'a>(&'a GeneralQueue);
+
+    impl Drop for CloseQueueOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.close();
+        }
+    }
+
+    #[test]
+    fn shared_output_waits_for_complete_records_even_inside_utf8() {
+        let mut output = SharedOutput::default();
+        let first = json!({"id": 1});
+        write_message(&Arc::new(Mutex::new(&mut output)), &first).unwrap();
+        let second = json!({"id": 2, "text": "图片指南"});
+        for byte in serde_json::to_vec(&second).unwrap() {
+            output.write_all(&[byte]).unwrap();
+            assert_eq!(output.messages(), vec![first.clone()]);
+        }
+        output.write_all(b"\n").unwrap();
+        assert_eq!(output.messages(), vec![first, second]);
+    }
+
+    #[test]
+    fn shared_output_does_not_hide_invalid_complete_records() {
+        for invalid in [b"{broken}".as_slice(), b"\xff".as_slice()] {
+            let mut output = SharedOutput::default();
+            output.write_all(invalid).unwrap();
+            assert!(output.messages().is_empty());
+            output.write_all(b"\n").unwrap();
+            assert!(catch_unwind(|| output.messages()).is_err());
+        }
+    }
+
+    #[test]
+    fn test_panic_closes_queue_and_disconnects_mock_release() {
+        let queue = GeneralQueue::default();
+        let (release, receiver) = mpsc::channel::<()>();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _close_requests = CloseQueueOnDrop(&queue);
+            let _release = release;
+            panic!("simulated assertion failure before worker cleanup");
+        }));
+        assert!(result.is_err());
+        assert!(lock(&queue.state).closed);
+        assert_eq!(receiver.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+        assert!(queue.recv().is_none());
     }
 
     fn missing_roots() -> (PathBuf, PathBuf, PathBuf) {
@@ -1258,7 +1314,7 @@ mod tests {
             test_root.join("guides"),
             move |_, _, _| {
                 started.send(()).unwrap();
-                release_receiver.lock().unwrap().recv().unwrap();
+                let _ = release_receiver.lock().unwrap().recv();
                 Err(GuideError::download("download failed"))
             },
             || 0,
@@ -1285,6 +1341,10 @@ mod tests {
         let mut output = output;
 
         thread::scope(|scope| {
+            let close_requests = CloseQueueOnDrop(&general_requests);
+            // Dropping the sender on an assertion failure also releases the mock fetcher.
+            let release = release;
+            let store_requests = store_requests;
             let writer = Arc::new(Mutex::new(&mut output));
             let store = PositionStore::new(test_root.join("positions.json"));
             let reader_store = ReaderPositionStore::new(test_root.join("reader_positions.json"));
@@ -1328,7 +1388,7 @@ mod tests {
 
             release.send(()).unwrap();
             drop(store_requests);
-            general_requests.close();
+            drop(close_requests);
             store_worker.join().unwrap();
             guide_worker.join().unwrap();
         });
@@ -1364,7 +1424,7 @@ mod tests {
                     && fetch_calls.fetch_add(1, Ordering::SeqCst) == 0
                 {
                     started.send(()).unwrap();
-                    release_receiver.lock().unwrap().recv().unwrap();
+                    let _ = release_receiver.lock().unwrap().recv();
                 }
                 Err(GuideError::download("download failed"))
             },
@@ -1392,6 +1452,8 @@ mod tests {
         let mut before_release = Vec::new();
 
         thread::scope(|scope| {
+            let close_requests = CloseQueueOnDrop(&requests);
+            let release = release;
             let writer = Arc::new(Mutex::new(&mut output));
             let mut workers = Vec::new();
             for _ in 0..GENERAL_WORKERS {
@@ -1439,7 +1501,7 @@ mod tests {
             }
             before_release = output_copy.messages();
             release.send(()).unwrap();
-            requests.close();
+            drop(close_requests);
             for worker in workers {
                 worker.join().unwrap();
             }
@@ -1490,7 +1552,7 @@ mod tests {
                 test_root.join("images"),
                 move |_, _, _| {
                     started.send(()).unwrap();
-                    release_receiver.lock().unwrap().recv().unwrap();
+                    let _ = release_receiver.lock().unwrap().recv();
                     Err(ImageError::download("download failed"))
                 },
                 crate::guide_images::ImageLimits::default(),
@@ -1520,6 +1582,8 @@ mod tests {
         let mut before_release = Vec::new();
 
         thread::scope(|scope| {
+            let close_requests = CloseQueueOnDrop(&requests);
+            let release = release;
             let writer = Arc::new(Mutex::new(&mut output));
             let mut workers = Vec::new();
             for _ in 0..GENERAL_WORKERS {
@@ -1571,7 +1635,7 @@ mod tests {
             for _ in 0..6 {
                 let _ = release.send(());
             }
-            requests.close();
+            drop(close_requests);
             for worker in workers {
                 worker.join().unwrap();
             }
@@ -1625,6 +1689,7 @@ mod tests {
         let mut output = output;
 
         thread::scope(|scope| {
+            let close_requests = CloseQueueOnDrop(&requests);
             let writer = Arc::new(Mutex::new(&mut output));
             let mut workers = Vec::new();
             for _ in 0..GENERAL_WORKERS {
@@ -1648,7 +1713,7 @@ mod tests {
                 .is_some_and(|response| response["id"] == 2);
 
             drop(monitor_guard);
-            requests.close();
+            drop(close_requests);
             for worker in workers {
                 worker.join().unwrap();
             }

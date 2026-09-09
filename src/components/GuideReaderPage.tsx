@@ -534,6 +534,7 @@ export function GuideReaderPage({
         ? loadedRef.current
         : null;
     const fallback = cached ?? held;
+    const forceRefresh = refreshGeneration > 0 && fallback !== null;
     setLoaded(fallback);
     setLoading(fallback === null);
     setError(null);
@@ -541,13 +542,13 @@ export function GuideReaderPage({
     setSaveError(null);
     setRestoreWarning(null);
     cache
-      .load(identity, { forceRefresh: refreshGeneration > 0 })
+      .load(identity, { forceRefresh })
       .then((snapshot) => {
         if (!canceled) {
           let displaySnapshot = retainGuideForStaleRefresh(
             loadedRef.current,
             snapshot,
-            refreshGeneration > 0,
+            forceRefresh,
           );
           if (
             refreshScrolledRef.current &&
@@ -579,11 +580,11 @@ export function GuideReaderPage({
                 })
               : null;
           setLoaded(displaySnapshot);
-          if (refreshGeneration > 0 && !snapshot.guide.stale) {
+          if (forceRefresh && !snapshot.guide.stale) {
             setOfflineRemoved(false);
             setGuideSwitcherRevision((revision) => revision + 1);
           }
-          if (refreshGeneration > 0 && snapshot.guide.stale) {
+          if (forceRefresh && snapshot.guide.stale) {
             setLoadWarning("更新失败，继续使用本地缓存。");
           }
           performance.markCacheReady(
@@ -1291,7 +1292,9 @@ export function GuideReaderPage({
       : null,
   };
   const guideChoices = guideLibrary
-    ? guideChoicesForReader(guideLibrary, currentGuideEntry)
+    ? guideChoicesForReader(guideLibrary, currentGuideEntry).filter(
+        (entry) => !offlineRemoved || entry.guideId !== identity.guideId,
+      )
     : null;
   const readerWarning =
     (downloadTask?.phase === "downloading" && downloadProgress?.error
@@ -1418,11 +1421,8 @@ export function GuideReaderPage({
               if (entry.guideId === identity.guideId) setOfflineRemoved(true);
               setGuideLibrary(
                 (entries) =>
-                  entries?.map((saved) =>
-                    saved.guideId === entry.guideId
-                      ? { ...saved, cache: null }
-                      : saved,
-                  ) ?? null,
+                  entries?.filter((saved) => saved.guideId !== entry.guideId) ??
+                  null,
               );
               return result;
             } finally {
@@ -1487,7 +1487,7 @@ export function GuideReaderPage({
         >
           {showLoadingIndicator ? (
             <>
-              <Spinner /> 正在下载并整理指南…
+              <Spinner /> 正在读取本地指南…
             </>
           ) : null}
         </div>

@@ -228,7 +228,16 @@ describe("GuideDownloadButton", () => {
     expect(container.querySelector("button")).toBeNull();
     expect(button()).toBeNull();
 
-    await render(firstGuide);
+    for (const identity of [firstGuide, secondGuide, firstGuide]) {
+      await render(identity);
+      expect(getDownloadStatus).toHaveBeenLastCalledWith(identity.guideId);
+      expect(button()?.textContent).toBe("下载到 GRIP");
+      expect(downloadGuide).not.toHaveBeenCalled();
+      await act(async () => button()?.focus());
+      expect(document.activeElement).toBe(button());
+      expect(downloadGuide).not.toHaveBeenCalled();
+      expect(openGuide).not.toHaveBeenCalled();
+    }
     expect(button()?.parentElement?.dataset.gripGuideActions).toBe("true");
     expect(button()?.parentElement?.parentElement).toBe(portalTarget);
     expect(button()?.textContent).toBe("下载到 GRIP");
@@ -240,6 +249,7 @@ describe("GuideDownloadButton", () => {
     expect(button()?.textContent).toBe("取消下载");
     expect(portalTarget.textContent).toContain("正在下载指南正文…");
     expect(downloadGuide).toHaveBeenCalledOnce();
+    expect(downloadGuide.mock.calls[0][0]).toEqual(firstGuide);
     expect(downloadGuide.mock.calls[0][2].aborted).toBe(false);
     await act(async () => {
       downloadGuide.mock.calls[0][1]?.({ completed: 13, total: 61 });

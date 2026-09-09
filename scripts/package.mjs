@@ -193,19 +193,44 @@ export async function buildPackage({ signal } = {}) {
       2,
     ) + "\n",
   );
-  // Docker's cached toolchain layer and registry cache are reusable; /tmp/grip-target is fresh per run.
+  const metadataFile = join(directory, "builder-metadata.json");
   await run(
     "docker",
     [
       "build",
       "--platform",
       "linux/amd64",
+      // This local-only builder needs a stable ID, not a timestamped provenance index.
+      "--provenance=false",
+      "--metadata-file",
+      metadataFile,
       "-t",
       "decky-grip-package-builder",
       backend,
     ],
     { signal },
   );
+  // Containerd resolves manifest IDs; the classic Docker store resolves config IDs.
+  const builderMetadata = JSON.parse(await readFile(metadataFile, "utf8"));
+  let imageId = builderMetadata["containerimage.digest"];
+  if (!/^sha256:[a-f0-9]{64}$/.test(imageId))
+    throw new Error("Docker returned an invalid builder image ID");
+  try {
+    await run("docker", ["image", "inspect", imageId], {
+      capture: true,
+      signal,
+    });
+  } catch {
+    imageId = builderMetadata["containerimage.config.digest"];
+    if (!/^sha256:[a-f0-9]{64}$/.test(imageId))
+      throw new Error("Docker returned an invalid builder image ID");
+    await run("docker", ["image", "inspect", imageId], {
+      capture: true,
+      signal,
+    });
+  }
+  // Isolate compiler/linker/sysroot changes, and run the image we built even if the tag moves.
+  const targetVolume = `decky-grip-cargo-target-${imageId.slice(7)}`;
   await run(
     "docker",
     [
@@ -217,7 +242,9 @@ export async function buildPackage({ signal } = {}) {
       `type=bind,src=${backend},dst=/backend`,
       "--mount",
       "type=volume,src=decky-grip-cargo-registry,dst=/.cargo/registry",
-      "decky-grip-package-builder",
+      "--mount",
+      `type=volume,src=${targetVolume},dst=/tmp/grip-target`,
+      imageId,
     ],
     { signal },
   );

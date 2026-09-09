@@ -141,6 +141,10 @@ fn browser_import_and_reader_history_round_trip_without_relaxing_native_position
         50.0
     );
     assert_eq!(
+        call("guides.list", json!({"app_id": "1113000"}))["result"],
+        json!([])
+    );
+    assert_eq!(
         call("imports.phone_get", json!({"session_id": "missing"}))["result"],
         json!({"state": "expired"})
     );
@@ -637,20 +641,24 @@ fn guide_library_joins_recent_reader_positions_with_cached_metadata() {
         .unwrap(),
     )
     .unwrap();
-    fs::write(
-        guides_path.join("3414883877.json"),
-        serde_json::to_vec(&json!({
-            "author": "测试作者",
-            "fetchedAt": 1,
-            "guideId": "3414883877",
-            "schemaVersion": 1,
-            "sections": [{"html": "<p>正文</p>", "id": "7667220", "title": "四月"}],
-            "sourceUrl": "https://steamcommunity.com/sharedfiles/filedetails/?id=3414883877&l=schinese",
-            "title": "完整攻略",
-        }))
-        .unwrap(),
-    )
-    .unwrap();
+    for guide_id in ["3414883877", "3414883879"] {
+        fs::write(
+            guides_path.join(format!("{guide_id}.json")),
+            serde_json::to_vec(&json!({
+                "author": "测试作者",
+                "fetchedAt": 1,
+                "guideId": guide_id,
+                "schemaVersion": 1,
+                "sections": [{"html": "<p>正文</p>", "id": "7667220", "title": "四月"}],
+                "sourceUrl": format!("https://steamcommunity.com/sharedfiles/filedetails/?id={guide_id}&l=schinese"),
+                "title": "完整攻略",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    let reader_history = fs::read(&reader_positions_path).unwrap();
+    let other_body = fs::read(guides_path.join("3414883879.json")).unwrap();
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_grip-sidecar"))
         .arg(&positions_path)
@@ -668,17 +676,17 @@ fn guide_library_joins_recent_reader_positions_with_cached_metadata() {
         &json!({"id": 1, "method": "guides.list", "params": {"app_id": "1113000"}}),
     );
     assert_eq!(current_app["ok"], true);
-    assert_eq!(current_app["result"].as_array().unwrap().len(), 2);
+    assert_eq!(current_app["result"].as_array().unwrap().len(), 1);
     assert_eq!(current_app["result"][0]["guideId"], "3414883877");
     assert_eq!(current_app["result"][0]["cache"]["title"], "完整攻略");
     assert_eq!(current_app["result"][0]["cache"]["sectionTitle"], "四月");
-    assert_eq!(current_app["result"][1]["cache"], Value::Null);
 
     let all = send_and_read_response(
         &mut input,
         &mut output,
         &json!({"id": 2, "method": "guides.list", "params": {"app_id": null}}),
     );
+    assert_eq!(all["result"].as_array().unwrap().len(), 2);
     assert_eq!(all["result"][0]["appId"], "222");
     assert_eq!(all["result"][1]["appId"], "1113000");
 
@@ -700,7 +708,20 @@ fn guide_library_joins_recent_reader_positions_with_cached_metadata() {
         &mut output,
         &json!({"id": 5, "method": "guides.list", "params": {"app_id": "1113000"}}),
     );
-    assert_eq!(after_remove["result"][0]["cache"], Value::Null);
+    assert_eq!(after_remove["result"], json!([]));
+    let remaining = send_and_read_response(
+        &mut input,
+        &mut output,
+        &json!({"id": 6, "method": "guides.list", "params": {"app_id": null}}),
+    );
+    assert_eq!(remaining["result"].as_array().unwrap().len(), 1);
+    assert_eq!(remaining["result"][0]["guideId"], "3414883879");
+    assert!(!guides_path.join("3414883877.json").exists());
+    assert_eq!(fs::read(&reader_positions_path).unwrap(), reader_history);
+    assert_eq!(
+        fs::read(guides_path.join("3414883879.json")).unwrap(),
+        other_body
+    );
 
     drop(input);
     output.read_to_end(&mut Vec::new()).unwrap();
@@ -708,11 +729,11 @@ fn guide_library_joins_recent_reader_positions_with_cached_metadata() {
 }
 
 #[test]
-fn guide_library_returns_twenty_recent_entries() {
+fn guide_library_returns_twenty_cached_entries_after_newer_missing_bodies() {
     let directory = TestDirectory::new();
     let positions_path = directory.0.join("positions.json");
     let reader_positions_path = directory.0.join("reader_positions.json");
-    let reader_positions = (1_u64..=27)
+    let reader_positions = (1_u64..=52)
         .map(|guide_id| {
             (
                 format!("1:{guide_id}"),
@@ -721,7 +742,7 @@ fn guide_library_returns_twenty_recent_entries() {
                     "anchor_text": null,
                     "scroll_top": 0,
                     "section_id": null,
-                    "updated_at_ms": 3000 - guide_id * 100,
+                    "updated_at_ms": 10_000 - guide_id * 100,
                 }),
             )
         })
@@ -735,6 +756,24 @@ fn guide_library_returns_twenty_recent_entries() {
         .unwrap(),
     )
     .unwrap();
+    let guides_path = directory.0.join("guides");
+    fs::create_dir(&guides_path).unwrap();
+    for guide_id in 26_u64..=52 {
+        fs::write(
+            guides_path.join(format!("{guide_id}.json")),
+            serde_json::to_vec(&json!({
+                "author": "Author",
+                "fetchedAt": 1,
+                "guideId": guide_id.to_string(),
+                "schemaVersion": 1,
+                "sections": [{"html": "<p>Body</p>", "id": "1", "title": "Chapter"}],
+                "sourceUrl": format!("https://steamcommunity.com/sharedfiles/filedetails/?id={guide_id}&l=schinese"),
+                "title": "Guide",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
     let mut child = Command::new(env!("CARGO_BIN_EXE_grip-sidecar"))
         .arg(&positions_path)
         .stdin(Stdio::piped())
@@ -752,8 +791,9 @@ fn guide_library_returns_twenty_recent_entries() {
     assert_eq!(response["ok"], true);
     let entries = response["result"].as_array().unwrap();
     assert_eq!(entries.len(), 20);
-    for (entry, guide_id) in entries.iter().zip(1_u64..=20) {
+    for (entry, guide_id) in entries.iter().zip(26_u64..=45) {
         assert_eq!(entry["guideId"], guide_id.to_string());
+        assert_eq!(entry["cache"]["title"], "Guide");
         assert!(entry.get("favorite").is_none());
     }
 

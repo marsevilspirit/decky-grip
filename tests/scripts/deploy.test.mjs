@@ -9,12 +9,32 @@ import {
   evaluate,
   installExpression,
   quote,
+  RPC_CHECK,
   SSH_OPTIONS,
   validateHost,
   verifyInstalled,
   verifySettings,
   waitFor,
 } from "../../scripts/deploy.mjs";
+
+test("deployment preserves downloaded guides without requiring old uninstalled placeholders", async () => {
+  const cached = { appId: "1113000", guideId: "2130870345", cache: {} };
+  const removed = { appId: "1113000", guideId: "2977774727", cache: null };
+  for (const entries of [[cached, removed], [cached]]) {
+    const result = await vm.runInNewContext(RPC_CHECK, {
+      DeckyBackend: {
+        call: async (_method, _plugin, method) =>
+          method === "get_guide_library"
+            ? entries
+            : { running: true, available: true },
+      },
+      DeckyPluginLoader: { plugins: [{ name: "GRIP" }] },
+    });
+    assert.deepEqual(Array.from(result.guides), ["1113000:2130870345"]);
+    assert.equal(result.loaded, true);
+    assert.equal(result.hotkey.running, true);
+  }
+});
 
 test("SSH inputs cannot become command options or shell expansions", () => {
   for (const host of ["deck", "deck@steamdeck.local", "deck@172.20.10.2"])

@@ -233,6 +233,7 @@ test("uninstalling B preserves A's reading position and B's bookmark while C rem
   page,
 }) => {
   const guideC = "3414883879";
+  const guideD = "3414883880";
   const confirmation = page.getByRole("dialog", { name: /^管理指南：/ });
   let removals = 0;
   let release!: () => void;
@@ -242,15 +243,17 @@ test("uninstalling B preserves A's reading position and B's bookmark while C rem
   await page.route(`**/fixture/remove/${guideB}`, async (route) => {
     expect(route.request().method()).toBe("DELETE");
     removals++;
-    if (removals === 2) {
-      await route.fulfill({
-        status: 503,
-        body: "残留图片清理失败（测试注入）",
-      });
-      return;
-    }
     await heldResponse;
     await route.fulfill({ status: 204 });
+  });
+  let cleanupAttempts = 0;
+  await page.route(`**/fixture/remove/${guideC}`, async (route) => {
+    cleanupAttempts++;
+    await route.fulfill(
+      cleanupAttempts === 1
+        ? { status: 503, body: "残留图片清理失败（测试注入）" }
+        : { status: 204 },
+    );
   });
   try {
     await page.goto("/?scenario=journey");
@@ -302,8 +305,8 @@ test("uninstalling B preserves A's reading position and B's bookmark while C rem
     await expectRestored(page, positionA);
     release();
     await expect(confirmation).toHaveCount(0);
-    await expect(choice(page, guideB)).toContainText("离线副本已卸载");
-    await expect(choice(page, guideB)).toBeFocused();
+    await expect(choice(page, guideB)).toHaveCount(0);
+    await expect(choice(page, guideC)).toBeFocused();
     await expect(choice(page, guideC)).toHaveAttribute(
       "aria-disabled",
       "false",
@@ -323,40 +326,40 @@ test("uninstalling B preserves A's reading position and B's bookmark while C rem
     await expectReader(page, guideA);
     await expectRestored(page, positionA);
     await page.keyboard.press("F2");
-    await expect(choice(page, guideB)).toContainText("未下载离线副本");
-    await choice(page, guideB).press("F3");
+    await expect(choice(page, guideB)).toHaveCount(0);
+    await expect(choice(page, guideC)).toBeFocused();
+    await choice(page, guideC).press("F3");
+    await expect(confirmation).toHaveAccessibleName(/^管理指南：第 3 篇/);
+    const uninstall = confirmation.getByRole("button", { name: "确认卸载" });
+    await expect(uninstall).not.toHaveClass(/\bDisabled\b/);
+    expect(removals).toBe(1);
+    await uninstall.click();
+    await expect(confirmation.getByRole("alert")).toContainText(
+      "残留图片清理失败（测试注入）",
+    );
+    await expect(choice(page, guideC)).toHaveCount(0);
+    await expect(confirmation).toHaveAccessibleName(/^管理指南：第 3 篇/);
+    await expect.poll(() => cleanupAttempts).toBe(1);
+    await expectRestored(page, positionA);
+
+    // The open confirmation retains its target even though the body is no longer in the library.
     const cleanRemaining = confirmation.getByRole("button", {
       name: "确认清理残留",
     });
     await expect(cleanRemaining).not.toHaveClass(/\bDisabled\b/);
-    expect(removals).toBe(1);
     await cleanRemaining.click();
-    await expect(confirmation.getByRole("alert")).toContainText(
-      "残留图片清理失败（测试注入）",
-    );
-    await expect.poll(() => removals).toBe(2);
-    await expectRestored(page, positionA);
-    await confirmation.getByRole("button", { name: "取消" }).click();
+    await expect.poll(() => cleanupAttempts).toBe(2);
     await expect(confirmation).toHaveCount(0);
-    await expect(choice(page, guideB)).toBeFocused();
-
-    // Retry eligibility must survive closing management, not depend on its old error state.
-    await choice(page, guideB).press("F3");
-    await expect(confirmation.getByRole("alert")).toHaveCount(0);
-    await expect(cleanRemaining).not.toHaveClass(/\bDisabled\b/);
-    await cleanRemaining.click();
-    await expect.poll(() => removals).toBe(3);
-    await expect(confirmation).toHaveCount(0);
-    await expect(choice(page, guideB)).toContainText("离线副本已卸载");
-    await expect(choice(page, guideB)).toBeFocused();
-    await choice(page, guideC).press("F3");
-    await expect(confirmation).toHaveAccessibleName(/^管理指南：第 3 篇/);
+    await expect(choice(page, guideC)).toHaveCount(0);
+    await expect(choice(page, guideD)).toBeFocused();
+    await choice(page, guideD).press("F3");
+    await expect(confirmation).toHaveAccessibleName(/^管理指南：第 4 篇/);
     await expect(
       confirmation.getByRole("button", { name: "确认卸载" }),
     ).not.toHaveClass(/\bDisabled\b/);
     await confirmation.getByRole("button", { name: "取消" }).click();
-    await expect(choice(page, guideC)).toBeFocused();
-    expect(removals).toBe(3);
+    await expect(choice(page, guideD)).toBeFocused();
+    expect(removals).toBe(1);
     expect((await savedPosition(page, guideB))?.anchorText).toBe(
       positionB.anchorText,
     );
@@ -366,4 +369,38 @@ test("uninstalling B preserves A's reading position and B's bookmark while C rem
   } finally {
     release();
   }
+});
+
+test("uninstalling the current guide removes its row while the open article and bookmark survive", async ({
+  page,
+}) => {
+  await page.goto("/?scenario=journey");
+  await expectReader(page, guideA);
+  await scrollDown(page, 12);
+  const positionA = await rememberPosition(page, guideA);
+  await page.keyboard.press("F2");
+  await choice(page, guideA).click({ button: "right" });
+  const confirmation = page.getByRole("dialog", { name: /^管理指南：/ });
+  await confirmation.getByRole("button", { name: "确认卸载" }).click();
+  await expect(confirmation).toHaveCount(0);
+  await expect(choice(page, guideA)).toHaveCount(0);
+  await expect(choice(page, guideB)).toBeFocused();
+  expect((await savedPosition(page, guideA))?.anchorText).toBe(
+    positionA.anchorText,
+  );
+  await page.keyboard.press("Escape");
+  await expectReader(page, guideA);
+  await expectRestored(page, positionA);
+  await page.keyboard.press("F2");
+  await expect(choice(page, guideA)).toHaveCount(0);
+  await choice(page, guideB).press("Enter");
+  await expectReader(page, guideB);
+  await page.reload();
+  await expectReader(page, guideB);
+  await page.keyboard.press("F2");
+  await expect(choice(page, guideA)).toHaveCount(0);
+  await expect(choice(page, guideB)).toHaveCount(1);
+  expect((await savedPosition(page, guideA))?.scrollTop).toBe(
+    positionA.scrollTop,
+  );
 });

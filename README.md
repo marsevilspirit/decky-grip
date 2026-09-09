@@ -193,7 +193,14 @@ the existing installation at `/home/deck/homebrew/plugins/decky-grip`.
 `just deploy` checks connectivity and Decky first, runs `pnpm run check`, builds
 the current working tree (including uncommitted changes) with the pinned Holo
 Linux x86_64 toolchain, and validates the package. It never ships an old
-`backend/out` binary. Docker layers and the Cargo registry are reused.
+`backend/out` binary. Docker layers, the Cargo registry, and compiled Linux
+dependencies are reused. The target cache lives in a named volume on the
+workstation's Docker host, not on the Deck, and is isolated by the exact builder
+image ID. Every build still rebuilds GRIP itself from the current snapshot;
+a shared lock covers compilation through copying the binary out, so concurrent
+packages cannot pick up each other's output. The local-only builder disables
+timestamped provenance attestations to keep that image/cache ID stable; the
+pinned toolchain digest and source/package validation receipts remain unchanged.
 `just package`, deployment, and CI share `scripts/package.mjs`; it runs `check`
 once, then verifies the ELF, ZIP file list, and hashes. CI also runs the browser
 suite and uploads the ZIP with its source and package receipts.
@@ -300,9 +307,11 @@ See [implementation and acceptance notes](docs/heybox-import.md).
 GRIP leaves discovery to Steam's native guide list. The download action appears
 only while a specific native guide is open.
 
-The download action fetches the public guide; if you skip it, the first
-foreground reader open does the same. After that, GRIP preloads the most recent
-guide only when its validated local cache already exists, and keeps that document
+Only explicit **下载到 GRIP**, **补全下载**, or **更新** actions fetch guide content.
+Opening Steam guides or the GRIP reader never starts a download; missing local
+guides prompt you to download from the Steam guide page first. Reading and image
+retries use local files only. GRIP preloads the most recent guide only when its
+validated local cache already exists, and keeps that document
 and reader position in memory for the lifetime of the plugin.
 Background preloading also prepares and decodes up to three local images near
 the saved text in its section and adjacent sections, using the same bounded
@@ -416,9 +425,11 @@ choose **确认卸载**. **A** opens or resumes reading; each card has no separa
 management button. The confirmation names the target guide; it does not need
 to be the one currently being read.
 This removes its body and all unreferenced images, including leftovers from
-older updates, while preserving other cached guides and active downloads. If
-the body is already gone after partial cleanup, **确认清理残留** retries image
-cleanup, even after canceling or reopening the reader. The same shared-image
+older updates, while preserving other cached guides and active downloads.
+Uninstalled guides disappear from the switcher immediately and stay absent
+after reopening; reading-history entries without a body are not listed. If
+the body is already gone after partial cleanup, the open confirmation can retry
+image cleanup. The same shared-image
 and active-download protections apply. If another guide cannot be inspected
 safely, deletion stops. The current in-memory
 article remains readable. Cache deletion is unavailable during an active

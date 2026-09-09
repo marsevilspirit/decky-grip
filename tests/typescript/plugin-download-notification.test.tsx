@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import createPlugin from "../../src/index";
 import type { GripPanelProps } from "../../src/components/GripPanel";
+import type { GuideReaderPageProps } from "../../src/components/GuideReaderPage";
 import type {
   ImportGuideDraft,
   ImportGuideModal,
@@ -44,6 +45,13 @@ const steam = vi.hoisted(() => ({
     ) => void
   >(),
   navigate: vi.fn(),
+  addRoute:
+    vi.fn<
+      (
+        path: string,
+        component: () => ReactElement<GuideReaderPageProps>,
+      ) => void
+    >(),
 }));
 
 // Keep index, the controller, download transaction/task manager, session cache and
@@ -60,7 +68,7 @@ vi.mock("@decky/api", () => ({
   addEventListener: (_event: string, listener: unknown) => listener,
   removeEventListener: vi.fn(),
   routerHook: {
-    addRoute: vi.fn(),
+    addRoute: steam.addRoute,
     removeRoute: vi.fn(),
     addGlobalComponent: steam.addGlobalComponent,
     removeGlobalComponent: vi.fn(),
@@ -78,7 +86,7 @@ vi.mock("@decky/ui", () => ({
   },
   showModal: steam.showModal,
   staticClasses: { Title: "title" },
-  useParams: vi.fn(),
+  useParams: () => ({ appId: "1113000", guideId: "123" }),
   beforePatch: vi.fn(),
   getGamepadNavigationTrees: () => [],
   getReactInstance: () => null,
@@ -145,7 +153,10 @@ describe("plugin download completion notification", () => {
     steam.backend.save_reader_position.mockResolvedValue(position);
     steam.backend.prepare_guide.mockResolvedValue({ token: "prepared", guide });
     steam.backend.download_guide_image.mockResolvedValue({ saved: true });
-    steam.backend.commit_guide.mockResolvedValue(guide);
+    steam.backend.commit_guide.mockImplementation(async () => {
+      steam.backend.get_cached_guide.mockResolvedValue(guide);
+      return guide;
+    });
     steam.backend.discard_guide.mockResolvedValue(true);
     plugin = createPlugin();
     ({ downloads, status } = steam.addGlobalComponent.mock.calls[0][1]().props);
@@ -154,6 +165,51 @@ describe("plugin download completion notification", () => {
     plugin.onDismount?.();
     await Promise.resolve();
     vi.restoreAllMocks();
+  });
+
+  it("only reads local content when a Steam guide is observed or opened, until an explicit download", async () => {
+    const { cache } = steam.addRoute.mock.calls[0][1]().props;
+    status.update({ activeGuide: identity });
+    await vi.waitFor(() =>
+      expect(steam.backend.get_cached_guide).toHaveBeenCalledWith(
+        identity.guideId,
+      ),
+    );
+    expect(steam.backend.get_guide).not.toHaveBeenCalled();
+    expect(steam.backend.prepare_guide).not.toHaveBeenCalled();
+    expect(downloads.getSnapshot(identity.guideId)).toBeNull();
+
+    await expect(cache.load(identity)).rejects.toThrow("下载到 GRIP");
+    expect(steam.backend.get_guide).not.toHaveBeenCalled();
+    expect(steam.backend.prepare_guide).not.toHaveBeenCalled();
+    expect(steam.backend.download_guide_image).not.toHaveBeenCalled();
+    expect(steam.backend.commit_guide).not.toHaveBeenCalled();
+
+    await downloads.start(identity);
+    expect(steam.backend.prepare_guide).toHaveBeenCalledExactlyOnceWith(
+      identity.guideId,
+      false,
+    );
+    expect(steam.backend.download_guide_image).toHaveBeenCalledOnce();
+    expect((await cache.load(identity)).guide).toBe(guide);
+    expect(steam.backend.get_guide).not.toHaveBeenCalled();
+  });
+
+  it("reads stale local guides without downloading and only refreshes on an explicit update", async () => {
+    steam.backend.get_cached_guide.mockResolvedValue({ ...guide, stale: true });
+    const { cache } = steam.addRoute.mock.calls[0][1]().props;
+    expect((await cache.load(identity)).guide.stale).toBe(true);
+    expect(steam.backend.get_guide).not.toHaveBeenCalled();
+    expect(steam.backend.prepare_guide).not.toHaveBeenCalled();
+
+    steam.backend.get_cached_guide.mockResolvedValue(guide);
+    await cache.load(identity, { forceRefresh: true });
+    expect(steam.backend.prepare_guide).toHaveBeenCalledExactlyOnceWith(
+      identity.guideId,
+      true,
+    );
+    expect(steam.backend.download_guide_image).toHaveBeenCalledOnce();
+    expect(steam.backend.get_guide).not.toHaveBeenCalled();
   });
 
   it("waits for complete images and the reading record, deduplicates the job, and only opens the clicked guide", async () => {

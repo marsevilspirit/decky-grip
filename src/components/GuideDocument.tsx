@@ -1,5 +1,5 @@
 import { DialogBodyText, DialogHeader } from "@decky/ui";
-import { useMemo, type Ref } from "react";
+import { memo, useMemo, type Ref } from "react";
 
 import type { DownloadedGuide } from "../reader/types";
 
@@ -35,7 +35,7 @@ interface GuideDocumentProps {
 }
 
 /** Render already-sanitized guide HTML; the page owns scheduling, hydration and scroll restoration. */
-export function GuideDocument({
+export const GuideDocument = memo(function GuideDocument({
   guide,
   renderedSectionCount,
   contentRef,
@@ -63,4 +63,4 @@ export function GuideDocument({
       </DialogBodyText>
     </>
   );
-}
+});

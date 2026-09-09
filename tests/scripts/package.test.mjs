@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import {
   chmod,
   mkdir,
@@ -10,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import vm from "node:vm";
 import {
   assemblePackage,
   buildPackage,
@@ -42,6 +44,157 @@ test("CI and just package share one checked package entry point and retain valid
     assert.ok(workflow.includes(path), `Missing artifact path: ${path}`);
   assert.match(workflow, /run: pnpm run test:browser/);
   assert.match(workflow, /if: failure\(\)/);
+});
+
+test("persistent target reuse still checks sources and runs the exact validated builder image", async () => {
+  const validId = `sha256:${"a".repeat(64)}`;
+  const configId = `sha256:${"b".repeat(64)}`;
+  for (const [imageId, failure] of [
+    [validId, null],
+    [undefined, null],
+    ["moving-tag", null],
+    ["sha256:bad", null],
+    [validId, "invalid-json"],
+    [validId, "check-fails"],
+    [validId, "classic"],
+    [validId, "bad-config"],
+    [validId, "run-fails"],
+  ]) {
+    const calls = [];
+    const operation = vm.runInNewContext(`(${buildPackage.toString()})()`, {
+      repository: "/repo",
+      join,
+      dirname,
+      PACKAGE_FILES,
+      console: { log() {} },
+      mkdir: async () => {},
+      copyFile: async () => {},
+      writeFile: async () => {},
+      snapshotBackend: async () => {},
+      mkdtemp: async () => "/repo/out/package-test",
+      readFile: async (path) =>
+        path.endsWith("builder-metadata.json")
+          ? failure === "invalid-json"
+            ? "not JSON"
+            : JSON.stringify({
+                "containerimage.digest": imageId,
+                "containerimage.config.digest":
+                  failure === "bad-config" ? "not-a-digest" : configId,
+              })
+          : "source",
+      digest: () => "source-hash",
+      run: async (command, args) => {
+        calls.push([command, ...args]);
+        if (command === "pnpm" && failure === "check-fails")
+          throw Error("check failed");
+        if (
+          command === "docker" &&
+          args[0] === "image" &&
+          args[2] === validId &&
+          ["classic", "bad-config"].includes(failure)
+        )
+          throw Error("No such image");
+        if (
+          command === "docker" &&
+          args[0] === "run" &&
+          failure === "run-fails"
+        )
+          throw Error("build failed");
+        return "source-commit\n";
+      },
+      assemblePackage: async () => {
+        calls.push(["assemble"]);
+        return "package";
+      },
+    });
+    if (imageId !== validId || (failure !== null && failure !== "classic")) {
+      await assert.rejects(
+        operation,
+        failure === "check-fails"
+          ? /check failed/
+          : failure === "run-fails"
+            ? /build failed/
+            : failure === "invalid-json"
+              ? /JSON/
+              : /invalid builder image ID/,
+      );
+      assert.equal(
+        calls.filter(
+          ([command, action]) => `${command} ${action}` === "docker run",
+        ).length,
+        failure === "run-fails" ? 1 : 0,
+      );
+      assert.ok(!calls.some(([command]) => command === "assemble"));
+      if (["bad-config", "run-fails"].includes(failure))
+        assert.deepEqual(
+          calls.filter((call) => call[1] === "image"),
+          [["docker", "image", "inspect", validId]],
+        );
+      if (failure === "check-fails")
+        assert.deepEqual(calls, [["pnpm", "run", "check"]]);
+      continue;
+    }
+    assert.equal(await operation, "package");
+    assert.deepEqual(
+      calls.map((call) => call.slice(0, 2).join(" ")),
+      [
+        "pnpm run",
+        "git rev-parse",
+        "git status",
+        "docker build",
+        "docker image",
+        ...(failure === "classic" ? ["docker image"] : []),
+        "docker run",
+        "assemble",
+      ],
+    );
+    assert.deepEqual(calls[0], ["pnpm", "run", "check"]);
+    const build = calls[3];
+    assert.ok(build.includes("--provenance=false"));
+    assert.equal(
+      build[build.indexOf("--metadata-file") + 1],
+      "/repo/out/package-test/builder-metadata.json",
+    );
+    assert.equal(build[build.indexOf("--platform") + 1], "linux/amd64");
+    const expectedId = failure === "classic" ? configId : validId;
+    assert.deepEqual(
+      calls.filter((call) => call[1] === "image").map((call) => call[3]),
+      failure === "classic" ? [validId, configId] : [validId],
+    );
+    const container = calls.find(
+      (call) => call[0] === "docker" && call[1] === "run",
+    );
+    assert.equal(container.at(-1), expectedId);
+    assert.equal(container[container.indexOf("--platform") + 1], "linux/amd64");
+    assert.ok(
+      container.includes(
+        `type=volume,src=decky-grip-cargo-target-${expectedId.slice(7)},dst=/tmp/grip-target`,
+      ),
+    );
+  }
+});
+
+test("the container holds one lock through package-only clean, locked build and copy-out", async () => {
+  const script = await readFile(
+    new URL("../../backend/entrypoint.sh", import.meta.url),
+    "utf8",
+  );
+  execFileSync("sh", ["-n"], { input: script });
+  const commands = script
+    .split("\n")
+    .filter((line) => line && !line.startsWith("#"));
+  assert.deepEqual(commands, [
+    "set -eu",
+    "cd /backend",
+    "export CARGO_TARGET_DIR=/tmp/grip-target",
+    'mkdir -p "$CARGO_TARGET_DIR"',
+    'exec 9>"$CARGO_TARGET_DIR/.grip-package.lock"',
+    "flock 9",
+    "cargo clean --locked --release -p grip-sidecar",
+    "cargo build --locked --release",
+    "mkdir -p out",
+    'cp "$CARGO_TARGET_DIR/release/grip-sidecar" out/grip-sidecar',
+  ]);
 });
 
 const elf = () => {

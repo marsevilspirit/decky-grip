@@ -11,7 +11,6 @@ import {
   clearGuideCache,
   clearImageCache,
   getCachedGuide,
-  getGuide,
   getGuideLibrary,
   getGuideImage,
   getGuideDownloadStatus,
@@ -112,7 +111,14 @@ export default definePlugin(() => {
     {
       getCachedGuide,
       getGuide: async (identity, forceRefresh) => {
-        if (!forceRefresh) return getGuide(identity.guideId, false);
+        if (!forceRefresh) {
+          const guide = await getCachedGuide(identity.guideId);
+          if (!guide)
+            throw new Error(
+              "请先在 Steam 指南页按“下载到 GRIP”，下载完成后再阅读",
+            );
+          return guide;
+        }
         await downloads.start(identity, true);
         const task = downloads.getSnapshot(identity.guideId);
         if (task?.phase !== "complete")

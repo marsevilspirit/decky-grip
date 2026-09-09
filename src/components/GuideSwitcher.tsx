@@ -12,7 +12,13 @@ import {
   type FieldProps,
   type FocusableProps,
 } from "@decky/ui";
-import { useRef, useState, type FC, type MouseEventHandler } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type FC,
+  type MouseEventHandler,
+} from "react";
 
 import type { CacheClearResult, GuideLibraryEntry } from "../backend";
 import { isHeyboxGuideId, makeGuideKey } from "../steam/guide-key";
@@ -65,6 +71,7 @@ export function GuideSwitcher({
   onClose,
   onRemove,
 }: GuideSwitcherProps) {
+  const bodyRef = useRef<HTMLDivElement>(null);
   const removalInFlight = useRef(false);
   const [removeTarget, setRemoveTarget] = useState<GuideLibraryEntry | null>(
     null,
@@ -85,7 +92,7 @@ export function GuideSwitcher({
       (entry) => makeGuideKey(entry) === makeGuideKey(removeTarget),
     );
   const cannotRemove =
-    !targetInLibrary ||
+    !removeTarget ||
     (removeTarget !== null && removedEntry(removeTarget)) ||
     removeDisabled ||
     pendingKey !== null;
@@ -95,8 +102,35 @@ export function GuideSwitcher({
   const failedEntry = entries?.find(
     (entry) => makeGuideKey(entry) === failedKey,
   );
+  const visibleEntries = entries?.filter(
+    (entry) => entry.cache && !removedEntry(entry),
+  );
   const preferredEntry =
-    entries?.find((entry) => entry.guideId !== currentGuideId) ?? entries?.[0];
+    visibleEntries?.find((entry) => entry.guideId !== currentGuideId) ??
+    visibleEntries?.[0];
+  const lastRemoval = removeTarget && removeResults[removeTarget.guideId];
+
+  useEffect(() => {
+    if (confirming || !removeTarget || !bodyRef.current) return;
+    const body = bodyRef.current;
+    // Steam restores the original row when it still exists. If it was removed,
+    // return to a remaining native action instead of the detached trigger.
+    if (
+      visibleEntries?.some(
+        (entry) => makeGuideKey(entry) === makeGuideKey(removeTarget),
+      ) ||
+      body.contains(body.ownerDocument.activeElement)
+    )
+      return;
+    const target = preferredEntry
+      ? body.querySelector<HTMLElement>(
+          `[data-grip-guide-choice="${makeGuideKey(preferredEntry)}"]`,
+        )
+      : body.querySelector<HTMLElement>(
+          "[data-grip-guide-return], [data-grip-guide-list-retry]",
+        );
+    target?.focus({ preventScroll: true });
+  }, [confirming, entries, removeTarget, removeResults, removed]);
 
   const closeSwitcher = () => {
     if (!confirming && !removalInFlight.current) onClose();
@@ -153,7 +187,16 @@ export function GuideSwitcher({
         onCancel={closeSwitcher}
       >
         <DialogHeader>本游戏指南</DialogHeader>
-        <DialogBody>
+        <DialogBody ref={bodyRef}>
+          {lastRemoval && (
+            <DialogBodyText>
+              <div role="status">
+                {titleFor(removeTarget!)}已卸载，释放{" "}
+                {(lastRemoval.bytesRemoved / 1024 / 1024).toFixed(1)}{" "}
+                MiB，阅读位置已保留。
+              </div>
+            </DialogBodyText>
+          )}
           <ScrollPanel
             scrollDirection="y"
             data-grip-guide-list="true"
@@ -199,15 +242,22 @@ export function GuideSwitcher({
                 <DialogBodyText>{error}</DialogBodyText>
               </div>
             )}
-            {entries?.length === 0 && !listError && !error && (
-              <DialogBodyText>本游戏还没有已记录的指南。</DialogBodyText>
+            {visibleEntries?.length === 0 && !listError && !error && (
+              <>
+                <DialogBodyText>本游戏还没有已下载的指南。</DialogBodyText>
+                <DialogButton
+                  data-grip-guide-return="true"
+                  onClick={closeSwitcher}
+                >
+                  返回阅读
+                </DialogButton>
+              </>
             )}
-            {entries?.map((entry) => {
+            {visibleEntries?.map((entry) => {
               const key = makeGuideKey(entry);
               const current = entry.guideId === currentGuideId;
               const pending = pendingKey === key;
               const failed = failedEntry === entry;
-              const result = removeResults[entry.guideId];
               return (
                 <Field
                   key={key}
@@ -280,18 +330,12 @@ export function GuideSwitcher({
                           <BusyLabel>正在准备并打开…</BusyLabel>
                         ) : failed ? (
                           <span role="alert">{error} · 按 A 重试打开</span>
-                        ) : removedEntry(entry) ? (
-                          `离线副本已卸载${result ? `，释放 ${(result.bytesRemoved / 1024 / 1024).toFixed(1)} MiB` : ""}${current ? "，当前会话仍可阅读" : "，阅读位置已保留"}`
                         ) : current ? (
                           "按 A 返回当前阅读位置"
-                        ) : entry.cache ? (
-                          entry.cache.stale ? (
-                            "已缓存正文，可继续阅读"
-                          ) : (
-                            "已缓存正文"
-                          )
+                        ) : entry.cache?.stale ? (
+                          "已缓存正文，可继续阅读"
                         ) : (
-                          "未下载离线副本，打开时将下载正文"
+                          "已缓存正文"
                         )}
                       </div>
                     </>

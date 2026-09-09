@@ -439,7 +439,7 @@ export class ReaderImageHydrator {
       image.dataset.gripImageState = "loading";
     }
     try {
-      const result = await this.fetchImage(task.url, true);
+      const result = await this.fetchImage(task.url, false);
       if (task.generation !== this.generation) {
         return;
       }

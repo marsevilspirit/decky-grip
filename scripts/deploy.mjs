@@ -144,11 +144,11 @@ export function verifySettings(before, after) {
   }
 }
 
-const RPC_CHECK = `Promise.all([
+export const RPC_CHECK = `Promise.all([
   DeckyBackend.call("loader/call_plugin_method", "GRIP", "get_hotkey_status"),
   DeckyBackend.call("loader/call_plugin_method", "GRIP", "get_guide_library", null)
 ]).then(([hotkey, entries]) => ({
-  hotkey, guides: entries.map(e => e.appId + ":" + e.guideId),
+  hotkey, guides: entries.filter(e => e.cache).map(e => e.appId + ":" + e.guideId),
   loaded: DeckyPluginLoader.plugins.some(p => p.name === "GRIP")
 }))`;
 

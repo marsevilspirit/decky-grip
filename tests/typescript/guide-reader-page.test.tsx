@@ -196,6 +196,14 @@ function guideFixture(): DownloadedGuide {
   };
 }
 
+const cachedSummary = {
+  title: "已下载指南",
+  author: "测试作者",
+  fetchedAt: 1,
+  sectionTitle: null,
+  stale: false,
+};
+
 describe("GuideReaderPage position lifecycle", () => {
   let animationFrames: Map<number, FrameRequestCallback>;
   let nextAnimationFrame: number;
@@ -444,6 +452,28 @@ describe("GuideReaderPage position lifecycle", () => {
     element.dispatchEvent(event);
     return event;
   };
+
+  it("retries a missing local guide without turning the retry into a download", async () => {
+    const getGuide = vi.fn().mockRejectedValue(new Error("请先按下载到 GRIP"));
+    const cache = new ReaderSessionCache({
+      getCachedGuide: async () => null,
+      getGuide,
+      getReaderPosition: async () => null,
+      saveReaderPosition: async () => savedPosition,
+    });
+    // The shared mount helper requires an article; this case deliberately has none.
+    await expect(mount(cache, async () => null, 0)).rejects.toThrow(
+      "reader scroller did not mount",
+    );
+    expect(container!.textContent).toContain("请先按下载到 GRIP");
+    await act(async () => buttonNamed("重试").click());
+    await flushMicrotasks();
+    expect(getGuide.mock.calls).toEqual([
+      [identity, false],
+      [identity, false],
+    ]);
+    expect(container!.textContent).toContain("请先按下载到 GRIP");
+  });
 
   it("reuses image URLs when the reader closes and reopens with its shared hydrator", async () => {
     const guide = {
@@ -1004,8 +1034,8 @@ describe("GuideReaderPage position lifecycle", () => {
       expect(observed[512].src).toBe("blob:1");
       expect(observed[513].src).toBe("blob:2");
       expect(fetchImage.mock.calls).toEqual([
-        [repeatedUrl, true],
-        [lastUrl, true],
+        [repeatedUrl, false],
+        [lastUrl, false],
       ]);
       for (const [candidates, residentOnly] of hydrate.mock.calls) {
         if (!residentOnly)
@@ -1383,6 +1413,48 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(marquee(second).getAttribute("data-playing")).toBe("false");
     await act(async () => buttonNamed("搜索").focus());
     expect(marquee(first).getAttribute("data-playing")).toBe("false");
+  });
+
+  it("does not revisit the rendered article when directory focus changes", async () => {
+    const guide = guideFixture();
+    const readHtml = vi.fn((html: string) => html);
+    guide.sections = guide.sections.map((section) => ({
+      ...section,
+      get html() {
+        return readHtml(section.html);
+      },
+    }));
+    const cache = new ReaderSessionCache({
+      getCachedGuide: async () => guide,
+      getGuide: async () => guide,
+      getReaderPosition: async () => null,
+      saveReaderPosition: vi.fn(),
+    });
+    await cache.load(identity);
+    const scroller = await mount(cache, async () => null, 12_000);
+    for (let frame = 0; frame < 8; frame++) await flushFrame();
+    await flushMicrotasks();
+    expect(scroller.querySelectorAll("[data-guide-section-id]")).toHaveLength(
+      50,
+    );
+    expect(readHtml.mock.calls.length).toBeGreaterThanOrEqual(50);
+    const article = scroller.querySelector(".grip-reader-content");
+    const chapters = [
+      ...container!.querySelectorAll<HTMLElement>("[data-grip-toc-section]"),
+    ];
+    readHtml.mockClear();
+    for (let move = 0; move < 20; move++) {
+      const chapter = chapters[move % 2];
+      await act(async () => chapter.focus());
+      expect(document.activeElement).toBe(chapter);
+      expect(
+        chapter
+          .querySelector("[data-native-marquee]")
+          ?.getAttribute("data-playing"),
+      ).toBe("true");
+    }
+    expect(readHtml.mock.calls.length).toBe(0);
+    expect(scroller.querySelector(".grip-reader-content")).toBe(article);
   });
 
   it.each([1000, 6000])(
@@ -2096,11 +2168,13 @@ describe("GuideReaderPage position lifecycle", () => {
       finish();
     });
     expect(container!.textContent).toContain("已卸载");
-    await act(async () => manage());
-    expect(buttonNamed("确认卸载").classList.contains("Disabled")).toBe(true);
+    expect(container!.querySelector("[data-grip-guide-choice]")).toBeNull();
+    expect(document.activeElement).toBe(buttonNamed("返回阅读"));
     expect(container!.querySelector('[aria-label="指南正文"]')).toBe(scroller);
-    await act(async () => buttonNamed("取消").click());
-    await act(async () => pressKey(scroller, "Escape"));
+    await act(async () => buttonNamed("返回阅读").click());
+    await act(async () => pressKey(scroller, "Options"));
+    expect(container!.querySelector("[data-grip-guide-choice]")).toBeNull();
+    await act(async () => buttonNamed("返回阅读").click());
     await act(async () => buttonNamed("更新").click());
     await act(async () => pressKey(scroller, "Options"));
     await act(async () => manage());
@@ -2143,11 +2217,11 @@ describe("GuideReaderPage position lifecycle", () => {
             finishDownload = resolve;
           }),
       );
-      let library = [other];
+      let library: GuideLibraryEntry[] = [other];
       const loadLibrary = vi.fn(async () => library);
       let failNextRemoval = partialFailure;
       const remove = vi.fn(async () => {
-        library = [{ ...other, cache: null }];
+        library = [];
         if (failNextRemoval) {
           failNextRemoval = false;
           throw new Error("图片清理失败");
@@ -2206,7 +2280,8 @@ describe("GuideReaderPage position lifecycle", () => {
         expect(remove.mock.calls).toEqual([[other.guideId], [other.guideId]]);
         expect(loadLibrary).toHaveBeenCalledTimes(3);
       }
-      expect(choice(other.guideId).textContent).toContain("已卸载");
+      expect(choice(other.guideId)).toBeNull();
+      expect(document.activeElement).toBe(choice(identity.guideId));
       expect(choice(identity.guideId).textContent).not.toContain("已卸载");
       expect(container!.querySelector('[aria-label="指南正文"]')).toBe(
         scroller,
@@ -2347,7 +2422,12 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(dialog.textContent).toContain("正在读取本游戏指南");
     await act(async () =>
       resolveList([
-        { appId: identity.appId, guideId: "123", updatedAt: 1, cache: null },
+        {
+          appId: identity.appId,
+          guideId: "123",
+          updatedAt: 1,
+          cache: cachedSummary,
+        },
       ]),
     );
     await flushFrame();
@@ -2636,7 +2716,7 @@ describe("GuideReaderPage position lifecycle", () => {
       appId,
       guideId,
       updatedAt: Number(guideId),
-      cache: null,
+      cache: { ...cachedSummary, title: `指南 ${guideId}` },
     });
     const scroller = await mount(cache, async () => null, 12_000, {
       loadGuideLibrary: async () => [
@@ -2724,7 +2804,7 @@ describe("GuideReaderPage position lifecycle", () => {
           appId: identity.appId,
           guideId: "20",
           updatedAt: 1,
-          cache: null,
+          cache: cachedSummary,
         },
       ],
       onSwitchGuide,
@@ -2770,7 +2850,7 @@ describe("GuideReaderPage position lifecycle", () => {
     });
     await cache.load(identity);
     let library: GuideLibraryEntry[] = [
-      { ...identity, guideId: "20", updatedAt: 1, cache: null },
+      { ...identity, guideId: "20", updatedAt: 1, cache: cachedSummary },
       {
         ...identity,
         guideId: "30",
@@ -2786,9 +2866,7 @@ describe("GuideReaderPage position lifecycle", () => {
     ];
     const loadLibrary = vi.fn(async () => library);
     const remove = vi.fn(async (guideId: string) => {
-      library = library.map((entry) =>
-        entry.guideId === guideId ? { ...entry, cache: null } : entry,
-      );
+      library = library.filter((entry) => entry.guideId !== guideId);
       return { filesRemoved: 1, bytesRemoved: 100 };
     });
     const onSwitchGuide = vi.fn(async () => undefined);
@@ -2821,7 +2899,7 @@ describe("GuideReaderPage position lifecycle", () => {
     ).toContain("指南列表读取失败（测试）");
     expect(choice("20").textContent).toContain("指南打开失败：B 正文读取失败");
     expect(choice("20").textContent).not.toContain("指南列表读取失败");
-    expect(choice("30").textContent).toContain("已卸载");
+    expect(choice("30")).toBeNull();
 
     await act(async () => buttonNamed("重新读取指南列表").click());
     await flushMicrotasks();

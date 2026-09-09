@@ -259,9 +259,10 @@ describe("GuideSwitcher", () => {
     await render({ entries: [entry("3"), entry("1"), entry("2")] });
     await click(button("确认卸载"));
     expect(props.onRemove).toHaveBeenCalledExactlyOnceWith(target);
-    expect(choice("2").textContent).toContain("释放 1.0 MiB");
+    expect(choice("2")).toBeNull();
+    expect(dialog().textContent).toContain("释放 1.0 MiB");
     expect(choice("1").textContent).not.toContain("已卸载");
-    expect(document.activeElement).toBe(choice("2"));
+    expect(document.activeElement).toBe(choice("3"));
     await manage("3");
     await click(button("确认卸载"));
     expect(props.onRemove).toHaveBeenLastCalledWith(props.entries![0]);
@@ -457,7 +458,7 @@ describe("GuideSwitcher", () => {
     await render({ entries: null, listError: "列表读取失败" });
     expect(document.activeElement).toBe(button("重新读取指南列表"));
     await render({ entries: [], listError: null });
-    expect(dialog().textContent).toContain("还没有已记录的指南");
+    expect(dialog().textContent).toContain("还没有已下载的指南");
   });
 
   it("uses native Steam controls without repainting their focus or pressed states", async () => {
@@ -654,14 +655,12 @@ describe("GuideSwitcher", () => {
       container.querySelector('[role="dialog"][aria-label^="管理指南："]'),
     ).toBeNull();
     expect(dialog().textContent).toContain("释放 1.0 MiB");
-    expect(choice("1").textContent).toContain("当前会话仍可阅读");
-    await manage("1");
-    expect(button("确认卸载").classList.contains("Disabled")).toBe(true);
-    await click(button("确认卸载"));
+    expect(choice("1")).toBeNull();
+    expect(document.activeElement).toBe(choice("2"));
     expect(props.onRemove).toHaveBeenCalledOnce();
   });
 
-  it("keeps partial cleanup retryable after canceling and reopening management", async () => {
+  it("keeps the original cleanup target retryable after it disappears from the refreshed list", async () => {
     const onRemove = vi
       .fn()
       .mockRejectedValueOnce(new Error("磁盘忙"))
@@ -679,15 +678,14 @@ describe("GuideSwitcher", () => {
       )?.textContent,
     ).toContain("磁盘忙");
     await render({
-      entries: [entry("1"), { ...entry("2"), cache: null }, entry("3")],
+      entries: [entry("1"), entry("3")],
     });
     expect(button("确认清理残留").classList.contains("Disabled")).toBe(false);
     expect(
       container.querySelector('[role="dialog"][aria-label^="管理指南："]')
         ?.textContent,
     ).toContain("可重试完成剩余离线文件的清理。");
-    await click(button("取消"));
-    await manage("2");
+    expect(choice("2")).toBeNull();
     const retry = button("确认清理残留");
     expect(retry.classList.contains("Disabled")).toBe(false);
     await click(retry);
@@ -699,6 +697,7 @@ describe("GuideSwitcher", () => {
     expect(
       container.querySelector('[role="dialog"][aria-label^="管理指南："]'),
     ).toBeNull();
+    expect(document.activeElement).toBe(choice("3"));
   });
 
   it("allows leftover cleanup while blocking busy or already completed removal", async () => {
@@ -713,10 +712,9 @@ describe("GuideSwitcher", () => {
     await click(button("确认卸载"));
     expect(button("确认卸载").classList.contains("Disabled")).toBe(true);
     await click(button("取消"));
-    await render({
-      entries: [entry("1"), { ...entry("2"), cache: null }, entry("3")],
-    });
+    await render({ entries: [entry("2"), entry("3")] });
     await manage("2");
+    await render({ entries: [entry("3")] });
     expect(
       container.querySelector('[role="dialog"][aria-label^="管理指南："]')
         ?.textContent,

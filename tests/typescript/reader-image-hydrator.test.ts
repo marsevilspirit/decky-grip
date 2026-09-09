@@ -7,6 +7,7 @@ import {
   type CachedGuideImage,
   type GuideImageFetcher,
 } from "../../src/reader/image-hydrator";
+import { downloadGuideImages } from "../../src/reader/download";
 import type { DownloadedGuide, ReaderPosition } from "../../src/reader/types";
 
 afterEach(() => vi.restoreAllMocks());
@@ -235,6 +236,52 @@ describe("reader image hydration", () => {
     expect(old.src).toBe("");
   });
 
+  it("reads and retries missing images locally until an explicit download saves them", async () => {
+    const target = image("https://a/first");
+    let localImage: CachedGuideImage | null = null;
+    const fetchImage = vi.fn<GuideImageFetcher>(async () => localImage);
+    const downloadImage = vi.fn(async () => {
+      localImage = cached;
+      return { saved: true as const };
+    });
+    const makeObjectUrl = vi.fn(() => "blob:downloaded");
+    const hydrator = new ReaderImageHydrator(
+      fetchImage,
+      1,
+      makeObjectUrl,
+      vi.fn(),
+    );
+
+    hydrator.hydrateImages([target]);
+    await vi.waitFor(() =>
+      expect(target.dataset.gripImageState).toBe("unavailable"),
+    );
+    expect(fetchImage).toHaveBeenLastCalledWith("https://a/first", false);
+    hydrator.retryImage(target);
+    await vi.waitFor(() => expect(fetchImage).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() =>
+      expect(target.dataset.gripImageState).toBe("unavailable"),
+    );
+    expect(fetchImage.mock.calls).toEqual([
+      ["https://a/first", false],
+      ["https://a/first", false],
+    ]);
+    expect(makeObjectUrl).not.toHaveBeenCalled();
+    expect(downloadImage).not.toHaveBeenCalled();
+
+    await downloadGuideImages(
+      { ...preloadGuide, sections: [preloadGuide.sections[0]] },
+      downloadImage,
+    );
+    expect(downloadImage).toHaveBeenCalledExactlyOnceWith("https://a/first");
+    hydrator.retryImage(target);
+    await vi.waitFor(() => expect(target.src).toBe("blob:downloaded"));
+    expect(target.dataset.gripImageState).toBe("ready");
+    expect(fetchImage).toHaveBeenCalledTimes(3);
+    expect(fetchImage).toHaveBeenLastCalledWith("https://a/first", false);
+    hydrator.clear();
+  });
+
   it("retries only the failed URL, guards double presses and replaces failed decode blobs", async () => {
     const failed = image("https://a/failed");
     const healthy = image("https://a/healthy");
@@ -331,7 +378,7 @@ describe("reader image hydration", () => {
       "blob:grip-2",
       "blob:grip-3",
     ]);
-    expect(fetchImage).toHaveBeenCalledWith("https://a/1", true);
+    expect(fetchImage).toHaveBeenCalledWith("https://a/1", false);
     expect(images.every((candidate) => candidate.src.startsWith("blob:"))).toBe(
       true,
     );
@@ -643,7 +690,7 @@ describe("reader image hydration", () => {
     expect(pendingCount()).toBe(48);
     release.shift()!();
     await vi.waitFor(() => expect(fetchImage).toHaveBeenCalledTimes(4));
-    expect(fetchImage.mock.calls[3]).toEqual(["https://a/visible", true]);
+    expect(fetchImage.mock.calls[3]).toEqual(["https://a/visible", false]);
     while (release.length) {
       release.shift()!();
       for (let count = 0; count < 8; count++) await Promise.resolve();

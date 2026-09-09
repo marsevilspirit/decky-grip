@@ -44,14 +44,11 @@ it("preserves hydrated nodes when the page rerenders or appends sections", async
       { id: "second", title: "第二章", html: "<p>后文</p>" },
     ],
   };
-  const render = (renderedSectionCount: number) =>
+  const render = (renderedSectionCount: number, currentGuide = guide) =>
     act(async () => {
       root.render(
         <GuideDocument
-          guide={{
-            ...guide,
-            sections: guide.sections.map((section) => ({ ...section })),
-          }}
+          guide={currentGuide}
           renderedSectionCount={renderedSectionCount}
           contentRef={contentRef}
         />,
@@ -68,6 +65,10 @@ it("preserves hydrated nodes when the page rerenders or appends sections", async
   image.width = 640;
   image.height = 480;
 
+  await render(1, {
+    ...guide,
+    sections: guide.sections.map((section) => ({ ...section })),
+  });
   await render(1);
   await render(2);
   expect(contentRef.current).toBe(content);

@@ -160,19 +160,17 @@ const imageHydrator = new ReaderImageHydrator(async (url) => {
 const imageCacheControl = new ReaderImageCacheControl();
 const performance = new ReaderPerformanceTracker();
 const loadGuideLibrary = async () =>
-  entries.map((entry) => ({
-    ...entry,
-    cache: guides.has(entry.guideId) ? entry.cache : null,
-  }));
+  entries.filter((entry) => guides.has(entry.guideId));
 const removeOfflineGuide = async (guideId: string) => {
+  // The body is removed before image reclamation, which may still fail and need retry.
+  const removed = guides.delete(guideId);
+  removedGuides.add(guideId);
+  localStorage.setItem(
+    "grip-browser:removed-guides",
+    JSON.stringify([...removedGuides]),
+  );
   try {
     await backendGate(`remove/${guideId}`, "DELETE");
-    const removed = guides.delete(guideId);
-    removedGuides.add(guideId);
-    localStorage.setItem(
-      "grip-browser:removed-guides",
-      JSON.stringify([...removedGuides]),
-    );
     return { filesRemoved: removed ? 1 : 0, bytesRemoved: removed ? 100 : 0 };
   } finally {
     cache.clear();
