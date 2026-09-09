@@ -285,8 +285,33 @@ test("1280×800: opening and closing the chapter panel keeps the article width a
     }));
   const before = await measure();
   expect(before.top).toBeGreaterThan(500);
+  const currentChapter = page.locator(
+    '[data-grip-toc-section][aria-current="location"]',
+  );
+  await expect(currentChapter).toHaveCount(1);
+  const currentId = await currentChapter.getAttribute("data-grip-toc-section");
+  const marker = currentChapter.getByText("当前章节", { exact: true });
+  await expect(marker).toBeVisible();
+  expect(
+    await marker.evaluate((element) => {
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      const text = range.getBoundingClientRect();
+      const button = element.closest("button")!.getBoundingClientRect();
+      return text.left >= button.left && text.right <= button.right;
+    }),
+  ).toBe(true);
   await page.keyboard.press("ArrowRight");
   await expect(page.getByRole("dialog", { name: "指南目录" })).toBeVisible();
+  await page
+    .locator('[data-grip-toc-section]:not([aria-current="location"])')
+    .first()
+    .focus();
+  await expect(currentChapter).toHaveAttribute(
+    "data-grip-toc-section",
+    currentId!,
+  );
+  await expect(marker).toBeVisible();
   const opened = await measure();
   expect(opened).toEqual(before);
   await page.keyboard.press("Escape");

@@ -2,7 +2,11 @@
 import { act, createElement, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vitest";
-import { ImportGuideModal } from "../../src/components/ImportGuideModal";
+import {
+  ImportGuideModal,
+  type ImportGame,
+  type ImportGuideDraft,
+} from "../../src/components/ImportGuideModal";
 import {
   GuideDownloadTasks,
   type GuideImageDownloadProgress,
@@ -27,9 +31,11 @@ vi.mock("@decky/ui", async () => {
     ModalRoot: ({
       children,
       closeModal,
+      onCancel,
     }: {
       children: ReactNode;
       closeModal?: () => void;
+      onCancel?: () => void;
     }) =>
       createElement(
         "form",
@@ -37,6 +43,12 @@ vi.mock("@decky/ui", async () => {
           onSubmit: (event) => {
             event.preventDefault();
             closeModal?.();
+          },
+          onKeyDown: (event) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            event.stopPropagation();
+            if (!event.repeat) onCancel?.();
           },
         },
         children,
@@ -462,3 +474,216 @@ it("closing the modal leaves an in-progress download running", async () => {
   await act(async () => finish());
   expect(downloads.getSnapshot("heybox-249c72219fed")?.phase).toBe("complete");
 });
+
+it.each(["button", "native cancel"])(
+  "restores the same draft and live task after %s, including completion while closed",
+  async (dismissal) => {
+    let report!: (progress: GuideImageDownloadProgress) => void;
+    let finish!: () => void;
+    let signal!: AbortSignal;
+    const save = vi.fn(
+      (_identity, onProgress, nextSignal) =>
+        new Promise<void>((resolve) => {
+          report = onProgress;
+          signal = nextSignal;
+          finish = resolve;
+        }),
+    );
+    const downloads = new GuideDownloadTasks(save);
+    const onOpen = vi.fn(async () => {});
+    const close = vi.fn();
+    let draft: ImportGuideDraft | undefined;
+    const render = async (games: ImportGame[]) => {
+      await act(async () =>
+        root.render(
+          <ImportGuideModal
+            downloads={downloads}
+            games={games}
+            initialDraft={draft}
+            onDraftChange={(next) => {
+              draft = next;
+            }}
+            onOpen={onOpen}
+            closeModal={close}
+          />,
+        ),
+      );
+    };
+    const dismiss = async () => {
+      await act(async () => {
+        if (dismissal === "button") button("关闭").click();
+        else
+          host.querySelector("input")!.dispatchEvent(
+            new KeyboardEvent("keydown", {
+              key: "Escape",
+              bubbles: true,
+              cancelable: true,
+            }),
+          );
+      });
+      await act(async () => root.unmount());
+      root = createRoot(host);
+    };
+    await render([
+      { data: "1", label: "当前游戏" },
+      { data: "2", label: "先前选择的游戏" },
+    ]);
+    await share();
+    await act(async () => {
+      const select = host.querySelector("select")!;
+      select.value = "2";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => button("保存完整图文").click());
+    await act(async () => report({ completed: 2, total: 4 }));
+    await dismiss();
+    expect(close).toHaveBeenCalledOnce();
+    expect(signal.aborted).toBe(false);
+    await act(async () => report({ completed: 3, total: 4 }));
+    await render([{ data: "3", label: "新打开的游戏" }]);
+    expect(host.querySelector("input")!.value).toContain("249c72219fed");
+    const select = host.querySelector("select")!;
+    expect(select.value).toBe("2");
+    expect(select.selectedOptions[0]?.textContent).toBe("先前选择的游戏");
+    expect(host.textContent).toContain("正在下载图片 3/4");
+    expect(
+      host.querySelector('[role="progressbar"]')?.getAttribute("aria-valuenow"),
+    ).toBe("75");
+    expect(host.querySelector("input")!.disabled).toBe(true);
+    await act(async () => {
+      button("保存完整图文").click();
+      select.value = "3";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+      button("接收手机链接").click();
+    });
+    expect(draft?.game?.data).toBe("2");
+    expect(draft?.identity).toEqual({
+      appId: "2",
+      guideId: "heybox-249c72219fed",
+    });
+    expect(save).toHaveBeenCalledOnce();
+    await dismiss();
+    await act(async () => finish());
+    await render([]);
+    expect(host.textContent).toContain("正文和图片已完整保存");
+    expect(host.textContent).not.toContain("请先在 Steam 中打开目标游戏");
+    expect(host.querySelector("select")!.value).toBe("2");
+    expect(save).toHaveBeenCalledOnce();
+    await act(async () => button("立即阅读").click());
+    expect(onOpen).toHaveBeenCalledExactlyOnceWith({
+      appId: "2",
+      guideId: "heybox-249c72219fed",
+    });
+  },
+);
+
+it("restores a failed task and retries only on explicit activation without rebinding its game", async () => {
+  let fail!: (error: Error) => void;
+  const save = vi.fn(
+    (_identity, report) =>
+      new Promise<void>((_resolve, reject) => {
+        report({ completed: 1, total: 3 });
+        fail = reject;
+      }),
+  );
+  const downloads = new GuideDownloadTasks(save);
+  let draft: ImportGuideDraft | undefined;
+  const render = async (games: ImportGame[]) =>
+    act(async () =>
+      root.render(
+        <ImportGuideModal
+          downloads={downloads}
+          games={games}
+          initialDraft={draft}
+          onDraftChange={(next) => {
+            draft = next;
+          }}
+          onOpen={async () => {}}
+        />,
+      ),
+    );
+  await render([{ data: "2", label: "游戏" }]);
+  await share();
+  await act(async () => button("保存完整图文").click());
+  await act(async () => root.unmount());
+  root = createRoot(host);
+  await act(async () => fail(new Error("图片仅保存 1/3，尚未完整离线")));
+  await render([{ data: "3", label: "新游戏" }]);
+  expect(host.querySelector('[role="alert"]')?.textContent).toContain("1/3");
+  expect(host.textContent).not.toContain("正文和图片已完整保存");
+  expect(host.querySelector("select")!.value).toBe("2");
+  expect(downloads.getSnapshot("heybox-249c72219fed")?.progress).toEqual({
+    completed: 1,
+    total: 3,
+  });
+  expect(save).toHaveBeenCalledOnce();
+  save.mockResolvedValueOnce();
+  await act(async () => {
+    button("重试导入").click();
+    button("重试导入").click();
+  });
+  expect(save).toHaveBeenCalledTimes(2);
+  expect(save.mock.calls[1][0]).toEqual({
+    appId: "2",
+    guideId: "heybox-249c72219fed",
+  });
+  expect(host.textContent).toContain("正文和图片已完整保存");
+});
+
+it.each(["text", "phone", "game"])(
+  "saves %s edits before any close handler and drops only the old task selection",
+  async (field) => {
+    const downloads = new GuideDownloadTasks(async () => {});
+    let draft: ImportGuideDraft = {
+      text: "https://www.xiaoheihe.cn/app/bbs/link/249c72219fed",
+      game: { data: "2", label: "游戏" },
+      identity: { appId: "2", guideId: "heybox-249c72219fed" },
+    };
+    await downloads.start(draft.identity!);
+    const render = async (games: ImportGame[]) =>
+      act(async () =>
+        root.render(
+          <ImportGuideModal
+            downloads={downloads}
+            games={games}
+            initialDraft={draft}
+            onDraftChange={(next) => {
+              draft = next;
+            }}
+            onOpen={async () => {}}
+          />,
+        ),
+      );
+    await render([{ data: "3", label: "另一款游戏" }]);
+    expect(button("立即阅读")).toBeTruthy();
+    if (field === "text")
+      await share("https://www.xiaoheihe.cn/app/bbs/link/8a79701fa858");
+    else if (field === "phone")
+      await act(async () => button("接收手机链接").click());
+    else
+      await act(async () => {
+        const select = host.querySelector("select")!;
+        select.value = "3";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+    expect(draft.identity).toBeNull();
+    expect(draft.game?.data).toBe(field === "game" ? "3" : "2");
+    expect(draft.text).toContain(
+      field === "text"
+        ? "8a79701fa858"
+        : field === "phone"
+          ? "4aec6fe8edfc"
+          : "249c72219fed",
+    );
+    await act(async () => root.unmount());
+    root = createRoot(host);
+    await render([]);
+    expect(host.querySelector("input")!.value).toBe(draft.text);
+    expect(host.querySelector("select")!.value).toBe(draft.game!.data);
+    expect(button("立即阅读")).toBeUndefined();
+    expect(host.textContent).not.toContain("正文和图片已完整保存");
+    expect(downloads.getSnapshot("heybox-249c72219fed")?.phase).toBe(
+      "complete",
+    );
+  },
+);

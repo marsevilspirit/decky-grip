@@ -113,6 +113,19 @@ test("real QR → Rust phone submission → confirmed game → complete offline 
     expect(imageRequests).toBe(3); // The fourth HTML image repeats the first URL.
     expect(commits).toBe(0);
     expect(await publication(page)).toBeNull();
+    await page.getByRole("button", { name: "关闭", exact: true }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    await page
+      .getByRole("button", { name: "导入公开攻略", exact: true })
+      .click();
+    await expect(page.getByRole("textbox", { name: "分享链接" })).toHaveValue(
+      share,
+    );
+    await expect(
+      page.getByRole("combobox", { name: "保存到游戏" }),
+    ).toHaveValue("1868140");
+    await expect(page.getByRole("dialog")).toContainText("正在下载图片 2/3");
+    expect(imageRequests).toBe(3);
     releaseImage();
     await expect(page.getByRole("dialog")).toContainText(
       "正在保存完整离线版本",
@@ -137,6 +150,14 @@ test("real QR → Rust phone submission → confirmed game → complete offline 
     expect(
       (await events(page)).filter((event) => event.startsWith("discard:")),
     ).toHaveLength(1);
+    await page.getByRole("button", { name: "关闭", exact: true }).click();
+    await page
+      .getByRole("button", { name: "导入公开攻略", exact: true })
+      .click();
+    await expect(page.getByRole("dialog")).toContainText(
+      "正文和图片已完整保存",
+    );
+    expect(commits).toBe(1);
     await page.getByRole("button", { name: "立即阅读", exact: true }).click();
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await expect(page.getByRole("region", { name: "指南正文" })).toBeFocused();

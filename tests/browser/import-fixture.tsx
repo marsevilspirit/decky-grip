@@ -1,5 +1,8 @@
 import { useState } from "react";
-import { ImportGuideModal } from "../../src/components/ImportGuideModal";
+import {
+  ImportGuideModal,
+  type ImportGuideDraft,
+} from "../../src/components/ImportGuideModal";
 import { GuideReaderPage } from "../../src/components/GuideReaderPage";
 import {
   downloadOfflineGuide,
@@ -139,6 +142,7 @@ const imageHydrator = new ReaderImageHydrator(async (url) => {
 });
 const imageCacheControl = new ReaderImageCacheControl();
 const performance = new ReaderPerformanceTracker();
+let importDraft: ImportGuideDraft | undefined;
 
 export function ImportFixture() {
   const [modal, setModal] = useState(true);
@@ -169,6 +173,10 @@ export function ImportFixture() {
             { data: "1868140", label: "潜水员戴夫" },
           ]}
           downloads={downloads}
+          initialDraft={importDraft}
+          onDraftChange={(draft) => {
+            importDraft = draft;
+          }}
           onOpen={async (identity) => {
             await loadPublished();
             setRoute(identity);

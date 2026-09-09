@@ -27,7 +27,10 @@ import {
 import { NativeGuideDownloadButton } from "./components/GuideDownloadButton";
 import { GuideReaderPage } from "./components/GuideReaderPage";
 import { GripPanel } from "./components/GripPanel";
-import { ImportGuideModal } from "./components/ImportGuideModal";
+import {
+  ImportGuideModal,
+  type ImportGuideDraft,
+} from "./components/ImportGuideModal";
 import { downloadGuide } from "./guide-download";
 import { GripController } from "./grip-controller";
 import { overlayHasEditableFocus } from "./hotkey/focus-guard";
@@ -431,6 +434,7 @@ export default definePlugin(() => {
         forceRefresh,
       );
       readerCache.acceptOfflineGuide(guide);
+      let positionError: string | null = null;
       // Imported publication already persists the game association before unload can stop the backend.
       if (mounted && imported) status.rememberGuide(identity);
       if (mounted && !imported) {
@@ -438,15 +442,50 @@ export default definePlugin(() => {
           await readerCache.rememberAccess(identity, handoff);
           if (mounted) status.rememberGuide(identity);
         } catch (error: unknown) {
+          positionError = errorMessage(error);
+        }
+      }
+      if (mounted && !signal?.aborted) {
+        let opening = false;
+        try {
           toaster.toast({
-            title: "GRIP：图文已下载，阅读记录保存失败",
-            body: errorMessage(error),
+            title: positionError
+              ? "GRIP：图文已下载，阅读记录保存失败"
+              : "GRIP：图文已下载",
+            body: guide.title,
+            subtext: positionError ? `${positionError}；点击阅读` : "点击阅读",
+            playSound: false,
+            onClick: () => {
+              if (!mounted || opening) return;
+              opening = true;
+              const modal = importModal;
+              void openReader(undefined, identity)
+                .then(() => {
+                  if (mounted && modal && importModal === modal) {
+                    modal.Close();
+                    importModal = null;
+                  }
+                })
+                .catch((error: unknown) => {
+                  if (mounted)
+                    toaster.toast({
+                      title: "GRIP：打开失败",
+                      body: errorMessage(error),
+                    });
+                })
+                .finally(() => {
+                  opening = false;
+                });
+            },
           });
+        } catch (error: unknown) {
+          // A notification failure must not turn a published offline guide into a failed job.
+          console.warn("[GRIP] Could not notify download completion", error);
         }
       }
       return guide;
     } catch (error: unknown) {
-      if (!signal?.aborted)
+      if (mounted && !signal?.aborted)
         toaster.toast({ title: "GRIP：下载未完成", body: errorMessage(error) });
       throw error;
     } finally {
@@ -457,6 +496,7 @@ export default definePlugin(() => {
 
   const downloads = new GuideDownloadTasks(cacheGuide);
   let importModal: ReturnType<typeof showModal> | null = null;
+  let importDraft: ImportGuideDraft | undefined;
   const openImport = async () => {
     if (importModal || !mounted) return;
     const pathApp = currentMainPath()?.match(/^\/library\/app\/([1-9]\d*)/);
@@ -475,6 +515,11 @@ export default definePlugin(() => {
         window.appStore?.GetAppOverviewByAppID(Number(data))?.display_name ||
         `游戏 ${data}`,
     }));
+    importDraft = {
+      text: importDraft?.text ?? "",
+      game: importDraft?.game ?? games[0] ?? null,
+      identity: importDraft?.identity ?? null,
+    };
     const close = () => {
       importModal?.Close();
       importModal = null;
@@ -483,6 +528,10 @@ export default definePlugin(() => {
       <ImportGuideModal
         games={games}
         downloads={downloads}
+        initialDraft={importDraft}
+        onDraftChange={(draft) => {
+          importDraft = draft;
+        }}
         onOpen={(identity) => openReader(undefined, identity)}
         closeModal={close}
       />,

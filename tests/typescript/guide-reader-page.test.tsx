@@ -1274,7 +1274,7 @@ describe("GuideReaderPage position lifecycle", () => {
     }
   });
 
-  it("shows full focused chapter titles in an overlay and highlights the current chapter without reflow", async () => {
+  it("shows full focused chapter titles while keeping the current chapter visibly separate from focus", async () => {
     const guide = guideFixture();
     const title = "第一章：完整的章节名称与很长的任务说明";
     guide.sections = [
@@ -1319,9 +1319,14 @@ describe("GuideReaderPage position lifecycle", () => {
     toc.getBoundingClientRect = () => ({ left: 712 }) as DOMRect;
     first.getBoundingClientRect = () => ({ top: 100, bottom: 140 }) as DOMRect;
     expect(second.getAttribute("aria-current")).toBe("location");
+    expect(second.textContent).toContain("当前章节");
+    expect(second.querySelector("div")?.textContent).toBe("当前章节");
     expect(first.hasAttribute("aria-current")).toBe(false);
+    expect(first.textContent).not.toContain("当前章节");
     const body = scroller.querySelector("[data-guide-search-body]");
     await act(async () => first.focus());
+    expect(document.activeElement).toBe(first);
+    expect(second.textContent).toContain("当前章节");
     expect(first.textContent).toBe(title);
     expect(first.style.whiteSpace).toBe("normal");
     expect(first.style.overflowWrap).toBe("anywhere");
@@ -1336,6 +1341,20 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(toc.style.width).toBe("172px");
     expect(document.activeElement).toBe(scroller);
     expect(scroller.scrollTop).toBe(650);
+
+    await act(async () => {
+      scroller.scrollTop = 0;
+      scroller.dispatchEvent(new Event("scroll"));
+    });
+    await flushFrame();
+    expect(first.getAttribute("aria-current")).toBe("location");
+    expect(first.textContent).toContain("当前章节");
+    expect(second.hasAttribute("aria-current")).toBe(false);
+    expect(second.textContent).not.toContain("当前章节");
+    await act(async () => second.focus());
+    expect(document.activeElement).toBe(second);
+    expect(first.textContent).toContain("当前章节");
+    expect(second.textContent).toBe("第二章");
   });
 
   it.each([1000, 6000])(

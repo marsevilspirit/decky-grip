@@ -23,20 +23,39 @@ export interface ImportGame {
   label: string;
 }
 
+export interface ImportGuideDraft {
+  text: string;
+  game: ImportGame | null;
+  identity: GuideIdentity | null;
+}
+
 export function ImportGuideModal({
   games,
   downloads,
+  initialDraft,
+  onDraftChange,
   onOpen,
   closeModal,
 }: {
   games: ImportGame[];
   downloads: GuideDownloadTasks;
+  initialDraft?: ImportGuideDraft;
+  onDraftChange?: (draft: ImportGuideDraft) => void;
   onOpen: (identity: GuideIdentity) => Promise<void>;
   closeModal?: () => void;
 }) {
-  const [text, setText] = useState("");
-  const [appId, setAppId] = useState(games[0]?.data ?? "");
-  const [identity, setIdentity] = useState<GuideIdentity | null>(null);
+  const [draft, setDraft] = useState<ImportGuideDraft>(() => ({
+    text: initialDraft?.text ?? "",
+    game: initialDraft?.game ?? games[0] ?? null,
+    identity: initialDraft?.identity ?? null,
+  }));
+  const draftRef = useRef(draft);
+  const { text, game, identity } = draft;
+  const appId = game?.data ?? "";
+  const gameOptions =
+    game && !games.some((candidate) => candidate.data === game.data)
+      ? [game, ...games]
+      : games;
   const [error, setError] = useState<string | null>(null);
   const [opening, setOpening] = useState(false);
   const mounted = useRef(true);
@@ -54,14 +73,17 @@ export function ImportGuideModal({
   const busy = task?.phase === "downloading" || task?.phase === "canceling";
   const locked = busy || opening;
   const progress = task?.progress;
-  const resetFeedback = () => {
-    setIdentity(null);
+  const updateDraft = (change: Partial<ImportGuideDraft>) => {
+    const next = { ...draftRef.current, ...change };
+    draftRef.current = next;
+    setDraft(next);
+    // Save on edits, not on close: Steam may dismiss the modal through its native return path.
+    onDraftChange?.(next);
     setError(null);
   };
   const changeLink = (link: string) => {
     if (starting.current || openingRef.current || busy) return;
-    setText(link);
-    resetFeedback();
+    updateDraft({ text: link, identity: null });
   };
   const start = () => {
     if (starting.current || openingRef.current || busy) return;
@@ -76,8 +98,7 @@ export function ImportGuideModal({
       ) {
         throw new Error("这篇攻略正在后台导入，请等待完成后再为所选游戏导入");
       }
-      setIdentity(next);
-      setError(null);
+      updateDraft({ identity: next });
       starting.current = true;
       void downloads.start(next, true).finally(() => {
         starting.current = false;
@@ -117,15 +138,18 @@ export function ImportGuideModal({
             onChange={(event) => changeLink(event.target.value)}
           />
           <PhoneImport disabled={locked} onLink={changeLink} />
-          {games.length ? (
+          {gameOptions.length ? (
             <DropdownItem
               label="保存到游戏"
               selectedOption={appId}
-              rgOptions={games}
+              rgOptions={gameOptions}
               disabled={locked}
               onChange={(option) => {
-                setAppId(String(option.data));
-                resetFeedback();
+                if (starting.current || openingRef.current || busy) return;
+                const next = gameOptions.find(
+                  (candidate) => candidate.data === String(option.data),
+                );
+                if (next) updateDraft({ game: next, identity: null });
               }}
             />
           ) : (

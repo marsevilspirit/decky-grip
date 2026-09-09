@@ -1864,6 +1864,7 @@ export function GuideReaderPage({
                         width: "100%",
                       }}
                     >
+                      {activeSectionId === section.id && <div>当前章节</div>}
                       {navigationOpen
                         ? section.title
                         : shortSectionTitle(section.title)}
