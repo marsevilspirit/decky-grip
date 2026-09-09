@@ -2018,10 +2018,10 @@ describe("GuideReaderPage position lifecycle", () => {
         expect(
           container!.querySelector('[role="alertdialog"]')?.textContent,
         ).toContain("图片清理失败");
-        expect(buttonNamed("确认卸载").getAttribute("aria-disabled")).toBe(
+        expect(buttonNamed("确认清理残留").getAttribute("aria-disabled")).toBe(
           "false",
         );
-        await act(async () => buttonNamed("确认卸载").click());
+        await act(async () => buttonNamed("确认清理残留").click());
         expect(remove.mock.calls).toEqual([[other.guideId], [other.guideId]]);
         expect(loadLibrary).toHaveBeenCalledTimes(3);
       }
@@ -2560,6 +2560,93 @@ describe("GuideReaderPage position lifecycle", () => {
       "指南打开失败：offline",
     );
     expect(onSwitchGuide).not.toHaveBeenCalled();
+  });
+
+  it("retries a library refresh failure without reopening a previously failed guide", async () => {
+    const guide = guideFixture();
+    const getGuide = vi.fn(async ({ guideId }: GuideIdentity) => {
+      if (guideId === identity.guideId) return guide;
+      throw new Error("B 正文读取失败");
+    });
+    const cache = new ReaderSessionCache({
+      getCachedGuide: async (guideId) =>
+        guideId === identity.guideId ? guide : null,
+      getGuide,
+      getReaderPosition: async () => null,
+      saveReaderPosition: async (
+        _key,
+        scrollTop,
+        sectionId,
+        anchorText,
+        anchorOffset,
+      ) => ({ scrollTop, sectionId, anchorText, anchorOffset, updatedAt: 2 }),
+    });
+    await cache.load(identity);
+    let library: GuideLibraryEntry[] = [
+      { ...identity, guideId: "20", updatedAt: 1, cache: null },
+      {
+        ...identity,
+        guideId: "30",
+        updatedAt: 1,
+        cache: {
+          title: "指南 C",
+          author: "作者 C",
+          fetchedAt: 1,
+          sectionTitle: null,
+          stale: false,
+        },
+      },
+    ];
+    const loadLibrary = vi.fn(async () => library);
+    const remove = vi.fn(async (guideId: string) => {
+      library = library.map((entry) =>
+        entry.guideId === guideId ? { ...entry, cache: null } : entry,
+      );
+      return { filesRemoved: 1, bytesRemoved: 100 };
+    });
+    const onSwitchGuide = vi.fn(async () => undefined);
+    const scroller = await mount(cache, async () => null, 12_000, {
+      loadGuideLibrary: loadLibrary,
+      onRemoveOffline: remove,
+      onSwitchGuide,
+    });
+    const choice = (guideId: string) =>
+      container!.querySelector<HTMLButtonElement>(
+        `[data-grip-guide-choice="${identity.appId}:${guideId}"]`,
+      )!;
+    await act(async () => pressKey(scroller, "Options"));
+    await act(async () => choice("20").click());
+    await flushMicrotasks();
+    expect(choice("20").textContent).toContain("指南打开失败：B 正文读取失败");
+
+    loadLibrary.mockRejectedValueOnce(new Error("指南列表读取失败（测试）"));
+    await act(async () => {
+      choice("30").focus();
+      pressKey(choice("30"), "Secondary");
+    });
+    await act(async () => buttonNamed("确认卸载").click());
+    await flushMicrotasks();
+
+    expect(remove).toHaveBeenCalledExactlyOnceWith("30");
+    expect(loadLibrary).toHaveBeenCalledTimes(2);
+    expect(
+      buttonNamed("重新读取指南列表").closest('[role="alert"]')?.textContent,
+    ).toContain("指南列表读取失败（测试）");
+    expect(choice("20").textContent).toContain("指南打开失败：B 正文读取失败");
+    expect(choice("20").textContent).not.toContain("指南列表读取失败");
+    expect(choice("30").textContent).toContain("已卸载");
+
+    await act(async () => buttonNamed("重新读取指南列表").click());
+    await flushMicrotasks();
+    expect(loadLibrary).toHaveBeenCalledTimes(3);
+    expect(container!.textContent).not.toContain("指南列表读取失败（测试）");
+    expect(choice("20").textContent).toContain("指南打开失败：B 正文读取失败");
+    expect(getGuide.mock.calls.map(([target]) => target.guideId)).toEqual([
+      identity.guideId,
+      "20",
+    ]);
+    expect(onSwitchGuide).not.toHaveBeenCalled();
+    expect(container!.querySelector('[aria-label="指南正文"]')).toBe(scroller);
   });
 
   it("interrupts a warm restore to keep exact search matches aligned", async () => {

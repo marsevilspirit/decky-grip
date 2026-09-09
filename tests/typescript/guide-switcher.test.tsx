@@ -131,6 +131,7 @@ describe("GuideSwitcher", () => {
       entries: [entry("1"), entry("2"), entry("3")],
       currentGuideId: "1",
       pendingKey: null,
+      listError: null,
       error: null,
       removed: false,
       removeDisabled: false,
@@ -289,20 +290,21 @@ describe("GuideSwitcher", () => {
     },
   );
 
-  it("does not uninstall a target whose cache disappeared while its management was open", async () => {
+  it("allows explicit leftover cleanup when the body disappeared while management was open", async () => {
     await render();
     await manage("2");
     await render({
       entries: [entry("1"), { ...entry("2"), cache: null }, entry("3")],
     });
-    expect(button("确认卸载").getAttribute("aria-disabled")).toBe("true");
-    await click(button("确认卸载"));
+    expect(button("确认清理残留").getAttribute("aria-disabled")).toBe("false");
     expect(props.onRemove).not.toHaveBeenCalled();
     expect(
       container
         .querySelector('[role="alertdialog"]')
         ?.getAttribute("aria-label"),
     ).toBe("管理指南：指南 2");
+    await click(button("确认清理残留"));
+    expect(props.onRemove).toHaveBeenCalledExactlyOnceWith(entry("2"));
   });
 
   it("moves from loading to a card, including when only the current guide exists", async () => {
@@ -353,7 +355,7 @@ describe("GuideSwitcher", () => {
     await act(async () => target.focus());
     await render({
       entries: [entry("1"), entry("2"), { ...entry("3"), updatedAt: 2 }],
-      error: "列表读取失败",
+      listError: "列表读取失败",
     });
     expect(choice("3")).toBe(target);
     expect(document.activeElement).toBe(target);
@@ -363,9 +365,9 @@ describe("GuideSwitcher", () => {
   });
 
   it("focuses list retry when loading failed and has a readable empty state", async () => {
-    await render({ entries: null, error: "列表读取失败" });
+    await render({ entries: null, listError: "列表读取失败" });
     expect(document.activeElement).toBe(button("重新读取指南列表"));
-    await render({ entries: [], error: null });
+    await render({ entries: [], listError: null });
     expect(document.activeElement).toBe(dialog());
     expect(dialog().textContent).toContain("还没有已记录的指南");
   });
@@ -529,7 +531,7 @@ describe("GuideSwitcher", () => {
     expect(props.onRemove).toHaveBeenCalledOnce();
   });
 
-  it("keeps failed removal in confirmation and allows an explicit retry", async () => {
+  it("keeps partial cleanup retryable after canceling and reopening management", async () => {
     const onRemove = vi
       .fn()
       .mockRejectedValueOnce(new Error("磁盘忙"))
@@ -547,11 +549,17 @@ describe("GuideSwitcher", () => {
     await render({
       entries: [entry("1"), { ...entry("2"), cache: null }, entry("3")],
     });
-    expect(button("确认卸载").getAttribute("aria-disabled")).toBe("false");
+    expect(button("确认清理残留").getAttribute("aria-disabled")).toBe("false");
     expect(
       container.querySelector('[role="alertdialog"]')?.textContent,
     ).toContain("可重试完成剩余离线文件的清理。");
-    await click(confirm);
+    await click(button("取消"));
+    await manage("2");
+    const retry = container.querySelector<HTMLButtonElement>(
+      '[role="alertdialog"] button:last-child',
+    )!;
+    expect(retry.getAttribute("aria-disabled")).toBe("false");
+    await click(retry);
     expect(onRemove).toHaveBeenCalledTimes(2);
     expect(onRemove.mock.calls.map(([target]) => target.guideId)).toEqual([
       "2",
@@ -560,7 +568,7 @@ describe("GuideSwitcher", () => {
     expect(container.querySelector('[role="alertdialog"]')).toBeNull();
   });
 
-  it("keeps management available but blocks uninstall while busy, uncached, or already removed", async () => {
+  it("allows leftover cleanup while blocking busy or already completed removal", async () => {
     await render({ removeDisabled: true });
     await manage("1");
     expect(container.querySelector('[role="alertdialog"]')).not.toBeNull();
@@ -576,8 +584,8 @@ describe("GuideSwitcher", () => {
     await manage("2");
     expect(
       container.querySelector('[role="alertdialog"]')?.textContent,
-    ).toContain("没有可卸载的离线副本");
-    await click(button("确认卸载"));
+    ).toContain("可重试完成剩余离线文件的清理");
+    expect(button("确认清理残留").getAttribute("aria-disabled")).toBe("false");
     expect(props.onRemove).not.toHaveBeenCalled();
     await click(button("取消"));
     await manage("3");

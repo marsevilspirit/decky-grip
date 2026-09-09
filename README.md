@@ -327,7 +327,10 @@ management button. The confirmation names the target guide; it does not need
 to be the one currently being read.
 This removes its body and all unreferenced images, including leftovers from
 older updates, while preserving other cached guides and active downloads. If
-another guide cannot be inspected safely, deletion stops. The current in-memory
+the body is already gone after partial cleanup, **确认清理残留** retries image
+cleanup, even after canceling or reopening the reader. The same shared-image
+and active-download protections apply. If another guide cannot be inspected
+safely, deletion stops. The current in-memory
 article remains readable. Cache deletion is unavailable during an active
 download. Clearing images also invalidates in-flight frontend work, and none
 of these controls deletes saved reading positions.

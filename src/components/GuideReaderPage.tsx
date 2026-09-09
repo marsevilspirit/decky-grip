@@ -205,6 +205,9 @@ export function GuideReaderPage({
   const [guideLibrary, setGuideLibrary] = useState<GuideLibraryEntry[] | null>(
     null,
   );
+  const [guideLibraryError, setGuideLibraryError] = useState<string | null>(
+    null,
+  );
   const [guideSwitcherError, setGuideSwitcherError] = useState<string | null>(
     null,
   );
@@ -334,7 +337,7 @@ export function GuideReaderPage({
     switchRequestRef.current = null;
     setSwitchPending(null);
     setGuideSwitcherOpen(false);
-    if (guideLibrary !== null) setGuideSwitcherError(null);
+    setGuideSwitcherError(null);
     scheduleFocus(() => {
       focusWithoutScrolling(scrollerRef.current);
     });
@@ -631,7 +634,7 @@ export function GuideReaderPage({
         ? entries
         : null,
     );
-    setGuideSwitcherError(null);
+    setGuideLibraryError(null);
     void loadGuideLibrary(identity.appId)
       .then((entries) => {
         if (!canceled) {
@@ -640,7 +643,7 @@ export function GuideReaderPage({
       })
       .catch((reason: unknown) => {
         if (!canceled) {
-          setGuideSwitcherError(errorMessage(reason));
+          setGuideLibraryError(errorMessage(reason));
         }
       });
     return () => {
@@ -1946,6 +1949,7 @@ export function GuideReaderPage({
           entries={guideChoices}
           currentGuideId={identity.guideId}
           pendingKey={switchPending}
+          listError={guideLibraryError}
           error={guideSwitcherError}
           removed={offlineRemoved}
           removeDisabled={anyDownloadActive || refreshPending}

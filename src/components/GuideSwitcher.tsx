@@ -9,6 +9,7 @@ export interface GuideSwitcherProps {
   entries: GuideLibraryEntry[] | null;
   currentGuideId: string;
   pendingKey: string | null;
+  listError: string | null;
   error: string | null;
   removed: boolean;
   removeDisabled: boolean;
@@ -64,6 +65,7 @@ export function GuideSwitcher({
   entries,
   currentGuideId,
   pendingKey,
+  listError,
   error,
   removed,
   removeDisabled,
@@ -98,10 +100,11 @@ export function GuideSwitcher({
     );
   const cannotRemove =
     !targetInLibrary ||
-    (!targetInLibrary.cache && !removeError) ||
     (removeTarget !== null && removedEntry(removeTarget)) ||
     removeDisabled ||
     pendingKey !== null;
+  // The body can already be gone after partial cleanup. The backend safely retries image reclamation.
+  const cleanupOnly = !targetInLibrary?.cache;
   const failedKey = error && pendingKey === null ? chosenKey : null;
   const failedEntry = entries?.find(
     (entry) => makeGuideKey(entry) === failedKey,
@@ -144,7 +147,7 @@ export function GuideSwitcher({
       target.focus({ preventScroll: true });
     });
     return () => cancelAnimationFrame(frame);
-  }, [entries, error, confirming]);
+  }, [entries, listError, error, confirming]);
 
   const cancel = (event: CustomEvent | KeyboardEvent) => {
     event.preventDefault();
@@ -320,20 +323,19 @@ export function GuideSwitcher({
           padding: "4px 6px 8px",
         }}
       >
-        {entries === null && !error && (
+        {entries === null && !listError && !error && (
           <div role="status">
             <BusyLabel>正在读取本游戏指南…</BusyLabel>
           </div>
         )}
-        {error && !failedEntry && (
+        {listError && (
           <div role="alert" style={{ color: "#ffc4b8", marginBottom: 12 }}>
-            <p>{error}</p>
+            <p>{listError}</p>
             <Button
               data-grip-guide-list-retry="true"
               aria-disabled={pendingKey !== null}
               onClick={() => {
                 if (pendingKey !== null) return;
-                setChosenKey(null);
                 onReload();
               }}
             >
@@ -341,7 +343,10 @@ export function GuideSwitcher({
             </Button>
           </div>
         )}
-        {entries?.length === 0 && !error && <p>本游戏还没有已记录的指南。</p>}
+        {error && !failedEntry && <p role="alert">{error}</p>}
+        {entries?.length === 0 && !listError && !error && (
+          <p>本游戏还没有已记录的指南。</p>
+        )}
         {entries?.map((entry) => {
           const key = makeGuideKey(entry);
           const current = entry.guideId === currentGuideId;
@@ -451,13 +456,16 @@ export function GuideSwitcher({
             <p>作者：{removeTarget.cache.author}</p>
           )}
           <p>
-            卸载这篇指南的正文和独有图片？阅读位置及其他指南共用的图片会保留。同一篇指南在其他游戏中的离线副本也会卸载。
+            {cleanupOnly
+              ? "正文未缓存，是否清理未完成卸载留下的图片？"
+              : "卸载这篇指南的正文和独有图片？"}
+            阅读位置及其他指南共用的图片会保留。同一篇指南在其他游戏中的离线副本也会卸载。
           </p>
           {(!targetInLibrary?.cache || removedEntry(removeTarget)) && (
             <p role="status">
-              {removeError && targetInLibrary
-                ? "可重试完成剩余离线文件的清理。"
-                : "这篇指南没有可卸载的离线副本。"}
+              {removedEntry(removeTarget)
+                ? "这篇指南的离线副本已卸载。"
+                : "可重试完成剩余离线文件的清理。"}
             </p>
           )}
           {removeDisabled && (
@@ -480,6 +488,8 @@ export function GuideSwitcher({
             >
               {removeMode === "busy" ? (
                 <BusyLabel>正在卸载…</BusyLabel>
+              ) : cleanupOnly ? (
+                "确认清理残留"
               ) : (
                 "确认卸载"
               )}
