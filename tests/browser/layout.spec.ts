@@ -290,6 +290,55 @@ test("1280×800: a search hit stays visible after a delayed local image really l
   }
 });
 
+test("1280×800: Left returns from every chapter control without stealing the search cursor", async ({
+  page,
+}) => {
+  await openReader(page);
+  for (let index = 0; index < 8; index++)
+    await page.keyboard.press("ArrowDown");
+  const measure = () =>
+    reader(page).evaluate((element) => ({
+      scrollTop: element.scrollTop,
+      width: element.getBoundingClientRect().width,
+    }));
+  const before = await measure();
+  expect(before.scrollTop).toBeGreaterThan(500);
+  const panel = page.locator(".grip-reader-toc");
+  for (const control of [
+    panel.getByRole("button", { name: "搜索指南正文", exact: true }),
+    panel.getByRole("button", { name: "更新指南", exact: true }),
+    panel.locator('[data-grip-toc-section="2"]'),
+    panel.locator("[data-grip-toc-section]").last(),
+  ]) {
+    await reader(page).press("ArrowRight");
+    await expect(panel).toHaveAttribute("role", "dialog");
+    await expect(
+      panel.locator('[data-grip-toc-section][aria-current="location"]'),
+    ).toBeFocused();
+    await expect(reader(page)).toHaveJSProperty("inert", true);
+    await control.focus();
+    await control.press("ArrowLeft");
+    await expect(panel).toHaveAttribute("data-expanded", "false");
+    await expect(panel).toHaveAttribute("role", "navigation");
+    await expect(reader(page)).toBeFocused();
+    await expect(reader(page)).toHaveJSProperty("inert", false);
+    expect(await measure()).toEqual(before);
+    await expect(
+      page.getByRole("heading", { name: "阅读器已关闭" }),
+    ).toHaveCount(0);
+  }
+
+  await page.keyboard.press("Control+f");
+  const input = page.getByRole("textbox", { name: "搜索指南正文" });
+  await input.fill("章节");
+  await input.press("ArrowLeft");
+  await expect(input).toBeFocused();
+  await expect(input).toHaveJSProperty("selectionStart", 1);
+  await expect(input).toHaveJSProperty("selectionEnd", 1);
+  await expect(panel).toHaveAttribute("role", "search");
+  expect(await measure()).toEqual(before);
+});
+
 test("1280×800: native dialog layout keeps long chapter and search lists vertical without moving the article", async ({
   page,
 }) => {

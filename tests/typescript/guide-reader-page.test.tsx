@@ -1558,9 +1558,17 @@ describe("GuideReaderPage position lifecycle", () => {
     );
     expect(document.activeElement).toBe(last);
     expect(toc.getAttribute("data-native-flow")).toBe("column");
-    const direction = gamepadEvent("onGamepadDirection", GamepadButton.DIR_UP);
-    last.dispatchEvent(direction);
-    expect(direction.defaultPrevented).toBe(false);
+    for (const button of [
+      GamepadButton.DIR_UP,
+      GamepadButton.DIR_DOWN,
+      GamepadButton.DIR_RIGHT,
+    ]) {
+      const direction = gamepadEvent("onGamepadDirection", button);
+      await act(async () => last.dispatchEvent(direction));
+      expect(direction.defaultPrevented).toBe(false);
+      expect(toc.getAttribute("data-expanded")).toBe("true");
+      expect(document.activeElement).toBe(last);
+    }
     await act(async () => pressKey(document.activeElement!, "Escape"));
     await flushFrame();
     expect(document.activeElement).toBe(scroller);
@@ -1575,6 +1583,43 @@ describe("GuideReaderPage position lifecycle", () => {
     await act(async () => pressKey(scroller, "ArrowRight"));
     await flushFrame();
     expect(toc.getAttribute("data-expanded")).toBe("true");
+    const chapter = document.activeElement!;
+    expect(chapter.hasAttribute("data-grip-toc-section")).toBe(true);
+    const handledLeft = gamepadEvent(
+      "onGamepadDirection",
+      GamepadButton.DIR_LEFT,
+    );
+    handledLeft.preventDefault();
+    const stopHandledLeft = vi.spyOn(handledLeft, "stopPropagation");
+    await act(async () => chapter.dispatchEvent(handledLeft));
+    await flushFrame();
+    expect(stopHandledLeft).not.toHaveBeenCalled();
+    expect(toc.getAttribute("data-expanded")).toBe("true");
+    expect(document.activeElement).toBe(chapter);
+    const repeatedLeft = gamepadEvent(
+      "onGamepadDirection",
+      GamepadButton.DIR_LEFT,
+      true,
+    );
+    await act(async () => chapter.dispatchEvent(repeatedLeft));
+    await flushFrame();
+    expect(repeatedLeft.defaultPrevented).toBe(true);
+    expect(toc.getAttribute("data-expanded")).toBe("true");
+    expect(scroller.hasAttribute("inert")).toBe(true);
+    expect(document.activeElement).toBe(chapter);
+    const left = gamepadEvent("onGamepadDirection", GamepadButton.DIR_LEFT);
+    await act(async () => chapter.dispatchEvent(left));
+    expect(left.defaultPrevented).toBe(true);
+    expect(toc.getAttribute("data-expanded")).toBe("false");
+    expect(scroller.hasAttribute("inert")).toBe(false);
+    await flushFrame();
+    expect(document.activeElement).toBe(scroller);
+    expect(scroller.scrollTop).toBe(234);
+    expect(scroller.style.marginRight).toBe(margin);
+    expect(scroller.querySelector("[data-guide-search-body]")).toBe(body);
+    expect(close).not.toHaveBeenCalled();
+    await act(async () => pressKey(scroller, "ArrowRight"));
+    await flushFrame();
     await act(async () => pressKey(document.activeElement!, "Secondary"));
     await flushFrame();
     expect(document.activeElement).toBe(scroller);
@@ -1601,6 +1646,26 @@ describe("GuideReaderPage position lifecycle", () => {
       search.dispatchEvent(new Event("input", { bubbles: true }));
     });
     expect(toc.getAttribute("role")).toBe("search");
+    for (const control of [
+      search,
+      buttonNamed("上一个"),
+      buttonNamed("下一个"),
+    ]) {
+      const searchLeft = gamepadEvent(
+        "onGamepadDirection",
+        GamepadButton.DIR_LEFT,
+      );
+      await act(async () => {
+        control.focus();
+        control.dispatchEvent(searchLeft);
+      });
+      await flushFrame();
+      expect(searchLeft.defaultPrevented).toBe(false);
+      expect(toc.getAttribute("role")).toBe("search");
+      expect(search.value).toBe("章节");
+      expect(document.activeElement).toBe(control);
+    }
+    await act(async () => search.focus());
     // Native TextField only owns A-to-edit; X without the keyboard bubbles.
     // With the keyboard open, Steam owns X (backspace) and consumes B itself.
     for (const repeat of [false, true]) {

@@ -1616,6 +1616,20 @@ export function GuideReaderPage({
             onCancelActionDescription={
               guideSearchOpen ? "返回目录" : "返回正文"
             }
+            onGamepadDirection={(event) => {
+              if (
+                event.defaultPrevented ||
+                readerCovered ||
+                navigationMode !== "toc" ||
+                event.detail.button !== GamepadButton.DIR_LEFT
+              )
+                return false;
+              event.preventDefault();
+              event.stopPropagation();
+              // Closing removes the article's inert state before the scheduled focus.
+              if (!event.detail.is_repeat) closeNavigation();
+              return true;
+            }}
             onKeyDown={(event) => {
               if (event.altKey || event.ctrlKey || event.metaKey) return;
               if (

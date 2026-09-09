@@ -109,10 +109,13 @@ stylesheet, so local browser tests are not native-style visual acceptance.
 Steam owns list/toolbar focus navigation and modal focus isolation/return through
 `SimpleModal`, `ModalRoot` and `ConfirmModal`; do not add manual arrow-key or Tab
 loops. Logical gamepad callbacks must return `false` for unhandled input (an
-implicit return consumes it). Reader scrolling uses Steam's own step and boundary
-logic in immediate mode: its smooth hook exposes no cancellation, so an old
-animation could overwrite a chapter jump or restored position. If the hook is
-unavailable, the reader explicitly reports compatibility scrolling.
+implicit return consumes it). Right opens the chapter panel; left closes it and
+returns to the article after removing its inert state, through the same path as
+X/B. Search retains its own direction-key behavior. Reader scrolling uses Steam's
+own step and boundary logic in immediate mode: its smooth hook exposes no
+cancellation, so an old animation could overwrite a chapter jump or restored
+position. If the hook is unavailable, the reader explicitly reports compatibility
+scrolling.
 
 Native component contracts can also be checked against an installed Steam
 client: `node --test tests/scripts/steam-native-contract.test.mjs`. The test
