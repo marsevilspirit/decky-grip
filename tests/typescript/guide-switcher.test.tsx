@@ -183,6 +183,16 @@ describe("GuideSwitcher", () => {
     });
     await act(async () => vi.advanceTimersByTimeAsync(0));
   };
+  const contextMenu = async (node: Element) => {
+    const event = new MouseEvent("contextmenu", {
+      button: 2,
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => node.dispatchEvent(event));
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    return event;
+  };
   const key = async (
     node: HTMLElement,
     value: string,
@@ -256,6 +266,45 @@ describe("GuideSwitcher", () => {
     await click(button("确认卸载"));
     expect(props.onRemove).toHaveBeenLastCalledWith(props.entries![0]);
     expect(props.onRemove).toHaveBeenCalledTimes(2);
+  });
+
+  it("right-clicks the pointed guide without reading it or opening a browser menu, then returns focus to that row", async () => {
+    await render();
+    const target = choice("2");
+    await act(async () => choice("3").focus());
+    const escaped = vi.fn();
+    document.body.addEventListener("contextmenu", escaped);
+    const event = await contextMenu(target.querySelector(".FieldLabel")!);
+    document.body.removeEventListener("contextmenu", escaped);
+    expect(event.defaultPrevented).toBe(true);
+    expect(escaped).not.toHaveBeenCalled();
+    expect(confirmationProps().strTitle).toBe("管理指南：指南 2");
+    expect(container.querySelector('[role="menu"]')).toBeNull();
+    expect(container.querySelector("[data-grip-guide-manage]")).toBeNull();
+    expect(props.onChoose).not.toHaveBeenCalled();
+    expect(props.onRemove).not.toHaveBeenCalled();
+    await click(button("取消"));
+    expect(document.activeElement).toBe(target);
+    await key(target, "Enter");
+    expect(props.onChoose).toHaveBeenCalledExactlyOnceWith(props.entries![1]);
+  });
+
+  it("shares pending and confirmation guards between right-click and X without moving focus behind the modal", async () => {
+    await render({ pendingKey: "10:3" });
+    await act(async () => choice("3").focus());
+    const event = await contextMenu(choice("2"));
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(choice("3"));
+    expect(container.querySelector('[aria-label^="管理指南："]')).toBeNull();
+    await render({ pendingKey: null });
+    await manage("2");
+    const cancel = button("取消");
+    expect(document.activeElement).toBe(cancel);
+    await contextMenu(choice("3"));
+    expect(confirmationProps().strTitle).toBe("管理指南：指南 2");
+    expect(document.activeElement).toBe(cancel);
+    expect(props.onChoose).not.toHaveBeenCalled();
+    expect(props.onRemove).not.toHaveBeenCalled();
   });
 
   it.each(["gamepad"])(
@@ -577,6 +626,9 @@ describe("GuideSwitcher", () => {
     expect(confirm.classList.contains("Disabled")).toBe(true);
     expect(button("取消").classList.contains("Disabled")).toBe(true);
     expect(confirm.textContent).toContain("正在卸载");
+    const blockedContext = await contextMenu(choice("3"));
+    expect(blockedContext.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(confirm);
     // Steam calls closeModal after its cancel callback even when cancel is disabled.
     await act(async () => {
       (confirmationProps().onCancel as () => void)();

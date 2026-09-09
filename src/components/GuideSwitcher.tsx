@@ -12,7 +12,7 @@ import {
   type FieldProps,
   type FocusableProps,
 } from "@decky/ui";
-import { useRef, useState, type FC } from "react";
+import { useRef, useState, type FC, type MouseEventHandler } from "react";
 
 import type { CacheClearResult, GuideLibraryEntry } from "../backend";
 import { isHeyboxGuideId, makeGuideKey } from "../steam/guide-key";
@@ -34,7 +34,12 @@ export interface GuideSwitcherProps {
 
 // The original Steam Field forwards these navigation/DOM props; Decky's declaration omits them.
 const Field = SteamField as FC<
-  FieldProps & { role: "button"; tabIndex: number; preferredFocus?: boolean }
+  FieldProps & {
+    role: "button";
+    tabIndex: number;
+    preferredFocus?: boolean;
+    onContextMenu?: MouseEventHandler<HTMLDivElement>;
+  }
 >;
 const ScrollPanel = SteamScrollPanel as FC<
   FocusableProps & { scrollDirection: "y" }
@@ -100,8 +105,12 @@ export function GuideSwitcher({
     if (!removalInFlight.current) setRemoveMode(null);
   };
 
-  const openManagement = (entry: GuideLibraryEntry) => {
+  const openManagement = (
+    entry: GuideLibraryEntry,
+    focusTarget?: HTMLElement,
+  ) => {
     if (removalInFlight.current || confirming || pendingKey !== null) return;
+    focusTarget?.focus({ preventScroll: true });
     setRemoveTarget(entry);
     setRemoveError(null);
     setRemoveMode("confirm");
@@ -231,6 +240,11 @@ export function GuideSwitcher({
                     event.preventDefault();
                     event.stopPropagation();
                     if (!event.detail.is_repeat) openManagement(entry);
+                  }}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    openManagement(entry, event.currentTarget);
                   }}
                   onClick={() => {
                     // Field's disabled prop only styles the row; both native A and clicks reach here.

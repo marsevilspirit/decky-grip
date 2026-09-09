@@ -123,6 +123,15 @@ Steam progress takes a 0–100 percentage. A disabled DialogButton retains its
 focusable DOM node; its native disabled styling and event blocking are not the
 same contract as an HTML button's `disabled` attribute.
 
+Image viewer hints use Steam's action-description map; unavailable actions are
+`null` so ancestor hints cannot leak through. A guide row's right click shares
+the X management action and restores focus to that row without adding a button.
+Search yields X instead of treating it as a reader-navigation shortcut: Steam's
+open keyboard uses X for backspace, not whole-field clearing. `TextField`'s clear
+control is a separate pointer action. The installed-runtime contracts verify
+A-to-edit, keyboard B-to-hide, X-to-backspace and pointer clearing separately;
+browser input stand-ins do not certify the virtual keyboard or physical input.
+
 The UI composition was cross-checked against public source on 2026-09-09:
 
 - [SteamGridDB's focusable Field](https://github.com/SteamGridDB/decky-steamgriddb/blob/271c01d9ba5a775e573f5a15ad0786ff9beb00ae/src/components/qam-contents/QuickAccessSettings.tsx#L187-L203)

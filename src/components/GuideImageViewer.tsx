@@ -168,8 +168,16 @@ function ImageViewerContent({ image, images, onClose }: GuideImageViewerProps) {
       aria-modal="true"
       aria-label="图片全屏查看"
       flow-children="column"
-      onCancelActionDescription="返回正文"
-      onSecondaryActionDescription="适应屏幕"
+      actionDescriptionMap={{
+        [GamepadButton.CANCEL]: "返回正文",
+        [GamepadButton.SECONDARY]: "适应屏幕",
+        [GamepadButton.OPTIONS]: null,
+        [GamepadButton.BUMPER_LEFT]: scale > 0.01 ? "缩小" : null,
+        [GamepadButton.BUMPER_RIGHT]: scale < 8 ? "放大" : null,
+        [GamepadButton.TRIGGER_LEFT]: index > 0 ? "上一张" : null,
+        [GamepadButton.TRIGGER_RIGHT]:
+          index < choices.length - 1 ? "下一张" : null,
+      }}
       onCancel={(event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -246,6 +254,7 @@ function ImageViewerContent({ image, images, onClose }: GuideImageViewerProps) {
         flow-children="none"
         aria-label="图片移动区域"
         aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight + - 0 PageUp PageDown Escape"
+        actionDescriptionMap={{ [GamepadButton.OK]: null }}
         data-dragging={dragging}
         onGamepadDirection={(event) => direction(event.detail.button)}
         onPointerDown={(event) => {
@@ -323,6 +332,7 @@ function ImageViewerContent({ image, images, onClose }: GuideImageViewerProps) {
       <Focusable
         className="grip-image-toolbar"
         flow-children="row"
+        title={`键盘：方向键移动，+ / - 缩放，0 适屏${choices.length > 1 ? "，PageUp / PageDown 切图" : ""}，Esc 返回`}
         style={{
           display: "flex",
           flexWrap: "wrap",
@@ -389,18 +399,6 @@ function ImageViewerContent({ image, images, onClose }: GuideImageViewerProps) {
           返回正文
         </DialogButton>
       </Focusable>
-      <div
-        title="键盘：方向键移动，+ / - 缩放，0 适屏，PageUp / PageDown 切图，Esc 返回"
-        style={{
-          textAlign: "center",
-          paddingBottom: 8,
-        }}
-      >
-        <DialogBodyText>
-          方向键移动 · L1 / R1 缩放{choices.length > 1 ? " · L2 / R2 切图" : ""}{" "}
-          · X 适屏 · B 返回
-        </DialogBodyText>
-      </div>
     </Focusable>
   );
 }

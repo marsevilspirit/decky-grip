@@ -1307,14 +1307,25 @@ export function GuideReaderPage({
       flow-children="column"
       onCancel={cancelReader}
       onSecondaryActionDescription={
-        !previewImage && !guideSwitcherOpen && loaded && !loading
+        !previewImage &&
+        !guideSwitcherOpen &&
+        !guideSearchOpen &&
+        loaded &&
+        !loading
           ? navigationOpen
             ? "返回正文"
             : "目录"
-          : undefined
+          : null
       }
       onSecondaryButton={(event) => {
-        if (previewImage || guideSwitcherOpen || !loaded || loading)
+        // Steam's input/keyboard owns editing; an unhandled X must not close search.
+        if (
+          previewImage ||
+          guideSwitcherOpen ||
+          guideSearchOpen ||
+          !loaded ||
+          loading
+        )
           return false;
         event.preventDefault();
         event.stopPropagation();

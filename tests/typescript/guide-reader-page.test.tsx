@@ -1582,6 +1582,33 @@ describe("GuideReaderPage position lifecycle", () => {
       search.dispatchEvent(new Event("input", { bubbles: true }));
     });
     expect(toc.getAttribute("role")).toBe("search");
+    // Native TextField only owns A-to-edit; X without the keyboard bubbles.
+    // With the keyboard open, Steam owns X (backspace) and consumes B itself.
+    for (const repeat of [false, true]) {
+      const secondary = gamepadEvent(
+        "onSecondaryButton",
+        GamepadButton.SECONDARY,
+        repeat,
+      );
+      await act(async () => search.dispatchEvent(secondary));
+      expect(secondary.defaultPrevented).toBe(false);
+      expect(search.value).toBe("章节");
+      expect(toc.getAttribute("role")).toBe("search");
+      expect(document.activeElement).toBe(search);
+      expect(close).not.toHaveBeenCalled();
+    }
+    expect(
+      container!.firstElementChild?.hasAttribute("data-secondary-action"),
+    ).toBe(false);
+    // Once Steam yields B, the application returns one layer, not out of the reader.
+    await act(async () =>
+      search.dispatchEvent(gamepadEvent("onCancel", GamepadButton.CANCEL)),
+    );
+    await flushFrame();
+    expect(toc.getAttribute("role")).toBe("dialog");
+    expect(document.activeElement).toBe(buttonNamed("搜索"));
+    expect(close).not.toHaveBeenCalled();
+    await act(async () => buttonNamed("搜索").click());
     const result = toc.querySelector<HTMLElement>(
       '[aria-label^="跳转到搜索结果"]',
     )!;

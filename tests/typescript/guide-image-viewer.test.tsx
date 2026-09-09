@@ -16,11 +16,16 @@ vi.mock("@decky/ui", async () => {
   const { GamepadButton } = await import("./helpers/decky-gamepad");
   const { mockDeckyElement, mockDialogButton, mockSimpleModal } =
     await import("./helpers/decky-ui");
+  const Focusable = mockDeckyElement("div");
   return {
     findModuleExport: () => undefined,
     DialogButton: mockDialogButton(),
     DialogBodyText: mockDeckyElement("div"),
-    Focusable: mockDeckyElement("div"),
+    Focusable: (props: ComponentProps<typeof Focusable>) =>
+      createElement(Focusable, {
+        ...props,
+        "data-native-actions": JSON.stringify(props.actionDescriptionMap),
+      }),
     SimpleModal: (props: { children: ReactNode; active?: boolean }) =>
       nativeModal.ready ? createElement(mockSimpleModal, props) : null,
     GamepadButton,
@@ -55,6 +60,8 @@ describe("full-screen image viewer interaction", () => {
   const viewport = () =>
     host.querySelector<HTMLElement>('[aria-label="图片移动区域"]')!;
   const img = () => host.querySelector("img")!;
+  const actions = (element = dialog()): Record<GamepadButton, string | null> =>
+    JSON.parse(element.dataset.nativeActions!);
   const button = (label: string) =>
     [...host.querySelectorAll("button")].find(
       (node) => node.textContent === label,
@@ -172,10 +179,17 @@ describe("full-screen image viewer interaction", () => {
       gamepad(dialog(), "onButtonDown", GamepadButton.BUMPER_RIGHT);
     expect(img().style.width).toBe("16000px");
     expect(button("放大").classList.contains("Disabled")).toBe(true);
+    expect(actions()[GamepadButton.BUMPER_RIGHT]).toBeNull();
+    expect(actions()[GamepadButton.BUMPER_LEFT]).toBe("缩小");
     for (let i = 0; i < 40; i++)
       gamepad(dialog(), "onButtonDown", GamepadButton.BUMPER_LEFT);
     expect(img().style.width).toBe("20px");
     expect(button("缩小").classList.contains("Disabled")).toBe(true);
+    expect(actions()[GamepadButton.BUMPER_LEFT]).toBeNull();
+    expect(actions()[GamepadButton.BUMPER_RIGHT]).toBe("放大");
+    gamepad(dialog(), "onSecondaryButton", GamepadButton.SECONDARY);
+    expect(actions()[GamepadButton.BUMPER_LEFT]).toBe("缩小");
+    expect(actions()[GamepadButton.BUMPER_RIGHT]).toBe("放大");
   });
 
   it("consumes actual image movement but yields at the edge to Steam's native flow", () => {
@@ -214,6 +228,8 @@ describe("full-screen image viewer interaction", () => {
   it("switches among supplied visible images by LT/RT and buttons without repeats or boundary leakage", () => {
     render({ images: [first, tall, small, first] });
     expect(button("上一张").classList.contains("Disabled")).toBe(true);
+    expect(actions()[GamepadButton.TRIGGER_LEFT]).toBeNull();
+    expect(actions()[GamepadButton.TRIGGER_RIGHT]).toBe("下一张");
     expect(dialog().textContent).toContain("1 / 3");
     const edge = gamepad(dialog(), "onButtonDown", GamepadButton.TRIGGER_LEFT);
     expect(edge.stopPropagation).toHaveBeenCalled();
@@ -222,11 +238,15 @@ describe("full-screen image viewer interaction", () => {
     expect(img().src).toBe(first.src);
     gamepad(dialog(), "onButtonDown", GamepadButton.TRIGGER_RIGHT);
     expect(img().src).toBe(tall.src);
+    expect(actions()[GamepadButton.TRIGGER_LEFT]).toBe("上一张");
+    expect(actions()[GamepadButton.TRIGGER_RIGHT]).toBe("下一张");
     expect(img().style.width).toBe("768px");
     act(() => button("下一张").click());
     expect(img().src).toBe(small.src);
     expect(img().style.width).toBe("100px");
     expect(button("下一张").classList.contains("Disabled")).toBe(true);
+    expect(actions()[GamepadButton.TRIGGER_LEFT]).toBe("上一张");
+    expect(actions()[GamepadButton.TRIGGER_RIGHT]).toBeNull();
     expect(dialog().textContent).toContain("3 / 3");
     const end = gamepad(dialog(), "onButtonDown", GamepadButton.TRIGGER_RIGHT);
     expect(end.preventDefault).toHaveBeenCalled();
@@ -514,7 +534,37 @@ describe("full-screen image viewer interaction", () => {
     }
     expect(viewport().style.cursor).toBe("grab");
     expect(dialog().textContent).toContain("38%");
-    expect(dialog().textContent).toContain("L1 / R1 缩放");
-    expect(dialog().textContent).toContain("X 适屏 · B 返回");
+    expect(dialog().textContent).not.toContain("L1 / R1");
+    expect(dialog().textContent).not.toContain("X 适屏 · B 返回");
+    expect(dialog().textContent).not.toContain("键盘：");
+    expect(
+      host.querySelector<HTMLElement>(".grip-image-toolbar")!.title,
+    ).toContain("键盘：方向键移动，+ / - 缩放");
+    expect(viewport().getAttribute("aria-keyshortcuts")).toContain("Escape");
+  });
+
+  it("publishes contextual Steam footer actions once and blocks inherited unavailable hints with null", () => {
+    render();
+    expect(actions()).toEqual({
+      [GamepadButton.CANCEL]: "返回正文",
+      [GamepadButton.SECONDARY]: "适应屏幕",
+      [GamepadButton.OPTIONS]: null,
+      [GamepadButton.BUMPER_LEFT]: "缩小",
+      [GamepadButton.BUMPER_RIGHT]: "放大",
+      [GamepadButton.TRIGGER_LEFT]: null,
+      [GamepadButton.TRIGGER_RIGHT]: null,
+    });
+    expect(actions(viewport())).toEqual({ [GamepadButton.OK]: null });
+    const toolbar = host.querySelector<HTMLElement>(".grip-image-toolbar")!;
+    expect(toolbar.dataset.nativeActions).toBeUndefined();
+    button("放大").focus();
+    gamepad(button("放大"), "onButtonDown", GamepadButton.BUMPER_RIGHT);
+    expect(img().style.width).toBe("1152px");
+    expect(document.activeElement).toBe(button("放大"));
+    expect(actions()[GamepadButton.SECONDARY]).toBe("适应屏幕");
+    expect(toolbar.title).not.toContain("PageUp / PageDown 切图");
+    render({ images: [first, small] });
+    expect(actions()[GamepadButton.TRIGGER_RIGHT]).toBe("下一张");
+    expect(toolbar.title).toContain("PageUp / PageDown 切图");
   });
 });

@@ -385,6 +385,269 @@ test("installed Valve components retain the GRIP native UI contracts", async (t)
   );
 
   await t.test(
+    "a null native action legend hides inheritance only on its focused branch",
+    () => {
+      const start = library.indexOf(
+        "BuildConsolidatedActionDescriptionMap(e){",
+      );
+      const end = library.indexOf("AddChild(e){", start);
+      assert.ok(start >= 0 && end > start && end - start < 1024);
+      const code = library.slice(start, end);
+      const consolidate = new Script(
+        `({${code}}).BuildConsolidatedActionDescriptionMap`,
+      ).runInNewContext({});
+      const node = (actions, parent = null) => ({
+        m_Properties: { actionDescriptionMap: actions },
+        m_Parent: parent,
+        m_Tree: { GetParentEmbeddedNavTree: () => null },
+        BuildConsolidatedActionDescriptionMap: consolidate,
+      });
+      const parent = node({ 1: "Read", 2: "Return", 3: "Contents" });
+      const viewport = node({ 1: null, 3: undefined }, parent);
+      assert.deepEqual(viewport.BuildConsolidatedActionDescriptionMap({}), {
+        1: null,
+        2: "Return",
+        3: "Contents",
+      });
+      const sibling = node({ 1: "Previous image" }, parent);
+      assert.deepEqual(sibling.BuildConsolidatedActionDescriptionMap({}), {
+        1: "Previous image",
+        2: "Return",
+        3: "Contents",
+      });
+      t.diagnostic(`Action legend consolidation SHA256 ${sha256(code)}`);
+    },
+  );
+
+  await t.test(
+    "native input owns A-to-keyboard registration, not B or X, and cleans up its listeners",
+    () => {
+      const code = nativeFunction(library, "keyboard got blur event");
+      const wrapCode = nativeFunction(
+        library,
+        "!1!==e(t)&&(t.stopPropagation(),t.preventDefault())",
+      );
+      const wrap = new Script(`(${wrapCode})`).runInNewContext({});
+      const context = {};
+      const effects = [];
+      const [react] = symbols(code, /\b([$\w]+)\.useRef\(/);
+      context[react] = {
+        useRef: (current) => ({ current }),
+        useCallback: (callback) => callback,
+        useLayoutEffect: (effect) => effects.push(effect),
+      };
+      const calls = [];
+      const keyboard = {
+        ShowVirtualKeyboard: () => {
+          calls.push("show");
+        },
+        SetAsCurrentVirtualKeyboardTarget: () => calls.push("target"),
+        HideVirtualKeyboard: () => calls.push("hide"),
+        DelayHideVirtualKeyboard: () => calls.push("delay-hide"),
+        BIsActive: () => true,
+      };
+      const [factory] = symbols(code, /const u=([$\w]+)\(c\.current\)/);
+      let keyboardProps;
+      context[factory] = (props) => {
+        keyboardProps = props;
+        return keyboard;
+      };
+      bind(context, symbols(code, /m=\(0,([$\w]+)\.([$\w]+)\)/), (fn) => fn);
+      bind(
+        context,
+        symbols(code, /useLayoutEffect\(\(\)=>\(\(0,([$\w]+)\.([$\w]+)\)/),
+        (ref, value) => {
+          ref.current = value;
+        },
+      );
+      const listen = (type, logical) => (target, handler) => {
+        const callback = logical ? wrap(handler) : handler;
+        target.addEventListener(type, callback);
+        return () => target.removeEventListener(type, callback);
+      };
+      bind(
+        context,
+        symbols(code, /\(0,([$\w]+)\.([$\w]+)\)\(e,u\.ShowVirtualKeyboard\)/),
+        listen("vgp_onok", true),
+      );
+      bind(
+        context,
+        symbols(code, /\(0,([$\w]+)\.([$\w]+)\)\(e,d\)/),
+        listen("vgp_onblur", false),
+      );
+      const input = new EventTarget();
+      const document = { activeElement: input, hasFocus: () => true };
+      const handle = {};
+      const ref = new Script(`(${code})({}, handle)`).runInNewContext(
+        { ...context, document, handle },
+        { timeout: 1000 },
+      );
+      const cleanup = ref(input);
+      const effectCleanup = effects[0]();
+      const dispatch = (type) => {
+        const event = new Event(type, { bubbles: true, cancelable: true });
+        input.dispatchEvent(event);
+        return event;
+      };
+      dispatch("focus");
+      assert.deepEqual(calls, ["target"]);
+      assert.equal(keyboardProps.BIsElementValidForInput(), true);
+      const activate = dispatch("vgp_onok");
+      assert.deepEqual(calls, ["target", "show"]);
+      assert.equal(activate.defaultPrevented, true);
+      assert.equal(activate.cancelBubble, true);
+      dispatch("click");
+      assert.deepEqual(calls, ["target", "show", "show"]);
+      for (const type of ["vgp_oncancel", "vgp_onsecondaryaction"]) {
+        const event = dispatch(type);
+        assert.equal(event.defaultPrevented, false);
+        assert.equal(event.cancelBubble, false);
+      }
+      dispatch("vgp_onblur");
+      assert.equal(calls.at(-1), "delay-hide");
+      handle.current.HideVirtualKeyboard();
+      assert.equal(calls.at(-1), "hide");
+      cleanup();
+      effectCleanup();
+      const callCount = calls.length;
+      for (const type of ["focus", "click", "vgp_onok", "vgp_onblur"])
+        dispatch(type);
+      assert.equal(calls.length, callCount);
+      assert.equal(handle.current, null);
+      t.diagnostic(`Native input keyboard hook SHA256 ${sha256(code)}`);
+    },
+  );
+
+  await t.test("the active native keyboard consumes B to hide itself", () => {
+    const code = nativeFunction(bundle.source, 'navID:"virtual keyboard"');
+    const [navRef, cancel, manager] = symbols(
+      code,
+      /\.jsx\)\([$\w]+\.[$\w]+,\{navID:"virtual keyboard",onGlobalButtonDown:[$\w]+,navTreeRef:([$\w]+),virtualFocus:!0,className:[^;]+?,onCancelButton:(\(\)=>([$\w]+)\.SetVirtualKeyboardHidden\(\))/,
+    );
+    // The effect activates the same tree that owns this B callback.
+    assert.ok(
+      code.includes(`${navRef}.current.Activate()`),
+      "The keyboard no longer activates its cancellation-owning navigation tree",
+    );
+    let hides = 0;
+    const callback = new Script(`(${cancel})`).runInNewContext({
+      [manager]: {
+        SetVirtualKeyboardHidden: () => {
+          hides++;
+        },
+      },
+    });
+    const wrap = nativeFunction(
+      library,
+      "!1!==e(t)&&(t.stopPropagation(),t.preventDefault())",
+    );
+    const event = new Event("vgp_oncancel", { cancelable: true });
+    new Script(`(${wrap})(callback)(event)`).runInNewContext(
+      { callback, event },
+      { timeout: 1000 },
+    );
+    assert.equal(hides, 1);
+    assert.equal(event.defaultPrevented, true);
+    assert.equal(event.cancelBubble, true);
+    t.diagnostic(`Native keyboard container SHA256 ${sha256(code)}`);
+  });
+
+  await t.test(
+    "the native keyboard maps X press and release to Backspace, not clear-all",
+    () => {
+      const start = bundle.source.indexOf(
+        "OnGamepadButtonDown(e){switch(e.detail.button){case gt.pR.OK",
+      );
+      const up = bundle.source.indexOf("OnGamepadButtonUp(e){", start);
+      const end = bundle.source.indexOf("DispatchEventByDataKey(e,t){", up);
+      assert.ok(start >= 0 && up > start && end > up && end - start < 8192);
+      const code = bundle.source.slice(start, end);
+      const context = {};
+      bind(
+        context,
+        symbols(code, /case ([$\w]+)\.([$\w]+)\.SECONDARY:/),
+        new Proxy({}, { get: (_, key) => key }),
+      );
+      bind(
+        context,
+        symbols(
+          code,
+          /e\.detail\.source==([$\w]+)\.([$\w]+)\.KEYBOARD_SIMULATOR/,
+        ),
+        { KEYBOARD_SIMULATOR: "simulator" },
+      );
+      const handlers = new Script(
+        `(class {${code}}).prototype`,
+      ).runInNewContext(context, { timeout: 1000 });
+      const calls = [];
+      const keyboard = {
+        DispatchEventByDataKey: (...args) => calls.push(args),
+        StartBackspaceTimer: () => calls.push("start-timer"),
+        CancelBackpaceTimer: () => calls.push("cancel-timer"),
+        DismissBackpaceTimer: () => calls.push("dismiss-timer"),
+      };
+      const event = (repeat, source = "gamepad") => ({
+        detail: { button: "SECONDARY", source, is_repeat: repeat },
+      });
+      handlers.OnGamepadButtonDown.call(keyboard, event(false));
+      handlers.OnGamepadButtonDown.call(keyboard, event(true));
+      assert.deepEqual(calls, [
+        ["Backspace", true],
+        "start-timer",
+        ["Backspace", true],
+        "start-timer",
+      ]);
+      handlers.OnGamepadButtonUp.call(keyboard, event(false));
+      assert.deepEqual(calls.slice(-3), [
+        ["Backspace", false],
+        "cancel-timer",
+        "dismiss-timer",
+      ]);
+      const count = calls.length;
+      handlers.OnGamepadButtonDown.call(keyboard, event(false, "simulator"));
+      assert.equal(calls.length, count);
+      t.diagnostic(`Native keyboard X handlers SHA256 ${sha256(code)}`);
+    },
+  );
+
+  await t.test(
+    "TextField pointer clear dispatches input, not a gamepad X action",
+    () => {
+      const start = bundle.source.indexOf("OnClearClick(e){");
+      const end = bundle.source.indexOf("CheckProps(e){", start);
+      assert.ok(start >= 0 && end > start && end - start < 1024);
+      const code = bundle.source.slice(start, end);
+      class Input extends EventTarget {
+        text = "guide search";
+        get value() {
+          return this.text;
+        }
+        set value(value) {
+          this.text = value;
+        }
+      }
+      const input = new Input();
+      const changes = [];
+      input.addEventListener("input", (event) => {
+        changes.push({ value: input.value, bubbles: event.bubbles });
+      });
+      const clear = () =>
+        new Script(
+          `({${code}}).OnClearClick.call({m_elInput: input})`,
+        ).runInNewContext(
+          { input, Event, window: { HTMLInputElement: Input } },
+          { timeout: 1000 },
+        );
+      clear();
+      assert.equal(input.value, "");
+      assert.deepEqual(changes, [{ value: "", bubbles: true }]);
+      clear();
+      assert.equal(changes.length, 1);
+      t.diagnostic(`TextField clear method SHA256 ${sha256(code)}`);
+    },
+  );
+
+  await t.test(
     "native scrolling owns the step, repeat target and boundary handoff",
     () => {
       const code = nativeFunction(bundle.source, "??30)/100");

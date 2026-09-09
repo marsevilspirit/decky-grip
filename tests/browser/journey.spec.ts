@@ -268,7 +268,17 @@ test("uninstalling B preserves A's reading position and B's bookmark while C rem
     await expect(choice(page, guideB)).toBeFocused();
     expect(removals).toBe(0);
 
-    await choice(page, guideB).press("F3");
+    // A mouse can manage a different row without first reading or focusing it.
+    await choice(page, guideC).click({ button: "right" });
+    await expect(confirmation).toHaveAccessibleName(/^管理指南：第 3 篇/);
+    await confirmation.getByRole("button", { name: "取消" }).click();
+    await expect(confirmation).toHaveCount(0);
+    await expect(choice(page, guideC)).toBeFocused();
+    await expectRestored(page, positionA);
+    expect(removals).toBe(0);
+
+    await choice(page, guideB).click({ button: "right" });
+    await expect(confirmation).toHaveAccessibleName(/^管理指南：第 2 篇/);
     await confirmation.getByRole("button", { name: /^确认卸载/ }).click();
     await expect(
       confirmation.getByRole("button", { name: /正在卸载/ }),

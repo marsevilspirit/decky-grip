@@ -210,7 +210,13 @@ test("1280×800: a search hit stays visible after a delayed local image really l
     await openReader(page);
     await page.keyboard.press("Control+f");
     const input = page.getByRole("textbox", { name: "搜索指南正文" });
+    // F3 represents only the bubbling X action, not Steam's keyboard UI.
+    await input.press("F3");
+    await expect(input).toBeFocused();
     await input.fill("精确命中");
+    await input.press("F3");
+    await expect(input).toHaveValue("精确命中");
+    await expect(input).toBeFocused();
     await expect(
       page.getByRole("button", { name: /^跳转到搜索结果 1/ }),
     ).toBeVisible();
