@@ -24,7 +24,7 @@ it("shares DOM focus, legends and refs without replacing native gamepad propagat
     event.preventDefault();
     event.stopPropagation();
   });
-  const replacement = vi.fn();
+  const replacement = vi.fn(() => false);
   const render = (onCancel: (event: CustomEvent) => void) =>
     act(() =>
       root.render(

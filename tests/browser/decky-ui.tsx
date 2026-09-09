@@ -3,11 +3,14 @@ import {
   createContext,
   forwardRef,
   useContext,
+  useLayoutEffect,
+  useState,
   type ChangeEventHandler,
   type FocusEvent,
   type KeyboardEvent,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import { GamepadButton } from "@decky/ui/dist/components/FooterLegend.js";
 
 // Only the Decky boundary is adapted. Layout, focus, events and observers are native Chromium.
@@ -16,6 +19,10 @@ type Props = Record<string, unknown> & { children?: ReactNode };
 const element = (tag: "button" | "div") =>
   forwardRef<HTMLElement, Props>((props, ref) => {
     const dom = { ...props };
+    if (props.preferredFocus) dom["data-native-preferred-focus"] = "true";
+    if (props["flow-children"])
+      dom["data-native-flow"] = props["flow-children"];
+    if (props.focusable && dom.tabIndex === undefined) dom.tabIndex = 0;
     if (props.onOKActionDescription)
       dom["data-ok-action"] = props.onOKActionDescription;
     for (const name of Object.keys(dom)) {
@@ -92,13 +99,17 @@ const element = (tag: "button" | "div") =>
       };
       const action = mapping[event.key];
       if (!action || !props[action[0]]) return;
-      (props[action[0]] as (event: unknown) => void)({
+      const result = (props[action[0]] as (event: unknown) => unknown)({
         target: event.target,
         currentTarget: event.currentTarget,
         detail: { button: action[1], is_repeat: event.repeat, source: 0 },
         preventDefault: () => event.preventDefault(),
         stopPropagation: () => event.stopPropagation(),
       });
+      if (result !== false) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
     };
     return createElement(tag, { ...dom, ref }, props.children as ReactNode);
   });
@@ -115,6 +126,8 @@ export const DialogBodyText = element("div");
 export const DialogControlsSection = element("div");
 export const DialogFooter = element("div");
 export const Focusable = element("div");
+// No installed Steam runtime in the fixture: the reader reports its compatibility fallback.
+export const findModuleExport = () => undefined;
 export const Spinner = () => <span role="status">正在处理…</span>;
 export const ReaderRoute = createContext({ appId: "", guideId: "" });
 export const useParams = () => useContext(ReaderRoute);
@@ -142,18 +155,87 @@ export const ProgressBar = ({ nProgress, indeterminate }: Props) => (
     data-native-progress={indeterminate ? "indeterminate" : Number(nProgress)}
   />
 );
-export const ModalRoot = ({ children, onCancel }: Props) => (
+export const ModalRoot = ({
+  children,
+  onCancel,
+  closeModal,
+  ...props
+}: Props) => (
   <form
     role="dialog"
+    aria-label={props["aria-label"] as string}
+    className={props.className as string}
     aria-modal="true"
     onSubmit={(event) => event.preventDefault()}
     onKeyDown={(event) => {
-      if (event.key === "Escape") (onCancel as (() => void) | undefined)?.();
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.repeat)
+          ((onCancel ?? closeModal) as (() => void) | undefined)?.();
+      }
     }}
   >
     {children}
   </form>
 );
+// A real browser modal supplies inertness, Tab bounds and return focus. This is a
+// platform boundary, not a simulation of Steam's spatial FocusNav algorithm.
+export function SimpleModal({ active = true, children }: Props) {
+  const [dialog] = useState(() => document.createElement("dialog"));
+  const [ready, setReady] = useState(false);
+  useLayoutEffect(() => {
+    if (!active) return;
+    dialog.setAttribute("role", "presentation");
+    document.body.append(dialog);
+    dialog.showModal();
+    dialog.addEventListener("cancel", preventCancel);
+    setReady(true);
+    return () => {
+      dialog.removeEventListener("cancel", preventCancel);
+      dialog.close();
+      dialog.remove();
+      setReady(false);
+    };
+  }, [active, dialog]);
+  useLayoutEffect(() => {
+    if (
+      !ready ||
+      !active ||
+      (document.activeElement !== dialog &&
+        dialog.contains(document.activeElement))
+    )
+      return;
+    (
+      dialog.querySelector<HTMLElement>(
+        '[data-native-preferred-focus="true"]',
+      ) ?? dialog.querySelector<HTMLElement>('button, [tabindex="0"]')
+    )?.focus();
+  });
+  return active && ready ? createPortal(children, dialog) : null;
+}
+function preventCancel(event: Event) {
+  event.preventDefault(); // Content owns B/Escape, including destructive-action guards.
+}
+export function ConfirmModal(props: Props) {
+  const cancel = (props.onCancel ?? props.closeModal) as () => void;
+  return (
+    <ModalRoot aria-label={props.strTitle} onCancel={cancel}>
+      <DialogHeader>{props.strTitle as ReactNode}</DialogHeader>
+      <DialogBodyText>{props.strDescription as ReactNode}</DialogBodyText>
+      <DialogButton disabled={props.bOKDisabled} onClick={props.onOK}>
+        {props.strOKButtonText as ReactNode}
+      </DialogButton>
+      <DialogButton
+        disabled={props.bCancelDisabled}
+        preferredFocus={props.focusButton === "secondary"}
+        onClick={cancel}
+      >
+        {props.strCancelButtonText as ReactNode}
+      </DialogButton>
+    </ModalRoot>
+  );
+}
 export const DropdownItem = ({
   label,
   selectedOption,

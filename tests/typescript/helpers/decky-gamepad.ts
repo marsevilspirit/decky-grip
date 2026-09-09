@@ -43,7 +43,14 @@ export function gamepadRef(
     if (node) {
       for (const handler of handlers) {
         if (typeof props[handler] !== "function") continue;
-        const listener = props[handler] as EventListener;
+        const callback = props[handler] as (event: Event) => unknown;
+        const listener: EventListener = (event) => {
+          // Steam consumes a registered handler unless it explicitly yields false.
+          if (callback(event) !== false) {
+            event.preventDefault();
+            event.stopPropagation();
+          }
+        };
         node.addEventListener(handler, listener);
         listeners.push([handler, listener]);
       }

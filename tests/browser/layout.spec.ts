@@ -35,7 +35,7 @@ const expectChoiceInsideList = async (choice: Locator) => {
     .toBe(true);
 };
 
-test("1280×800: a long guide list reveals the whole focused card without scrolling the reader", async ({
+test("1280×800: browser focus and Tab reveal long-list cards without scrolling the reader", async ({
   page,
 }) => {
   await openReader(page);
@@ -44,14 +44,17 @@ test("1280×800: a long guide list reveals the whole focused card without scroll
   const choices = page.locator("[data-grip-guide-choice]");
   await expect(choices).toHaveCount(20);
   await expectChoiceInsideList(choices.nth(1));
-  await page.keyboard.press("End");
+  // Chromium owns this focus/scroll behavior; the fixture does not emulate Steam spatial navigation.
+  await choices.last().focus();
   await expectChoiceInsideList(choices.last());
   for (let index = 0; index < 8; index++) {
-    await page.keyboard.press("ArrowUp");
+    await page.keyboard.press("Shift+Tab");
     await expectChoiceInsideList(choices.nth(18 - index));
   }
-  await page.keyboard.press("Home");
+  await choices.first().focus();
   await expectChoiceInsideList(choices.first());
+  await page.keyboard.press("Tab");
+  await expectChoiceInsideList(choices.nth(1));
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog", { name: "切换指南" })).toHaveCount(0);
   await expect(reader(page)).toBeFocused();
@@ -115,6 +118,74 @@ test("1280×800: native and Steam wide tables wrap their cells within the real r
     expect(table.right).toBeLessThanOrEqual(1);
     expect(table.overflowCells).toBe(0);
   }
+});
+
+test("1280×800: the fullscreen image portal measures its viewport and returns to the same article position", async ({
+  page,
+}) => {
+  await openReader(page);
+  const articleImage = reader(page).getByAltText("延迟解码的离线长图");
+  await articleImage.scrollIntoViewIfNeeded();
+  await expect(articleImage).toHaveAttribute("data-grip-image-state", "ready");
+  await articleImage.evaluate((element: HTMLImageElement) => element.decode());
+  await reader(page).focus();
+  await expect(reader(page)).toHaveAttribute("data-ok-action", "查看图片");
+  const before = await reader(page).evaluate((element) => ({
+    scrollTop: element.scrollTop,
+    imageTop: element
+      .querySelector<HTMLImageElement>('img[alt="延迟解码的离线长图"]')!
+      .getBoundingClientRect().top,
+  }));
+
+  await page.keyboard.press("Enter");
+  const viewer = page.getByRole("dialog", { name: "图片全屏查看" });
+  await expect(viewer).toBeVisible();
+  const preview = viewer.getByAltText("延迟解码的离线长图");
+  await preview.evaluate((element: HTMLImageElement) => element.decode());
+  const measure = () =>
+    preview.evaluate((element: HTMLImageElement) => {
+      const viewport = element.closest<HTMLElement>(".grip-image-viewport")!;
+      const rect = element.getBoundingClientRect();
+      return {
+        viewWidth: viewport.clientWidth,
+        viewHeight: viewport.clientHeight,
+        width: rect.width,
+        height: rect.height,
+        naturalWidth: element.naturalWidth,
+        naturalHeight: element.naturalHeight,
+      };
+    });
+  const initial = await measure();
+  expect(initial.naturalWidth).toBe(900);
+  expect(initial.naturalHeight).toBe(1600);
+  expect(initial.viewWidth).toBeGreaterThan(800);
+  expect(initial.viewHeight).toBeGreaterThan(300);
+  // This must hold before a second fit: measuring before the portal mounts yields a 1px image.
+  expect(initial.width).toBeGreaterThan(200);
+  expect(initial.width / initial.height).toBeCloseTo(900 / 1600, 3);
+
+  await viewer.getByRole("button", { name: "适应屏幕" }).click();
+  const fitWidth =
+    900 *
+    Math.min(
+      1,
+      (initial.viewWidth - 32) / 900,
+      (initial.viewHeight - 32) / 1600,
+    );
+  await expect
+    .poll(async () => Math.abs((await measure()).width - fitWidth))
+    .toBeLessThanOrEqual(1);
+  await expect(preview).toBeInViewport({ ratio: 1 });
+  await page.keyboard.press("Escape");
+  await expect(viewer).toHaveCount(0);
+  await expect(reader(page)).toBeFocused();
+  const after = await reader(page).evaluate((element) => ({
+    scrollTop: element.scrollTop,
+    imageTop: element
+      .querySelector<HTMLImageElement>('img[alt="延迟解码的离线长图"]')!
+      .getBoundingClientRect().top,
+  }));
+  expect(after).toEqual(before);
 });
 
 test("1280×800: a search hit stays visible after a delayed local image really loads and decodes", async ({

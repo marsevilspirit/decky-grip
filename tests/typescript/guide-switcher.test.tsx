@@ -3,6 +3,7 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as DeckyUI from "@decky/ui";
 
 import type { CacheClearResult, GuideLibraryEntry } from "../../src/backend";
 import {
@@ -14,8 +15,13 @@ import type { MockDeckyProps } from "./helpers/decky-ui";
 
 vi.mock("@decky/ui", async () => {
   const { GamepadButton } = await import("./helpers/decky-gamepad");
-  const { mockDeckyElement, mockDialogButton } =
-    await import("./helpers/decky-ui");
+  const {
+    mockDeckyElement,
+    mockDialogButton,
+    mockSimpleModal,
+    mockModalRoot,
+    mockConfirmModal,
+  } = await import("./helpers/decky-ui");
   type GamepadHandler = (event: {
     detail: { button: number; is_repeat: boolean; source: number };
     preventDefault(): void;
@@ -63,6 +69,10 @@ vi.mock("@decky/ui", async () => {
   return {
     Button,
     DialogButton: mockDialogButton(keyboard),
+    SimpleModal: mockSimpleModal,
+    ModalRoot: mockModalRoot,
+    ConfirmModal: vi.fn(mockConfirmModal),
+    DialogBody: mockDeckyElement("div"),
     DialogHeader: (props: MockDeckyProps) =>
       createElement("div", {
         ...props,
@@ -71,9 +81,6 @@ vi.mock("@decky/ui", async () => {
       }),
     DialogBodyText: (props: MockDeckyProps) =>
       createElement("div", { ...props, className: "DialogBodyText" }),
-    gamepadDialogClasses: {
-      GamepadDialogContent: "SteamDialogContent",
-    },
     Focusable: mockDeckyElement("div", keyboard),
     GamepadButton,
     Spinner: () => createElement("span"),
@@ -149,6 +156,10 @@ describe("GuideSwitcher", () => {
     [...container.querySelectorAll<HTMLButtonElement>("button")].find(
       (node) => node.textContent === label,
     )!;
+  const confirmationProps = () => {
+    const calls = vi.mocked(DeckyUI.ConfirmModal).mock.calls;
+    return calls[calls.length - 1][0] as Record<string, unknown>;
+  };
   const manage = async (id: string) => {
     await act(async () => {
       const target = choice(id);
@@ -174,12 +185,14 @@ describe("GuideSwitcher", () => {
   ) => {
     await act(async () =>
       node.dispatchEvent(
-        new KeyboardEvent(type, {
-          key: value,
-          bubbles: true,
-          cancelable: true,
-          ...options,
-        }),
+        value === "GamepadCancel"
+          ? gamepadEvent("onCancel", GamepadButton.CANCEL, options.repeat)
+          : new KeyboardEvent(type, {
+              key: value,
+              bubbles: true,
+              cancelable: true,
+              ...options,
+            }),
       ),
     );
     await act(async () => vi.advanceTimersByTimeAsync(0));
@@ -200,8 +213,10 @@ describe("GuideSwitcher", () => {
     expect(choice("2").textContent).toContain("上次：章节 2");
     expect(choice("1").getAttribute("data-current")).toBe("true");
     expect(choice("1").getAttribute("aria-current")).toBe("page");
-    expect(dialog().style.top).toBe("40px");
-    expect(dialog().style.paddingBottom).toBe("56px");
+    expect(choice("2").getAttribute("data-native-preferred-focus")).toBe(
+      "true",
+    );
+    expect(container.querySelector("[data-native-modal]")).not.toBeNull();
     await key(choice("1"), "Enter");
     expect(props.onClose).toHaveBeenCalledOnce();
     expect(props.onChoose).not.toHaveBeenCalled();
@@ -213,7 +228,9 @@ describe("GuideSwitcher", () => {
     await manage("2");
     const target = props.entries![1];
     expect(document.activeElement).toBe(button("取消"));
-    const confirmation = container.querySelector('[role="alertdialog"]')!;
+    const confirmation = container.querySelector(
+      '[role="dialog"][aria-label^="管理指南："]',
+    )!;
     expect(confirmation.getAttribute("aria-label")).toBe("管理指南：指南 2");
     expect(confirmation.textContent).toContain("来源：Steam");
     expect(confirmation.textContent).toContain("作者：作者 2");
@@ -230,7 +247,7 @@ describe("GuideSwitcher", () => {
     expect(props.onRemove).toHaveBeenCalledTimes(2);
   });
 
-  it.each(["x", "X", "gamepad"])(
+  it.each(["gamepad"])(
     "opens the focused card's management with %s, consumes repeats, and returns to that card",
     async (input) => {
       await render();
@@ -245,7 +262,9 @@ describe("GuideSwitcher", () => {
         );
         await act(async () => target.dispatchEvent(repeat));
         expect(repeat.defaultPrevented).toBe(true);
-        expect(container.querySelector('[role="alertdialog"]')).toBeNull();
+        expect(
+          container.querySelector('[role="dialog"][aria-label^="管理指南："]'),
+        ).toBeNull();
         const event = gamepadEvent(
           "onSecondaryButton",
           GamepadButton.SECONDARY,
@@ -255,14 +274,16 @@ describe("GuideSwitcher", () => {
         await act(async () => vi.advanceTimersByTimeAsync(0));
       } else {
         await key(target, input, "keydown", { repeat: true });
-        expect(container.querySelector('[role="alertdialog"]')).toBeNull();
+        expect(
+          container.querySelector('[role="dialog"][aria-label^="管理指南："]'),
+        ).toBeNull();
         await key(target, input);
       }
       document.body.removeEventListener("onSecondaryButton", escaped);
       expect(escaped).not.toHaveBeenCalled();
       expect(
         container
-          .querySelector('[role="alertdialog"]')
+          .querySelector('[role="dialog"][aria-label^="管理指南："]')
           ?.getAttribute("aria-label"),
       ).toBe("管理指南：指南 2");
       expect(props.onChoose).not.toHaveBeenCalled();
@@ -279,11 +300,11 @@ describe("GuideSwitcher", () => {
     await render({
       entries: [entry("1"), { ...entry("2"), cache: null }, entry("3")],
     });
-    expect(button("确认清理残留").getAttribute("aria-disabled")).toBe("false");
+    expect(button("确认清理残留").classList.contains("Disabled")).toBe(false);
     expect(props.onRemove).not.toHaveBeenCalled();
     expect(
       container
-        .querySelector('[role="alertdialog"]')
+        .querySelector('[role="dialog"][aria-label^="管理指南："]')
         ?.getAttribute("aria-label"),
     ).toBe("管理指南：指南 2");
     await click(button("确认清理残留"));
@@ -292,12 +313,15 @@ describe("GuideSwitcher", () => {
 
   it("moves from loading to a card, including when only the current guide exists", async () => {
     await render({ entries: null });
-    expect(document.activeElement).toBe(dialog());
     expect(dialog().textContent).toContain("正在读取本游戏指南");
     await render({ entries: [entry("1")] });
-    expect(document.activeElement).toBe(choice("1"));
+    expect(choice("1").getAttribute("data-native-preferred-focus")).toBe(
+      "true",
+    );
     await render({ entries: [entry("1"), entry("2")] });
-    expect(document.activeElement).toBe(choice("1"));
+    expect(choice("2").getAttribute("data-native-preferred-focus")).toBe(
+      "true",
+    );
   });
 
   it("keeps the chosen card and title through progress and errors, and retries opening it", async () => {
@@ -321,9 +345,13 @@ describe("GuideSwitcher", () => {
     expect(target.textContent).toContain("指南 3");
     expect(target.textContent).toContain("正在准备并打开");
     await manage("2");
-    expect(container.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(
+      container.querySelector('[role="dialog"][aria-label^="管理指南："]'),
+    ).toBeNull();
     await key(choice("2"), "x");
-    expect(container.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(
+      container.querySelector('[role="dialog"][aria-label^="管理指南："]'),
+    ).toBeNull();
     await click(target);
     expect(props.onChoose).toHaveBeenCalledOnce();
     await render({ pendingKey: null, error: "指南打开失败：读取失败" });
@@ -368,7 +396,6 @@ describe("GuideSwitcher", () => {
     await render({ entries: null, listError: "列表读取失败" });
     expect(document.activeElement).toBe(button("重新读取指南列表"));
     await render({ entries: [], listError: null });
-    expect(document.activeElement).toBe(dialog());
     expect(dialog().textContent).toContain("还没有已记录的指南");
   });
 
@@ -377,9 +404,9 @@ describe("GuideSwitcher", () => {
     longEntry.cache!.title = "很长的指南标题".repeat(30);
     await render({ entries: [entry("1"), longEntry, entry("3")] });
     const target = choice("2");
-    expect(dialog().classList.contains("SteamDialogContent")).toBe(true);
-    expect(dialog().classList.contains("DialogContent")).toBe(true);
-    expect(dialog().classList.contains("_DialogLayout")).toBe(true);
+    expect(
+      container.querySelector("[data-native-modal]")?.contains(dialog()),
+    ).toBe(true);
     expect(container.querySelector(".DialogHeader")?.textContent).toBe(
       "本游戏指南",
     );
@@ -406,9 +433,11 @@ describe("GuideSwitcher", () => {
     );
     expect(dialog().style.background).toBe("");
     await manage("2");
-    const confirmation = container.querySelector('[role="alertdialog"]')!;
-    expect(confirmation.querySelector(".DialogHeader")?.textContent).toBe(
-      longEntry.cache!.title,
+    const confirmation = container.querySelector(
+      '[role="dialog"][aria-label^="管理指南："]',
+    )!;
+    expect(confirmation.getAttribute("aria-label")).toBe(
+      `管理指南：${longEntry.cache!.title}`,
     );
     expect(
       confirmation.querySelector(".DialogBodyText")?.textContent,
@@ -417,36 +446,29 @@ describe("GuideSwitcher", () => {
     expect(button("确认卸载").classList.contains("DialogButton")).toBe(true);
   });
 
-  it("keeps focused cards visible and supports bounded arrow/Home/End navigation", async () => {
+  it("hands directional, Tab and scroll behavior to Steam's column navigation", async () => {
     await render({
       entries: Array.from({ length: 20 }, (_, index) =>
         entry(String(index + 1)),
       ),
     });
     const reveal = vi.spyOn(HTMLElement.prototype, "scrollIntoView");
-    await key(choice("2"), "End");
-    expect(document.activeElement).toBe(choice("20"));
-    expect(reveal).toHaveBeenLastCalledWith({
-      block: "nearest",
-      inline: "nearest",
-      behavior: "auto",
-    });
-    expect(reveal.mock.instances[reveal.mock.instances.length - 1]).toBe(
-      choice("20").parentElement,
-    );
-    await key(choice("20"), "ArrowDown");
-    expect(document.activeElement).toBe(choice("20"));
-    await key(choice("20"), "ArrowUp");
-    expect(document.activeElement).toBe(choice("19"));
-    await key(choice("19"), "Home");
-    expect(document.activeElement).toBe(choice("1"));
-    await key(choice("1"), "Tab");
-    expect(document.activeElement).toBe(choice("2"));
-    expect(reveal.mock.instances[reveal.mock.instances.length - 1]).toBe(
-      choice("2").parentElement,
-    );
-    await key(choice("2"), "ArrowDown");
-    expect(document.activeElement).toBe(choice("3"));
+    const list = container.querySelector<HTMLElement>(
+      "[data-grip-guide-list]",
+    )!;
+    expect(list.dataset.nativeFlow).toBe("column");
+    expect(list.style.overflowY).toBe("auto");
+    for (const key of ["ArrowUp", "ArrowDown", "Home", "End", "Tab", "x"]) {
+      const event = new KeyboardEvent("keydown", {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      await act(async () => choice("2").dispatchEvent(event));
+      expect(event.defaultPrevented).toBe(false);
+    }
+    await act(async () => choice("20").focus());
+    expect(reveal).not.toHaveBeenCalled();
     expect(props.onChoose).not.toHaveBeenCalled();
     expect(props.onClose).not.toHaveBeenCalled();
   });
@@ -458,13 +480,16 @@ describe("GuideSwitcher", () => {
     expect(props.onRemove).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(button("取消"));
     expect(
-      container.querySelector('[role="alertdialog"]')?.textContent,
+      container.querySelector('[role="dialog"][aria-label^="管理指南："]')
+        ?.textContent,
     ).toContain("指南 1");
     const escaped = vi.fn();
     document.body.addEventListener("keydown", escaped);
     await key(button("取消"), "Escape");
     document.body.removeEventListener("keydown", escaped);
-    expect(container.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(
+      container.querySelector('[role="dialog"][aria-label^="管理指南："]'),
+    ).toBeNull();
     expect(document.activeElement).toBe(trigger);
     expect(props.onClose).not.toHaveBeenCalled();
     expect(escaped).not.toHaveBeenCalled();
@@ -474,15 +499,15 @@ describe("GuideSwitcher", () => {
   });
 
   it.each(["Escape", "GamepadCancel"])(
-    "consumes %s repeats so a held key only returns one level",
+    "consumes %s repeats after native confirmation closes so a held key only returns one level",
     async (value) => {
       await render();
       const trigger = choice("1");
       await manage("1");
-      await key(button("取消"), value, "keydown", { repeat: true });
-      expect(container.querySelector('[role="alertdialog"]')).not.toBeNull();
       await key(button("取消"), value);
-      expect(container.querySelector('[role="alertdialog"]')).toBeNull();
+      expect(
+        container.querySelector('[role="dialog"][aria-label^="管理指南："]'),
+      ).toBeNull();
       expect(document.activeElement).toBe(trigger);
       expect(props.onClose).not.toHaveBeenCalled();
       await key(trigger, value, "keydown", { repeat: true });
@@ -494,26 +519,23 @@ describe("GuideSwitcher", () => {
     },
   );
 
-  it("keeps real Tab focus inside the visible switcher or its deletion confirmation", async () => {
+  it("uses native safe confirmation defaults and its modal return stack", async () => {
     await render();
     const trigger = choice("3");
     await act(async () => trigger.focus());
-    await key(trigger, "Tab");
-    expect(document.activeElement).toBe(choice("1"));
-    await key(choice("1"), "Tab", "keydown", { shiftKey: true });
-    expect(document.activeElement).toBe(trigger);
-    await act(async () => dialog().focus());
-    await key(dialog(), "Tab", "keydown", { shiftKey: true });
-    expect(document.activeElement).toBe(trigger);
     await manage("3");
+    expect(container.querySelectorAll("[data-native-modal]")).toHaveLength(2);
+    expect(confirmationProps()).toMatchObject({
+      bCloseAfterOK: false,
+      focusButton: "secondary",
+      bDisableBackgroundDismiss: true,
+      bDestructiveWarning: true,
+    });
     const cancel = button("取消");
-    const confirm = button("确认卸载");
-    await key(cancel, "Tab", "keydown", { shiftKey: true });
-    expect(document.activeElement).toBe(confirm);
-    await key(confirm, "Tab");
     expect(document.activeElement).toBe(cancel);
     await key(cancel, "Escape");
     expect(document.activeElement).toBe(trigger);
+    expect(container.querySelectorAll("[data-native-modal]")).toHaveLength(1);
     expect(props.onClose).not.toHaveBeenCalled();
   });
 
@@ -537,9 +559,13 @@ describe("GuideSwitcher", () => {
     expect(document.activeElement).toBe(confirm);
     expect(confirm.disabled).toBe(false);
     expect(confirm.classList.contains("Disabled")).toBe(true);
-    expect(confirm.getAttribute("data-native-focusable")).toBe("true");
     expect(button("取消").classList.contains("Disabled")).toBe(true);
     expect(confirm.textContent).toContain("正在卸载");
+    // Steam calls closeModal after its cancel callback even when cancel is disabled.
+    await act(async () => {
+      (confirmationProps().onCancel as () => void)();
+      (confirmationProps().closeModal as () => void)();
+    });
     await key(confirm, "Escape");
     await click(button("取消"));
     await click(confirm);
@@ -549,18 +575,19 @@ describe("GuideSwitcher", () => {
     expect(props.onRemove).toHaveBeenCalledExactlyOnceWith(props.entries![0]);
     expect(
       container
-        .querySelector('[role="alertdialog"]')
+        .querySelector('[role="dialog"][aria-label^="管理指南："]')
         ?.getAttribute("aria-label"),
     ).toBe("管理指南：指南 1");
     await act(async () =>
       resolve({ bytesRemoved: 1_048_576, filesRemoved: 3 }),
     );
     await render({ removed: true });
-    expect(container.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(
+      container.querySelector('[role="dialog"][aria-label^="管理指南："]'),
+    ).toBeNull();
     expect(dialog().textContent).toContain("释放 1.0 MiB");
     expect(choice("1").textContent).toContain("当前会话仍可阅读");
     await manage("1");
-    expect(button("确认卸载").getAttribute("aria-disabled")).toBe("true");
     expect(button("确认卸载").classList.contains("Disabled")).toBe(true);
     await click(button("确认卸载"));
     expect(props.onRemove).toHaveBeenCalledOnce();
@@ -579,52 +606,57 @@ describe("GuideSwitcher", () => {
     expect(document.activeElement).toBe(confirm);
     expect(confirm.classList.contains("Disabled")).toBe(false);
     expect(
-      container.querySelector('[role="alertdialog"] [role="alert"]')
-        ?.textContent,
+      container.querySelector(
+        '[role="dialog"][aria-label^="管理指南："] [role="alert"]',
+      )?.textContent,
     ).toContain("磁盘忙");
     await render({
       entries: [entry("1"), { ...entry("2"), cache: null }, entry("3")],
     });
-    expect(button("确认清理残留").getAttribute("aria-disabled")).toBe("false");
+    expect(button("确认清理残留").classList.contains("Disabled")).toBe(false);
     expect(
-      container.querySelector('[role="alertdialog"]')?.textContent,
+      container.querySelector('[role="dialog"][aria-label^="管理指南："]')
+        ?.textContent,
     ).toContain("可重试完成剩余离线文件的清理。");
     await click(button("取消"));
     await manage("2");
-    const retry = container.querySelector<HTMLButtonElement>(
-      '[role="alertdialog"] button:last-child',
-    )!;
-    expect(retry.getAttribute("aria-disabled")).toBe("false");
+    const retry = button("确认清理残留");
+    expect(retry.classList.contains("Disabled")).toBe(false);
     await click(retry);
     expect(onRemove).toHaveBeenCalledTimes(2);
     expect(onRemove.mock.calls.map(([target]) => target.guideId)).toEqual([
       "2",
       "2",
     ]);
-    expect(container.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(
+      container.querySelector('[role="dialog"][aria-label^="管理指南："]'),
+    ).toBeNull();
   });
 
   it("allows leftover cleanup while blocking busy or already completed removal", async () => {
     await render({ removeDisabled: true });
     await manage("1");
-    expect(container.querySelector('[role="alertdialog"]')).not.toBeNull();
-    expect(button("确认卸载").getAttribute("aria-disabled")).toBe("true");
+    expect(
+      container.querySelector('[role="dialog"][aria-label^="管理指南："]'),
+    ).not.toBeNull();
+    expect(button("确认卸载").classList.contains("Disabled")).toBe(true);
     await click(button("确认卸载"));
     await render({ removeDisabled: false, removed: true });
     await click(button("确认卸载"));
-    expect(button("确认卸载").getAttribute("aria-disabled")).toBe("true");
+    expect(button("确认卸载").classList.contains("Disabled")).toBe(true);
     await click(button("取消"));
     await render({
       entries: [entry("1"), { ...entry("2"), cache: null }, entry("3")],
     });
     await manage("2");
     expect(
-      container.querySelector('[role="alertdialog"]')?.textContent,
+      container.querySelector('[role="dialog"][aria-label^="管理指南："]')
+        ?.textContent,
     ).toContain("可重试完成剩余离线文件的清理");
-    expect(button("确认清理残留").getAttribute("aria-disabled")).toBe("false");
+    expect(button("确认清理残留").classList.contains("Disabled")).toBe(false);
     expect(props.onRemove).not.toHaveBeenCalled();
     await click(button("取消"));
     await manage("3");
-    expect(button("确认卸载").getAttribute("aria-disabled")).toBe("false");
+    expect(button("确认卸载").classList.contains("Disabled")).toBe(false);
   });
 });

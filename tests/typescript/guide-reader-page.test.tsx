@@ -27,10 +27,20 @@ import type { GuideIdentity } from "../../src/steam/guide-key";
 import { GamepadButton, gamepadEvent } from "./helpers/decky-gamepad";
 import type { MockDeckyProps as MockProps } from "./helpers/decky-ui";
 
+const nativeScrolling = vi.hoisted(() => ({
+  handler: null as ((event: unknown) => boolean) | null,
+  use: vi.fn(),
+}));
+
 vi.mock("@decky/ui", async () => {
   const { GamepadButton } = await import("./helpers/decky-gamepad");
-  const { mockDeckyElement, mockDialogButton } =
-    await import("./helpers/decky-ui");
+  const {
+    mockDeckyElement,
+    mockDialogButton,
+    mockSimpleModal,
+    mockModalRoot,
+    mockConfirmModal,
+  } = await import("./helpers/decky-ui");
   const keyboard = (props: MockProps) => {
     const onCancel = props.onCancel as
       ((event: CustomEvent) => void) | undefined;
@@ -101,6 +111,16 @@ vi.mock("@decky/ui", async () => {
   };
 
   return {
+    findModuleExport:
+      () =>
+      (...args: unknown[]) => {
+        nativeScrolling.use(...args);
+        return nativeScrolling.handler;
+      },
+    SimpleModal: mockSimpleModal,
+    ModalRoot: mockModalRoot,
+    ConfirmModal: mockConfirmModal,
+    DialogBody: mockDeckyElement("div"),
     DialogButton: mockDialogButton(keyboard),
     DialogHeader: mockDeckyElement("div"),
     DialogBodyText: mockDeckyElement("div"),
@@ -173,6 +193,8 @@ describe("GuideReaderPage position lifecycle", () => {
   let container: HTMLDivElement | null;
 
   beforeEach(() => {
+    nativeScrolling.handler = null;
+    nativeScrolling.use.mockClear();
     vi.useFakeTimers();
     animationFrames = new Map();
     nextAnimationFrame = 1;
@@ -1410,6 +1432,47 @@ describe("GuideReaderPage position lifecycle", () => {
     },
   );
 
+  it("delegates scrolling and boundary handoff to Steam without an uncancellable animation", async () => {
+    const guide = guideFixture();
+    const cache = new ReaderSessionCache({
+      getCachedGuide: async () => guide,
+      getGuide: async () => guide,
+      getReaderPosition: async () => null,
+      saveReaderPosition: vi.fn(),
+    });
+    const scroll = vi.fn(() => false);
+    nativeScrolling.handler = scroll;
+    await cache.load(identity);
+    const scroller = await mount(cache, async () => null, 3000);
+    await flushFrame();
+    expect(nativeScrolling.use).toHaveBeenLastCalledWith(
+      expect.objectContaining({ current: scroller }),
+      "auto",
+    );
+    expect(scroller.getAttribute("data-native-focusable")).toBe("true");
+    expect(container!.textContent).not.toContain("兼容滚动");
+    const boundary = gamepadEvent("onGamepadDirection", GamepadButton.DIR_UP);
+    await act(async () => {
+      scroller.dispatchEvent(boundary);
+    });
+    expect(scroll).toHaveBeenLastCalledWith(boundary);
+    expect(boundary.defaultPrevented).toBe(false);
+    scroll.mockReturnValue(true);
+    const down = gamepadEvent("onGamepadDirection", GamepadButton.DIR_DOWN);
+    await act(async () => {
+      scroller.dispatchEvent(down);
+    });
+    expect(scroll).toHaveBeenLastCalledWith(down);
+    expect(down.defaultPrevented).toBe(true);
+    // The adapter doesn't scroll; GRIP must not run a second, custom step.
+    expect(scroller.scrollTop).toBe(0);
+    const unhandled = gamepadEvent("onButtonDown", GamepadButton.OK);
+    await act(async () => {
+      scroller.dispatchEvent(unhandled);
+    });
+    expect(unhandled.defaultPrevented).toBe(false);
+  });
+
   it("uses X and direction navigation without reflow, and unwinds search and directory one layer at a time", async () => {
     const guide = guideFixture();
     guide.sections = guide.sections.slice(0, 2);
@@ -1456,7 +1519,8 @@ describe("GuideReaderPage position lifecycle", () => {
       last.focus();
       pressKey(last, "Tab");
     });
-    expect(document.activeElement).toBe(first);
+    // Native navigation owns Tab; the plugin must not redirect it itself.
+    expect(document.activeElement).toBe(last);
     await act(async () =>
       first.dispatchEvent(
         new KeyboardEvent("keydown", {
@@ -1468,7 +1532,11 @@ describe("GuideReaderPage position lifecycle", () => {
       ),
     );
     expect(document.activeElement).toBe(last);
-    await act(async () => pressKey(document.activeElement!, "ArrowLeft"));
+    expect(toc.getAttribute("data-native-flow")).toBe("column");
+    const direction = gamepadEvent("onGamepadDirection", GamepadButton.DIR_UP);
+    last.dispatchEvent(direction);
+    expect(direction.defaultPrevented).toBe(false);
+    await act(async () => pressKey(document.activeElement!, "Escape"));
     await flushFrame();
     expect(document.activeElement).toBe(scroller);
     expect(toc.getAttribute("data-expanded")).toBe("false");
@@ -1858,7 +1926,9 @@ describe("GuideReaderPage position lifecycle", () => {
       pressKey(choice, "Secondary");
     };
     await act(async () => manage());
-    const confirm = container!.querySelector('[role="alertdialog"]')!;
+    const confirm = container!.querySelector(
+      '[role="dialog"][aria-label^="管理指南："]',
+    )!;
     expect(confirm.textContent).toContain(guide.title);
     expect(remove).not.toHaveBeenCalled();
     await act(async () => buttonNamed("取消").click());
@@ -1867,21 +1937,21 @@ describe("GuideReaderPage position lifecycle", () => {
     await act(async () => {
       buttonNamed("确认卸载").click();
     });
-    expect(buttonNamed("正在卸载…").getAttribute("aria-disabled")).toBe("true");
+    expect(buttonNamed("正在卸载…").classList.contains("Disabled")).toBe(true);
     expect(remove).toHaveBeenCalledExactlyOnceWith(identity.guideId);
     await act(async () => {
       finish();
     });
     expect(container!.textContent).toContain("已卸载");
     await act(async () => manage());
-    expect(buttonNamed("确认卸载").getAttribute("aria-disabled")).toBe("true");
+    expect(buttonNamed("确认卸载").classList.contains("Disabled")).toBe(true);
     expect(container!.querySelector('[aria-label="指南正文"]')).toBe(scroller);
     await act(async () => buttonNamed("取消").click());
     await act(async () => pressKey(scroller, "Escape"));
     await act(async () => buttonNamed("更新").click());
     await act(async () => pressKey(scroller, "Options"));
     await act(async () => manage());
-    expect(buttonNamed("确认卸载").getAttribute("aria-disabled")).toBe("false");
+    expect(buttonNamed("确认卸载").classList.contains("Disabled")).toBe(false);
   });
 
   it.each([false, true])(
@@ -1950,23 +2020,22 @@ describe("GuideReaderPage position lifecycle", () => {
         )!;
       await act(async () => pressKey(choice(other.guideId), "Secondary"));
       expect(
-        container!.querySelector('[role="alertdialog"]')?.textContent,
+        container!.querySelector('[role="dialog"][aria-label^="管理指南："]')
+          ?.textContent,
       ).toContain(other.cache!.title);
       let work!: Promise<void>;
       await act(async () => {
         work = downloads.start({ ...identity, guideId: "3414883899" });
       });
-      expect(buttonNamed("确认卸载").getAttribute("aria-disabled")).toBe(
-        "true",
-      );
+      expect(buttonNamed("确认卸载").classList.contains("Disabled")).toBe(true);
       await act(async () => buttonNamed("确认卸载").click());
       expect(remove).not.toHaveBeenCalled();
       await act(async () => {
         finishDownload();
         await work;
       });
-      expect(buttonNamed("确认卸载").getAttribute("aria-disabled")).toBe(
-        "false",
+      expect(buttonNamed("确认卸载").classList.contains("Disabled")).toBe(
+        false,
       );
       await act(async () => buttonNamed("确认卸载").click());
       expect(remove).toHaveBeenCalledExactlyOnceWith(other.guideId);
@@ -1974,10 +2043,11 @@ describe("GuideReaderPage position lifecycle", () => {
       expect(loadLibrary).toHaveBeenCalledTimes(2);
       if (partialFailure) {
         expect(
-          container!.querySelector('[role="alertdialog"]')?.textContent,
+          container!.querySelector('[role="dialog"][aria-label^="管理指南："]')
+            ?.textContent,
         ).toContain("图片清理失败");
-        expect(buttonNamed("确认清理残留").getAttribute("aria-disabled")).toBe(
-          "false",
+        expect(buttonNamed("确认清理残留").classList.contains("Disabled")).toBe(
+          false,
         );
         await act(async () => buttonNamed("确认清理残留").click());
         expect(remove.mock.calls).toEqual([[other.guideId], [other.guideId]]);
@@ -1990,8 +2060,8 @@ describe("GuideReaderPage position lifecycle", () => {
       );
       expect(scroller.scrollTop).toBe(600);
       await act(async () => pressKey(choice(identity.guideId), "Secondary"));
-      expect(buttonNamed("确认卸载").getAttribute("aria-disabled")).toBe(
-        "false",
+      expect(buttonNamed("确认卸载").classList.contains("Disabled")).toBe(
+        false,
       );
     },
   );
@@ -2099,7 +2169,7 @@ describe("GuideReaderPage position lifecycle", () => {
     expect(scroller.scrollTop).toBe(234);
   });
 
-  it("focuses the first alternative when a guide list finishes loading", async () => {
+  it("registers the first alternative as native preferred focus when a guide list finishes loading", async () => {
     const guide = guideFixture();
     const cache = new ReaderSessionCache({
       getCachedGuide: async () => guide,
@@ -2120,14 +2190,15 @@ describe("GuideReaderPage position lifecycle", () => {
     const dialog = container!.querySelector<HTMLElement>(
       '[aria-label="切换指南"]',
     )!;
-    expect(document.activeElement).toBe(dialog);
+    expect(dialog.closest("[data-native-modal]")).not.toBeNull();
+    expect(dialog.textContent).toContain("正在读取本游戏指南");
     await act(async () =>
       resolveList([
         { appId: identity.appId, guideId: "123", updatedAt: 1, cache: null },
       ]),
     );
     await flushFrame();
-    expect(document.activeElement).toBe(
+    expect(dialog.querySelector('[data-native-preferred-focus="true"]')).toBe(
       dialog.querySelector(
         '[data-grip-guide-choice]:not([data-current="true"])',
       ),
@@ -2188,14 +2259,14 @@ describe("GuideReaderPage position lifecycle", () => {
       ),
     ).toBe(false);
     expect(page?.style.paddingTop).toBe("40px");
-    expect(dialog?.style.top).toBe("40px");
+    expect(dialog?.style.top).toBe("");
+    expect(dialog?.closest("[data-native-modal]")).not.toBeNull();
     expect(dialog?.classList.contains("grip-reader-guide-switcher")).toBe(true);
     const currentGuide = dialog?.querySelector('[aria-current="page"]');
     expect(currentGuide?.tagName).toBe("BUTTON");
     expect(currentGuide?.textContent).toContain("正在阅读 · 组件回归指南");
     expect(container?.querySelector(".grip-reader-guide-enter")).toBeNull();
     expect(page?.classList.contains("steam-dialog-content")).toBe(true);
-    expect(dialog?.classList.contains("steam-dialog-content")).toBe(true);
     await act(async () => (currentGuide as HTMLButtonElement).click());
     await flushFrame();
     expect(container?.querySelector('[aria-label="切换指南"]')).toBeNull();

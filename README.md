@@ -106,10 +106,18 @@ animation. Reader CSS is only for document layout (including safe image/table
 sizes and BBCode structure); the browser adapter does not reproduce Steam's
 stylesheet, so local browser tests are not native-style visual acceptance.
 
+Steam owns list/toolbar focus navigation and modal focus isolation/return through
+`SimpleModal`, `ModalRoot` and `ConfirmModal`; do not add manual arrow-key or Tab
+loops. Logical gamepad callbacks must return `false` for unhandled input (an
+implicit return consumes it). Reader scrolling uses Steam's own step and boundary
+logic in immediate mode: its smooth hook exposes no cancellation, so an old
+animation could overwrite a chapter jump or restored position. If the hook is
+unavailable, the reader explicitly reports compatibility scrolling.
+
 Native component contracts can also be checked against an installed Steam
 client: `node --test tests/scripts/steam-native-contract.test.mjs`. The test
 locates the macOS installation by default; use `GRIP_STEAM_UI_DIR` for another
-`steamui` directory. It executes the actual button/progress component functions,
+`steamui` directory. It executes the actual button/progress, scrolling and input functions,
 does not vendor Valve code, and explicitly skips when Steam is not installed.
 Steam progress takes a 0–100 percentage. A disabled DialogButton retains its
 focusable DOM node; its native disabled styling and event blocking are not the

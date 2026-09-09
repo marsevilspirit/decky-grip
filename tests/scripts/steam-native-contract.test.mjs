@@ -203,4 +203,169 @@ test("installed Valve components retain the GRIP native UI contracts", async (t)
       t.diagnostic(`DialogButton function SHA256 ${sha256(code)}`);
     },
   );
+
+  const libraryPath = join(steamUiDirectory, "library.js");
+  const library = readFileSync(libraryPath, "utf8");
+  t.diagnostic(
+    `Valve navigation bundle: ${libraryPath}; SHA256 ${sha256(library)}`,
+  );
+
+  await t.test(
+    "native scrolling owns the step, repeat target and boundary handoff",
+    () => {
+      const code = nativeFunction(bundle.source, "??30)/100");
+      assert.ok(code.includes("ScrollOnGamepadDirection top:"));
+      const context = {};
+      const [react] = symbols(code, /\b([$\w]+)\.useRef\(/);
+      context[react] = {
+        useRef: (current) => ({ current }),
+        useCallback: (callback) => callback,
+      };
+      const buttons = Object.fromEntries(
+        ["DIR_UP", "DIR_DOWN", "DIR_LEFT", "DIR_RIGHT"].map((name) => [
+          name,
+          name,
+        ]),
+      );
+      bind(context, symbols(code, /case ([$\w]+)\.([$\w]+)\.DIR_UP:/), buttons);
+      const [log] = symbols(code, /return ([$\w]+)\(`ScrollOnGamepadDirection/);
+      context[log] = () => {};
+      const animations = [];
+      bind(
+        context,
+        symbols(code, /new ([$\w]+)\.([$\w]+)\(e\.current/),
+        class {
+          constructor(element, target, options) {
+            Object.assign(this, { element, target, options });
+            animations.push(this);
+          }
+          Start() {
+            this.started = true;
+          }
+          Cancel() {
+            this.canceled = true;
+          }
+        },
+      );
+      const writes = [];
+      const view = {
+        scrollTop: 0,
+        scrollHeight: 5000,
+        clientHeight: 1000,
+        scrollLeft: 0,
+        scrollWidth: 1000,
+        clientWidth: 1000,
+        scrollTo(options) {
+          writes.push(options);
+          if (options.top !== undefined) this.scrollTop = options.top;
+          if (options.left !== undefined) this.scrollLeft = options.left;
+        },
+      };
+      const ref = { current: view };
+      const hook = new Script(`(${code})`).runInNewContext(context, {
+        timeout: 1000,
+      });
+      const direction = (button) => ({
+        detail: { button },
+        defaultPrevented: false,
+      });
+      const auto = hook(ref, "auto");
+      assert.equal(auto(direction(buttons.DIR_UP)), false);
+      assert.equal(auto(direction(buttons.DIR_LEFT)), false);
+      assert.equal(auto(direction(buttons.DIR_DOWN)), true);
+      assert.equal(writes[0].top, 300);
+      assert.equal(writes[0].behavior, "auto");
+      view.scrollTop = 3900;
+      assert.equal(auto(direction(buttons.DIR_DOWN)), true);
+      assert.equal(view.scrollTop, 4000);
+      assert.equal(auto(direction(buttons.DIR_DOWN)), false);
+      assert.equal(
+        auto({ ...direction(buttons.DIR_UP), defaultPrevented: true }),
+        false,
+      );
+      assert.equal(
+        hook(ref, "auto", undefined, () => false)(direction(buttons.DIR_UP)),
+        false,
+      );
+      view.scrollTop = 0;
+      const smooth = hook(ref);
+      smooth(direction(buttons.DIR_DOWN));
+      smooth({
+        ...direction(buttons.DIR_DOWN),
+        detail: { button: buttons.DIR_DOWN, is_repeat: true },
+      });
+      assert.equal(animations.length, 2);
+      assert.equal(animations[0].element, view);
+      assert.equal(animations[0].target.scrollTop, 300);
+      assert.equal(animations[0].started, true);
+      assert.equal(animations[0].canceled, true);
+      assert.equal(animations[1].target.scrollTop, 600);
+      assert.equal(animations[1].options.timing, "linear");
+      assert.equal(animations[1].options.msDuration, 300);
+      ref.current = null;
+      assert.equal(smooth(direction(buttons.DIR_DOWN)), false);
+      t.diagnostic(`Native scrolling hook SHA256 ${sha256(code)}`);
+    },
+  );
+
+  await t.test(
+    "native logical input propagates only when the handler returns false",
+    () => {
+      const code = nativeFunction(
+        library,
+        "!1!==e(t)&&(t.stopPropagation(),t.preventDefault())",
+      );
+      for (const result of [undefined, true, false]) {
+        const event = new Event("vgp_ondirection", { cancelable: true });
+        const handler = () => result;
+        new Script(`(${code})(handler)(event)`).runInNewContext(
+          { handler, event },
+          { timeout: 1000 },
+        );
+        assert.equal(event.defaultPrevented, result !== false);
+        assert.equal(event.cancelBubble, result !== false);
+      }
+      t.diagnostic(`Logical event wrapper SHA256 ${sha256(code)}`);
+    },
+  );
+
+  await t.test(
+    "the registered DOM focus listener transfers native navigation focus",
+    () => {
+      const start = library.indexOf("OnDOMFocus(e){");
+      const end = library.indexOf("OnDOMBlur(e){", start);
+      assert.ok(start >= 0 && end > start && end - start < 8192);
+      const code = library.slice(start, end);
+      const context = {};
+      bind(
+        context,
+        symbols(code, /TransferFocus\(([$\w]+)\.([$\w]+)\.BROWSER/),
+        { BROWSER: "browser-source" },
+      );
+      const [log] = symbols(code, /return ([$\w]+)\("Browser gave node focus/);
+      context[log] = () => {};
+      const transfers = [];
+      const descendant = {};
+      const node = {
+        BHasFocus: () => false,
+        GetFocusable: () => "self",
+        FindFocusableDescendant: () => descendant,
+        m_Tree: { TransferFocus: (...args) => transfers.push(args) },
+      };
+      const focus = () =>
+        new Script(`({${code}}).OnDOMFocus.call(node, {})`).runInNewContext(
+          { ...context, node },
+          { timeout: 1000 },
+        );
+      focus();
+      assert.deepEqual(transfers, [["browser-source", node]]);
+      node.GetFocusable = () => "children";
+      focus();
+      assert.deepEqual(transfers.at(-1), ["browser-source", descendant]);
+      node.BHasFocus = () => true;
+      focus();
+      assert.equal(transfers.length, 2);
+      t.diagnostic(`OnDOMFocus method SHA256 ${sha256(code)}`);
+    },
+  );
 });

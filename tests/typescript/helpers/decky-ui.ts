@@ -1,4 +1,10 @@
-import { createElement, forwardRef, type ReactNode } from "react";
+import {
+  createElement,
+  forwardRef,
+  useLayoutEffect,
+  useRef,
+  type ReactNode,
+} from "react";
 
 import { gamepadRef } from "./decky-gamepad";
 
@@ -37,6 +43,7 @@ export function mockDeckyElement(
           "focusClassName",
           "focusWithinClassName",
           "noFocusRing",
+          "focusable",
         ].includes(name)
       )
         delete domProps[name];
@@ -47,11 +54,83 @@ export function mockDeckyElement(
       const label = props[`on${action}ActionDescription`];
       if (label) domProps[`data-${action.toLowerCase()}-action`] = label;
     }
+    if (props.focusable !== undefined)
+      domProps["data-native-focusable"] = props.focusable;
+    if (props["flow-children"])
+      domProps["data-native-flow"] = props["flow-children"];
+    if (props.preferredFocus) domProps["data-native-preferred-focus"] = "true";
     return createElement(
       tag,
       { ...domProps, ...keyboard?.(props, tag), ref: gamepadRef(ref, props) },
       props.children as ReactNode,
     );
+  });
+}
+
+// Structural test boundary only; Steam owns the real portal, focus tree and return stack.
+export function mockSimpleModal({ active = true, children }: MockDeckyProps) {
+  const host = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (!active || !host.current) return;
+    const previous = document.activeElement as HTMLElement | null;
+    const target =
+      host.current.querySelector<HTMLElement>(
+        '[data-native-preferred-focus="true"]',
+      ) ?? host.current.querySelector<HTMLElement>('button, [tabindex="0"]');
+    target?.focus();
+    return () => {
+      if (previous?.isConnected) previous.focus();
+    };
+  }, [active]);
+  return active
+    ? createElement("div", { ref: host, "data-native-modal": true }, children)
+    : null;
+}
+
+const Modal = mockDeckyElement("div", (props) => ({
+  onKeyDown: (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!event.repeat) (props.onCancel as (() => void) | undefined)?.();
+  },
+}));
+export function mockModalRoot(props: MockDeckyProps) {
+  return createElement(Modal, {
+    role: "dialog",
+    "aria-label": props["aria-label"],
+    className: props.className,
+    onCancel: props.onCancel ?? props.closeModal,
+    children: props.children,
+  });
+}
+
+const ModalButton = mockDialogButton();
+export function mockConfirmModal(props: MockDeckyProps) {
+  return createElement(mockModalRoot, {
+    "aria-label": props.strTitle,
+    onCancel: props.onCancel ?? props.closeModal,
+    children: [
+      createElement("div", { key: "title" }, props.strTitle as ReactNode),
+      createElement(
+        "div",
+        { key: "description" },
+        props.strDescription as ReactNode,
+      ),
+      createElement(ModalButton, {
+        key: "ok",
+        disabled: props.bOKDisabled,
+        onClick: props.onOK,
+        children: props.strOKButtonText ?? "确定",
+      }),
+      createElement(ModalButton, {
+        key: "cancel",
+        disabled: props.bCancelDisabled,
+        preferredFocus: props.focusButton === "secondary",
+        onClick: props.onCancel ?? props.closeModal,
+        children: props.strCancelButtonText ?? "取消",
+      }),
+    ],
   });
 }
 

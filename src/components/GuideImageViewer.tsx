@@ -1,12 +1,13 @@
 import {
   DialogBodyText,
   DialogButton,
-  Focusable,
   GamepadButton,
+  SimpleModal,
   gamepadDialogClasses,
   type GamepadEvent,
 } from "@decky/ui";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Focusable } from "../steam/native-navigation";
 
 export interface ReaderPreviewImage {
   src: string;
@@ -22,18 +23,22 @@ const keyboardDirections: Record<string, GamepadButton> = {
   ArrowRight: GamepadButton.DIR_RIGHT,
 };
 
-export function GuideImageViewer({
-  image,
-  images,
-  onClose,
-}: {
+interface GuideImageViewerProps {
   image: ReaderPreviewImage;
   images?: ReaderPreviewImage[];
   onClose: () => void;
-}) {
-  const root = useRef<HTMLDivElement>(null);
+}
+
+export function GuideImageViewer(props: GuideImageViewerProps) {
+  return (
+    <SimpleModal active>
+      <ImageViewerContent {...props} />
+    </SimpleModal>
+  );
+}
+
+function ImageViewerContent({ image, images, onClose }: GuideImageViewerProps) {
   const viewport = useRef<HTMLDivElement>(null);
-  const fitButton = useRef<HTMLDivElement>(null);
   const choices = useMemo(() => {
     const unique = new Map(
       (images ?? [image]).map((entry) => [entry.src, entry]),
@@ -98,14 +103,6 @@ export function GuideImageViewer({
         left: centered(view.scrollLeft, view.clientWidth, current.width),
         top: centered(view.scrollTop, view.clientHeight, current.height),
       };
-      const limit = next >= 8 ? "in" : next <= 0.01 ? "out" : null;
-      if (
-        limit &&
-        root.current?.ownerDocument.activeElement?.getAttribute(
-          "data-grip-zoom",
-        ) === limit
-      )
-        view.focus({ preventScroll: true });
     }
     setScale(next);
   };
@@ -113,19 +110,16 @@ export function GuideImageViewer({
     const next = choices[index + delta];
     if (next) setSelectedSrc(next.src);
   };
-  const focusTargets = () => [
-    ...(root.current?.querySelectorAll<HTMLElement>(
-      '.grip-image-control:not(.Disabled):not(:disabled):not([aria-disabled="true"]), .grip-image-viewport',
-    ) ?? []),
-  ];
   useLayoutEffect(() => {
     setSelectedSrc(image.src);
   }, [image.src]);
   useLayoutEffect(() => {
     setFailed(false);
     fit(true);
-    viewport.current?.focus({ preventScroll: true });
   }, [current.src]);
+  useLayoutEffect(() => {
+    viewport.current?.focus({ preventScroll: true });
+  }, []);
   useLayoutEffect(() => {
     const view = viewport.current;
     const position = pendingScroll.current;
@@ -151,52 +145,29 @@ export function GuideImageViewer({
     view.scrollLeft = Math.max(0, Math.min(maxLeft, left));
     view.scrollTop = Math.max(0, Math.min(maxTop, top));
   };
+  // Steam consumes any result except false; an image edge yields to native focus navigation.
   const direction = (button: GamepadButton) => {
     const view = viewport.current;
-    if (!view) return;
+    if (!view) return false;
+    const { scrollLeft, scrollTop } = view;
     const step = Math.max(80, view.clientHeight * 0.2);
     if (button === GamepadButton.DIR_UP)
       pan(view.scrollLeft, view.scrollTop - step);
-    if (button === GamepadButton.DIR_DOWN) {
-      const previous = view.scrollTop;
+    if (button === GamepadButton.DIR_DOWN)
       pan(view.scrollLeft, view.scrollTop + step);
-      if (view.scrollTop <= previous) {
-        fitButton.current?.focus({ preventScroll: true });
-      }
-    }
     if (button === GamepadButton.DIR_LEFT)
       pan(view.scrollLeft - step, view.scrollTop);
     if (button === GamepadButton.DIR_RIGHT)
       pan(view.scrollLeft + step, view.scrollTop);
-  };
-  const toolbarDirection = (button: GamepadButton) => {
-    if (button === GamepadButton.DIR_UP) {
-      viewport.current?.focus({ preventScroll: true });
-    } else if (
-      button === GamepadButton.DIR_LEFT ||
-      button === GamepadButton.DIR_RIGHT
-    ) {
-      const targets = focusTargets().slice(1);
-      const focused = targets.indexOf(
-        root.current?.ownerDocument.activeElement as HTMLElement,
-      );
-      const next = Math.max(
-        0,
-        Math.min(
-          targets.length - 1,
-          focused + (button === GamepadButton.DIR_LEFT ? -1 : 1),
-        ),
-      );
-      targets[next]?.focus({ preventScroll: true });
-    }
+    return view.scrollLeft !== scrollLeft || view.scrollTop !== scrollTop;
   };
   return (
     <Focusable
-      ref={root}
       className={`DialogContent _DialogLayout ${gamepadDialogClasses.GamepadDialogContent} grip-image-viewer`}
       role="dialog"
       aria-modal="true"
       aria-label="图片全屏查看"
+      flow-children="column"
       onCancelActionDescription="返回正文"
       onSecondaryActionDescription="适应屏幕"
       onCancel={(event) => {
@@ -225,11 +196,13 @@ export function GuideImageViewer({
         ) {
           event.preventDefault();
           event.stopPropagation();
-          if (event.detail.is_repeat) return;
+          if (event.detail.is_repeat) return true;
           if (button === GamepadButton.BUMPER_LEFT) zoom(1 / 1.5);
           else if (button === GamepadButton.BUMPER_RIGHT) zoom(1.5);
           else switchImage(button === GamepadButton.TRIGGER_LEFT ? -1 : 1);
+          return true;
         }
+        return false;
       }}
       onKeyDown={(event) => {
         if (event.altKey || event.ctrlKey || event.metaKey) return;
@@ -246,25 +219,13 @@ export function GuideImageViewer({
           else if (event.key === "PageUp" || event.key === "PageDown")
             switchImage(event.key === "PageUp" ? -1 : 1);
           else zoom(event.key === "-" ? 1 / 1.5 : 1.5);
-        } else if (keyboardDirections[event.key] !== undefined) {
+        } else if (
+          keyboardDirections[event.key] !== undefined &&
+          viewport.current?.contains(event.target as Node) &&
+          direction(keyboardDirections[event.key])
+        ) {
           event.preventDefault();
           event.stopPropagation();
-          if (viewport.current?.contains(event.target as Node))
-            direction(keyboardDirections[event.key]);
-          else toolbarDirection(keyboardDirections[event.key]);
-        } else if (event.key === "Tab") {
-          const targets = focusTargets();
-          const focused = targets.indexOf(
-            event.currentTarget.ownerDocument.activeElement as HTMLElement,
-          );
-          const next =
-            (focused + (event.shiftKey ? -1 : 1) + targets.length) %
-            targets.length;
-          if (targets[next]) {
-            event.preventDefault();
-            event.stopPropagation();
-            targets[next].focus({ preventScroll: true });
-          }
         }
       }}
       style={{
@@ -280,16 +241,13 @@ export function GuideImageViewer({
         ref={viewport}
         className="grip-image-viewport"
         tabIndex={0}
+        focusable
         preferredFocus
         flow-children="none"
         aria-label="图片移动区域"
         aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight + - 0 PageUp PageDown Escape"
         data-dragging={dragging}
-        onGamepadDirection={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          direction(event.detail.button);
-        }}
+        onGamepadDirection={(event) => direction(event.detail.button)}
         onPointerDown={(event) => {
           if (event.button !== 0 || drag.current) return;
           event.preventDefault();
@@ -365,11 +323,6 @@ export function GuideImageViewer({
       <Focusable
         className="grip-image-toolbar"
         flow-children="row"
-        onGamepadDirection={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          toolbarDirection(event.detail.button);
-        }}
         style={{
           display: "flex",
           flexWrap: "wrap",
@@ -405,7 +358,6 @@ export function GuideImageViewer({
         <DialogButton
           className="grip-image-control"
           style={{ minWidth: 0, width: "auto" }}
-          data-grip-zoom="out"
           onClick={() => zoom(1 / 1.5)}
           disabled={scale <= 0.01}
         >
@@ -417,14 +369,12 @@ export function GuideImageViewer({
         <DialogButton
           className="grip-image-control"
           style={{ minWidth: 0, width: "auto" }}
-          data-grip-zoom="in"
           onClick={() => zoom(1.5)}
           disabled={scale >= 8}
         >
           放大
         </DialogButton>
         <DialogButton
-          ref={fitButton}
           className="grip-image-control"
           style={{ minWidth: 0, width: "auto" }}
           onClick={() => fit()}

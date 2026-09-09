@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { GamepadButton } from "@decky/ui";
-import { act, type ComponentProps } from "react";
+import { act, createElement, type ComponentProps, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -11,14 +11,18 @@ import {
 } from "../../src/components/GuideImageViewer";
 import { gamepadEvent, type GamepadHandler } from "./helpers/decky-gamepad";
 
+const nativeModal = vi.hoisted(() => ({ ready: true }));
 vi.mock("@decky/ui", async () => {
   const { GamepadButton } = await import("./helpers/decky-gamepad");
-  const { mockDeckyElement, mockDialogButton } =
+  const { mockDeckyElement, mockDialogButton, mockSimpleModal } =
     await import("./helpers/decky-ui");
   return {
+    findModuleExport: () => undefined,
     DialogButton: mockDialogButton(),
     DialogBodyText: mockDeckyElement("div"),
     Focusable: mockDeckyElement("div"),
+    SimpleModal: (props: { children: ReactNode; active?: boolean }) =>
+      nativeModal.ready ? createElement(mockSimpleModal, props) : null,
     GamepadButton,
     gamepadDialogClasses: { GamepadDialogContent: "native-dialog-content" },
   };
@@ -97,6 +101,7 @@ describe("full-screen image viewer interaction", () => {
     document.body.append(host);
     root = createRoot(host);
     onClose = vi.fn();
+    nativeModal.ready = true;
   });
   afterEach(() => {
     act(() => root.unmount());
@@ -109,8 +114,8 @@ describe("full-screen image viewer interaction", () => {
     expect(img().style.width).toBe("768px");
     expect(document.activeElement).toBe(viewport());
     const right = gamepad(dialog(), "onButtonDown", GamepadButton.BUMPER_RIGHT);
-    expect(right.preventDefault).toHaveBeenCalledOnce();
-    expect(right.stopPropagation).toHaveBeenCalledOnce();
+    expect(right.preventDefault).toHaveBeenCalled();
+    expect(right.stopPropagation).toHaveBeenCalled();
     expect(img().style.width).toBe("1152px");
     expect(viewport().scrollLeft).toBe(176);
     gamepad(dialog(), "onButtonDown", GamepadButton.BUMPER_RIGHT, true);
@@ -121,7 +126,7 @@ describe("full-screen image viewer interaction", () => {
     gamepad(dialog(), "onSecondaryButton", GamepadButton.SECONDARY, true);
     expect(img().style.width).toBe("1152px");
     const fit = gamepad(dialog(), "onSecondaryButton", GamepadButton.SECONDARY);
-    expect(fit.stopPropagation).toHaveBeenCalledOnce();
+    expect(fit.stopPropagation).toHaveBeenCalled();
     expect(img().style.width).toBe("768px");
     expect(viewport().scrollLeft).toBe(0);
     expect(img().style.transition).toBe("");
@@ -141,6 +146,26 @@ describe("full-screen image viewer interaction", () => {
     expect(viewport().scrollTop).toBe(0);
   });
 
+  it("leaves ordinary activation and direction button events to Steam", () => {
+    render();
+    for (const value of [
+      GamepadButton.OK,
+      GamepadButton.DIR_UP,
+      GamepadButton.DIR_DOWN,
+      GamepadButton.DIR_LEFT,
+      GamepadButton.DIR_RIGHT,
+    ]) {
+      for (const repeat of [false, true]) {
+        const event = gamepad(viewport(), "onButtonDown", value, repeat);
+        expect(event.defaultPrevented).toBe(false);
+        expect(event.preventDefault).not.toHaveBeenCalled();
+        expect(event.stopPropagation).not.toHaveBeenCalled();
+      }
+    }
+    expect(img().style.width).toBe("768px");
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it("clamps zoom and disables the corresponding controls at both limits", () => {
     render();
     for (let i = 0; i < 20; i++)
@@ -153,25 +178,37 @@ describe("full-screen image viewer interaction", () => {
     expect(button("缩小").classList.contains("Disabled")).toBe(true);
   });
 
-  it("pans to the image edge, then enters the toolbar, whose Up returns to the canvas", () => {
+  it("consumes actual image movement but yields at the edge to Steam's native flow", () => {
     render();
     gamepad(dialog(), "onButtonDown", GamepadButton.BUMPER_RIGHT);
     gamepad(viewport(), "onGamepadDirection", GamepadButton.DIR_RIGHT);
     expect(viewport().scrollLeft).toBe(296);
     gamepad(viewport(), "onGamepadDirection", GamepadButton.DIR_RIGHT);
     expect(viewport().scrollLeft).toBeCloseTo(352);
-    gamepad(viewport(), "onGamepadDirection", GamepadButton.DIR_DOWN);
-    expect(document.activeElement).toBe(button("适应屏幕"));
-    const toolbar = host.querySelector<HTMLElement>(".grip-image-toolbar")!;
-    gamepad(toolbar, "onGamepadDirection", GamepadButton.DIR_UP);
+    const edge = gamepad(
+      viewport(),
+      "onGamepadDirection",
+      GamepadButton.DIR_DOWN,
+    );
+    expect(edge.defaultPrevented).toBe(false);
+    expect(edge.stopPropagation).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(viewport());
     render({ image: tall });
-    gamepad(viewport(), "onGamepadDirection", GamepadButton.DIR_DOWN);
+    const moved = gamepad(
+      viewport(),
+      "onGamepadDirection",
+      GamepadButton.DIR_DOWN,
+    );
+    expect(moved.defaultPrevented).toBe(true);
     expect(viewport().scrollTop).toBe(120);
     expect(document.activeElement).toBe(viewport());
     viewport().scrollTop = 1704;
-    gamepad(viewport(), "onGamepadDirection", GamepadButton.DIR_DOWN);
-    expect(document.activeElement).toBe(button("适应屏幕"));
+    expect(
+      gamepad(viewport(), "onGamepadDirection", GamepadButton.DIR_DOWN)
+        .defaultPrevented,
+    ).toBe(false);
+    expect(viewport().scrollTop).toBe(1704);
+    expect(document.activeElement).toBe(viewport());
   });
 
   it("switches among supplied visible images by LT/RT and buttons without repeats or boundary leakage", () => {
@@ -179,7 +216,7 @@ describe("full-screen image viewer interaction", () => {
     expect(button("上一张").classList.contains("Disabled")).toBe(true);
     expect(dialog().textContent).toContain("1 / 3");
     const edge = gamepad(dialog(), "onButtonDown", GamepadButton.TRIGGER_LEFT);
-    expect(edge.stopPropagation).toHaveBeenCalledOnce();
+    expect(edge.stopPropagation).toHaveBeenCalled();
     expect(img().src).toBe(first.src);
     gamepad(dialog(), "onButtonDown", GamepadButton.TRIGGER_RIGHT, true);
     expect(img().src).toBe(first.src);
@@ -192,8 +229,8 @@ describe("full-screen image viewer interaction", () => {
     expect(button("下一张").classList.contains("Disabled")).toBe(true);
     expect(dialog().textContent).toContain("3 / 3");
     const end = gamepad(dialog(), "onButtonDown", GamepadButton.TRIGGER_RIGHT);
-    expect(end.preventDefault).toHaveBeenCalledOnce();
-    expect(end.stopPropagation).toHaveBeenCalledOnce();
+    expect(end.preventDefault).toHaveBeenCalled();
+    expect(end.stopPropagation).toHaveBeenCalled();
     expect(img().src).toBe(small.src);
     act(() => button("上一张").click());
     expect(img().src).toBe(tall.src);
@@ -235,10 +272,8 @@ describe("full-screen image viewer interaction", () => {
     expect(outerKey).not.toHaveBeenCalled();
   });
 
-  it("uses the same bounded canvas and toolbar navigation for keyboard arrows", () => {
+  it("only handles keyboard arrows when they pan the canvas, leaving controls to native navigation", () => {
     render({ image: tall, images: [first, tall] });
-    const outerKey = vi.fn();
-    document.body.addEventListener("keydown", outerKey);
     expect(key("ArrowDown").defaultPrevented).toBe(true);
     expect(viewport().scrollTop).toBe(120);
     key("ArrowUp");
@@ -250,16 +285,12 @@ describe("full-screen image viewer interaction", () => {
     expect(viewport().scrollLeft).toBe(296);
     key("0");
     expect(Number.parseFloat(img().style.height)).toBeCloseTo(568);
-    key("ArrowDown");
-    expect(document.activeElement).toBe(button("适应屏幕"));
-    key("ArrowRight");
-    expect(document.activeElement).toBe(button("返回正文"));
-    key("ArrowRight");
-    expect(document.activeElement).toBe(button("返回正文"));
-    key("ArrowUp");
+    expect(key("ArrowDown").defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(viewport());
-    document.body.removeEventListener("keydown", outerKey);
-    expect(outerKey).not.toHaveBeenCalled();
+    button("适应屏幕").focus();
+    for (const arrow of ["ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown"])
+      expect(key(arrow).defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(button("适应屏幕"));
   });
 
   it("switches images with PageUp/PageDown, preserves modifier shortcuts and ignores repeats", () => {
@@ -281,7 +312,7 @@ describe("full-screen image viewer interaction", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it("returns focus to the canvas before a focused zoom control becomes disabled", () => {
+  it("keeps the focused zoom control in place at its native disabled limit", () => {
     render();
     button("放大").focus();
     for (
@@ -291,7 +322,7 @@ describe("full-screen image viewer interaction", () => {
     )
       act(() => button("放大").click());
     expect(button("放大").classList.contains("Disabled")).toBe(true);
-    expect(document.activeElement).toBe(viewport());
+    expect(document.activeElement).toBe(button("放大"));
     button("缩小").focus();
     for (
       let index = 0;
@@ -300,9 +331,8 @@ describe("full-screen image viewer interaction", () => {
     )
       act(() => button("缩小").click());
     expect(button("缩小").classList.contains("Disabled")).toBe(true);
-    expect(document.activeElement).toBe(viewport());
-    key("Tab");
-    expect(document.activeElement).toBe(button("放大"));
+    expect(document.activeElement).toBe(button("缩小"));
+    expect(key("Tab").defaultPrevented).toBe(false);
   });
 
   it("shows drag feedback, tracks only the captured pointer and clamps panning at image edges", () => {
@@ -400,28 +430,23 @@ describe("full-screen image viewer interaction", () => {
     const cancel = gamepad(source, "onCancel", GamepadButton.CANCEL);
     expect(cancel.target).toBe(source);
     expect(cancel.defaultPrevented).toBe(true);
-    expect(cancel.preventDefault).toHaveBeenCalledOnce();
-    expect(cancel.stopPropagation).toHaveBeenCalledOnce();
+    expect(cancel.preventDefault).toHaveBeenCalled();
+    expect(cancel.stopPropagation).toHaveBeenCalled();
     expect(onClose).toHaveBeenCalledOnce();
     const options = gamepad(source, "onOptionsButton", GamepadButton.OPTIONS);
     expect(options.defaultPrevented).toBe(true);
-    expect(options.stopPropagation).toHaveBeenCalledOnce();
+    expect(options.stopPropagation).toHaveBeenCalled();
     expect(onClose).toHaveBeenCalledOnce();
     expect(escaped).not.toHaveBeenCalled();
     host.removeEventListener("onCancel", escaped);
     host.removeEventListener("onOptionsButton", escaped);
   });
 
-  it("keeps keyboard focus within the viewer, skips disabled controls and needs no image list", () => {
+  it("delegates Tab to the native modal instead of maintaining a second focus loop", () => {
     render({ images: [first, small] });
     expect(button("上一张").classList.contains("Disabled")).toBe(true);
-    expect(key("Tab").defaultPrevented).toBe(true);
-    expect(document.activeElement).toBe(button("下一张"));
-    key("Tab", { shiftKey: true });
-    expect(document.activeElement).toBe(viewport());
-    key("Tab", { shiftKey: true });
-    expect(document.activeElement).toBe(button("返回正文"));
-    key("Tab");
+    expect(key("Tab").defaultPrevented).toBe(false);
+    expect(key("Tab", { shiftKey: true }).defaultPrevented).toBe(false);
     expect(document.activeElement).toBe(viewport());
     render();
     expect(button("上一张")).toBeUndefined();
@@ -429,24 +454,47 @@ describe("full-screen image viewer interaction", () => {
     expect(img().src).toBe(first.src);
   });
 
-  it("keeps toolbar gamepad navigation inside the viewer and skips disabled image controls", () => {
+  it("registers the canvas and toolbar flow without intercepting Steam's toolbar directions", () => {
     render({ images: [first, small] });
-    gamepad(viewport(), "onGamepadDirection", GamepadButton.DIR_DOWN);
-    expect(document.activeElement).toBe(button("适应屏幕"));
     const toolbar = host.querySelector<HTMLElement>(".grip-image-toolbar")!;
-    gamepad(toolbar, "onGamepadDirection", GamepadButton.DIR_RIGHT);
-    expect(document.activeElement).toBe(button("返回正文"));
-    gamepad(toolbar, "onGamepadDirection", GamepadButton.DIR_RIGHT);
-    expect(document.activeElement).toBe(button("返回正文"));
-    const edge = gamepad(toolbar, "onGamepadDirection", GamepadButton.DIR_DOWN);
-    expect(edge.stopPropagation).toHaveBeenCalledOnce();
-    expect(document.activeElement).toBe(button("返回正文"));
-    for (let i = 0; i < 8; i++)
-      gamepad(toolbar, "onGamepadDirection", GamepadButton.DIR_LEFT);
+    expect(dialog().dataset.nativeFlow).toBe("column");
+    expect(toolbar.dataset.nativeFlow).toBe("row");
+    expect(viewport().dataset.nativeFocusable).toBe("true");
+    button("下一张").focus();
+    for (const direction of [
+      GamepadButton.DIR_UP,
+      GamepadButton.DIR_DOWN,
+      GamepadButton.DIR_LEFT,
+      GamepadButton.DIR_RIGHT,
+    ]) {
+      const event = gamepad(button("下一张"), "onGamepadDirection", direction);
+      expect(event.defaultPrevented).toBe(false);
+      expect(event.stopPropagation).not.toHaveBeenCalled();
+    }
     expect(document.activeElement).toBe(button("下一张"));
-    gamepad(toolbar, "onGamepadDirection", GamepadButton.DIR_UP);
-    expect(document.activeElement).toBe(viewport());
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("waits for the native modal portal to mount before fitting and focusing the image", () => {
+    nativeModal.ready = false;
+    render({ image: tall });
+    expect(host.querySelector("img")).toBeNull();
+    nativeModal.ready = true;
+    render({ image: tall });
+    expect(host.querySelector('[data-native-modal="true"]')).not.toBeNull();
+    expect(img().style.width).toBe("768px");
+    expect(img().style.height).toBe("2304px");
+    expect(document.activeElement).toBe(viewport());
+  });
+
+  it("does not steal native button focus when the next image changes", () => {
+    render({ images: [first, small] });
+    const next = button("下一张");
+    next.focus();
+    act(() => next.click());
+    expect(img().src).toBe(small.src);
+    expect(next.classList.contains("Disabled")).toBe(true);
+    expect(document.activeElement).toBe(next);
   });
 
   it("uses native dialog styling without overriding focus, press, disabled or animation feedback", () => {

@@ -2,7 +2,6 @@ import {
   DialogButton,
   DialogBodyText,
   DialogHeader,
-  Focusable,
   GamepadButton,
   gamepadDialogClasses,
   Spinner,
@@ -48,6 +47,10 @@ import {
 } from "../reader/search";
 import { shortSectionTitle } from "../reader/toc-title";
 import { makeGuideKey, type GuideIdentity } from "../steam/guide-key";
+import {
+  Focusable,
+  useNativeScrollOnGamepadDirection,
+} from "../steam/native-navigation";
 import { BusyLabel } from "./BusyLabel";
 import { GuideDocument } from "./GuideDocument";
 import { GuideImageViewer, type ReaderPreviewImage } from "./GuideImageViewer";
@@ -219,6 +222,9 @@ export function GuideReaderPage({
     }));
   const positionRepairBusy = positionRepairMode !== null;
   const scrollerRef = useRef<HTMLDivElement | null>(null);
+  // ponytail: Steam exposes no animation cancellation; use its immediate mode
+  // until smooth scrolling can be cancelled before chapter jumps and restores.
+  const nativeScroll = useNativeScrollOnGamepadDirection(scrollerRef, "auto");
   const tocRef = useRef<HTMLDivElement | null>(null);
   const guideSearchButtonRef = useRef<HTMLDivElement | null>(null);
   const guideSearchIndexRef = useRef<{
@@ -917,7 +923,7 @@ export function GuideReaderPage({
   const scrollReaderBy = (amount: number, event: GamepadEvent) => {
     const scroller = scrollerRef.current;
     if (!scroller || loading) {
-      return;
+      return false;
     }
     const maxScrollTop = Math.max(
       0,
@@ -928,7 +934,7 @@ export function GuideReaderPage({
       Math.min(scroller.scrollTop + amount, maxScrollTop),
     );
     if (nextScrollTop === scroller.scrollTop) {
-      return;
+      return false;
     }
     event.preventDefault();
     event.stopPropagation();
@@ -937,19 +943,37 @@ export function GuideReaderPage({
     checkpoint.intendScroll();
     scroller.scrollTop = nextScrollTop;
     onScroll();
+    return true;
   };
 
   const onReaderDirection = (event: GamepadEvent) => {
+    if (
+      nativeScroll &&
+      (event.detail.button === GamepadButton.DIR_UP ||
+        event.detail.button === GamepadButton.DIR_DOWN)
+    ) {
+      if (loading) return false;
+      const handled = nativeScroll(event);
+      if (handled) {
+        stopGuideSearchAlignment();
+        failAndCancelRestore("用户在阅读位置稳定前滚动");
+        checkpoint.intendScroll();
+      }
+      return handled;
+    }
     const line = Math.max(96, (scrollerRef.current?.clientHeight ?? 0) * 0.16);
     if (event.detail.button === GamepadButton.DIR_UP) {
-      scrollReaderBy(-line, event);
+      return scrollReaderBy(-line, event);
     } else if (event.detail.button === GamepadButton.DIR_DOWN) {
-      scrollReaderBy(line, event);
+      return scrollReaderBy(line, event);
     } else if (event.detail.button === GamepadButton.DIR_RIGHT) {
+      if (!loaded || loading) return false;
       event.preventDefault();
       event.stopPropagation();
       openNavigation();
+      return true;
     }
+    return false;
   };
 
   const onReaderButton = (event: GamepadEvent) => {
@@ -958,13 +982,14 @@ export function GuideReaderPage({
       event.detail.button === GamepadButton.BUMPER_LEFT ||
       event.detail.button === GamepadButton.TRIGGER_LEFT
     ) {
-      scrollReaderBy(-page, event);
+      return scrollReaderBy(-page, event);
     } else if (
       event.detail.button === GamepadButton.BUMPER_RIGHT ||
       event.detail.button === GamepadButton.TRIGGER_RIGHT
     ) {
-      scrollReaderBy(page, event);
+      return scrollReaderBy(page, event);
     }
+    return false;
   };
 
   const refreshGuide = async () => {
@@ -1272,28 +1297,32 @@ export function GuideReaderPage({
     restoreWarning ??
     loadWarning ??
     loaded?.positionWarning ??
+    (!nativeScroll ? "Steam 原生滚动组件暂不可用，正在使用兼容滚动。" : null) ??
     null;
   const readerCovered = guideSwitcherOpen || previewImage !== null;
 
   return (
     <Focusable
       className={`grip-reader DialogContent _DialogLayout ${gamepadDialogClasses.GamepadDialogContent}`}
+      flow-children="column"
       onCancel={cancelReader}
       onSecondaryActionDescription={
-        !previewImage && !guideSwitcherOpen && loaded
+        !previewImage && !guideSwitcherOpen && loaded && !loading
           ? navigationOpen
             ? "返回正文"
             : "目录"
           : undefined
       }
       onSecondaryButton={(event) => {
-        if (previewImage || guideSwitcherOpen || !loaded) return;
+        if (previewImage || guideSwitcherOpen || !loaded || loading)
+          return false;
         event.preventDefault();
         event.stopPropagation();
         if (!event.detail.is_repeat) {
           if (navigationOpen) closeNavigation();
           else openNavigation();
         }
+        return true;
       }}
       onKeyDown={(event) => {
         if (event.defaultPrevented || previewImage || guideSwitcherOpen) return;
@@ -1321,16 +1350,12 @@ export function GuideReaderPage({
           : undefined
       }
       onOptionsButton={(event) => {
+        if (previewImage || guideSearchOpen || switchPending !== null)
+          return false;
         event.preventDefault();
         event.stopPropagation();
-        if (
-          !previewImage &&
-          !event.detail.is_repeat &&
-          !guideSearchOpen &&
-          switchPending === null
-        ) {
-          openGuideSwitcher();
-        }
+        if (!event.detail.is_repeat) openGuideSwitcher();
+        return true;
       }}
       style={{
         boxSizing: "border-box",
@@ -1477,6 +1502,7 @@ export function GuideReaderPage({
             aria-hidden={navigationMode === "toc" || undefined}
             inert={navigationMode === "toc" ? true : undefined}
             ref={scrollerRef}
+            focusable
             flow-children="none"
             onButtonDown={onReaderButton}
             onClick={(event) => {
@@ -1498,14 +1524,15 @@ export function GuideReaderPage({
                 event.detail.is_repeat ||
                 (!visibleRetryImage && !visiblePreviewImage)
               )
-                return;
+                return false;
               const target = event.target as Element | null;
-              if (target?.closest?.("[data-grip-image-retry]")) return;
+              if (target?.closest?.("[data-grip-image-retry]")) return false;
               event.preventDefault();
               event.stopPropagation();
               if (visibleRetryImage) retryImage(visibleRetryImage);
               else if (visiblePreviewImage)
                 openImagePreview(visiblePreviewImage);
+              return true;
             }}
             onGamepadDirection={onReaderDirection}
             onScroll={onScroll}
@@ -1564,6 +1591,7 @@ export function GuideReaderPage({
             aria-modal={navigationMode === "toc" || undefined}
             data-expanded={navigationOpen ? "true" : "false"}
             className={`grip-reader-toc DialogContent _DialogLayout ${gamepadDialogClasses.GamepadDialogContent}`}
+            flow-children="column"
             onFocusCapture={expandNavigation}
             ref={tocRef}
             role={
@@ -1588,41 +1616,6 @@ export function GuideReaderPage({
                 event.stopPropagation();
                 if (!event.repeat)
                   moveGuideSearchResult(event.shiftKey ? -1 : 1);
-              } else if (navigationMode === "toc" && event.key === "Tab") {
-                const controls = [
-                  ...event.currentTarget.querySelectorAll<HTMLElement>(
-                    "button, [role='button'], [tabindex]",
-                  ),
-                ].filter(
-                  (node) =>
-                    !node.closest("[hidden], [inert]") &&
-                    !node.matches(":disabled, [tabindex='-1']"),
-                );
-                const first = controls[0];
-                const last = controls[controls.length - 1];
-                const edge = event.shiftKey ? first : last;
-                const target = event.shiftKey ? last : first;
-                if (event.target === edge && target) {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  target.focus({ preventScroll: true });
-                  target.scrollIntoView({
-                    block: "nearest",
-                    inline: "nearest",
-                    behavior: "auto",
-                  });
-                }
-              }
-            }}
-            onGamepadDirection={(event) => {
-              const target = event.target as HTMLElement;
-              if (
-                event.detail.button === GamepadButton.DIR_LEFT &&
-                !target.closest("input, textarea, [contenteditable='true']")
-              ) {
-                event.preventDefault();
-                event.stopPropagation();
-                closeNavigation();
               }
             }}
             style={{

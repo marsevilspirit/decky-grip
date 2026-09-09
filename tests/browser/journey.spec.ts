@@ -223,7 +223,7 @@ test("uninstalling B preserves A's reading position and B's bookmark while C rem
   page,
 }) => {
   const guideC = "3414883879";
-  const confirmation = page.getByRole("alertdialog");
+  const confirmation = page.getByRole("dialog", { name: /^管理指南：/ });
   let removals = 0;
   let release!: () => void;
   const heldResponse = new Promise<void>((resolve) => {
@@ -270,8 +270,15 @@ test("uninstalling B preserves A's reading position and B's bookmark while C rem
 
     await choice(page, guideB).press("F3");
     await confirmation.getByRole("button", { name: /^确认卸载/ }).click();
-    await expect(confirmation).toHaveAttribute("aria-busy", "true");
+    await expect(
+      confirmation.getByRole("button", { name: /正在卸载/ }),
+    ).toHaveClass(/\bDisabled\b/);
+    await expect(
+      confirmation.getByRole("button", { name: "取消" }),
+    ).toHaveClass(/\bDisabled\b/);
     await expect.poll(() => removals).toBe(1);
+    await page.keyboard.press("Escape");
+    await expect(confirmation).toBeVisible();
     await expectRestored(page, positionA);
     release();
     await expect(confirmation).toHaveCount(0);
@@ -301,7 +308,7 @@ test("uninstalling B preserves A's reading position and B's bookmark while C rem
     const cleanRemaining = confirmation.getByRole("button", {
       name: "确认清理残留",
     });
-    await expect(cleanRemaining).toHaveAttribute("aria-disabled", "false");
+    await expect(cleanRemaining).not.toHaveClass(/\bDisabled\b/);
     expect(removals).toBe(1);
     await cleanRemaining.click();
     await expect(confirmation.getByRole("alert")).toContainText(
@@ -316,7 +323,7 @@ test("uninstalling B preserves A's reading position and B's bookmark while C rem
     // Retry eligibility must survive closing management, not depend on its old error state.
     await choice(page, guideB).press("F3");
     await expect(confirmation.getByRole("alert")).toHaveCount(0);
-    await expect(cleanRemaining).toHaveAttribute("aria-disabled", "false");
+    await expect(cleanRemaining).not.toHaveClass(/\bDisabled\b/);
     await cleanRemaining.click();
     await expect.poll(() => removals).toBe(3);
     await expect(confirmation).toHaveCount(0);
@@ -326,7 +333,7 @@ test("uninstalling B preserves A's reading position and B's bookmark while C rem
     await expect(confirmation).toHaveAccessibleName(/^管理指南：第 3 篇/);
     await expect(
       confirmation.getByRole("button", { name: "确认卸载" }),
-    ).toHaveAttribute("aria-disabled", "false");
+    ).not.toHaveClass(/\bDisabled\b/);
     await confirmation.getByRole("button", { name: "取消" }).click();
     await expect(choice(page, guideC)).toBeFocused();
     expect(removals).toBe(3);
