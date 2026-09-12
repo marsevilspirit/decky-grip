@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmod,
   mkdir,
   mkdtemp,
   readFile,
+  rename,
   rm,
+  symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -15,6 +19,7 @@ import vm from "node:vm";
 import {
   assemblePackage,
   buildPackage,
+  hashBackendSnapshot,
   PACKAGE_FILES,
   run,
   snapshotBackend,
@@ -71,6 +76,7 @@ test("persistent target reuse still checks sources and runs the exact validated 
       copyFile: async () => {},
       writeFile: async () => {},
       snapshotBackend: async () => {},
+      hashBackendSnapshot: async () => "backend-content-hash",
       mkdtemp: async () => "/repo/out/package-test",
       readFile: async (path) =>
         path.endsWith("builder-metadata.json")
@@ -82,7 +88,7 @@ test("persistent target reuse still checks sources and runs the exact validated 
                   failure === "bad-config" ? "not-a-digest" : configId,
               })
           : "source",
-      digest: () => "source-hash",
+      digest: (bytes) => createHash("sha256").update(bytes).digest("hex"),
       run: async (command, args) => {
         calls.push([command, ...args]);
         if (command === "pnpm" && failure === "check-fails")
@@ -166,6 +172,12 @@ test("persistent target reuse still checks sources and runs the exact validated 
     );
     assert.equal(container.at(-1), expectedId);
     assert.equal(container[container.indexOf("--platform") + 1], "linux/amd64");
+    assert.equal(
+      container[container.indexOf("--env") + 1],
+      `GRIP_BUILD_KEY=${createHash("sha256")
+        .update(`backend-content-hash\n${expectedId}\nlinux/amd64`)
+        .digest("hex")}`,
+    );
     assert.ok(
       container.includes(
         `type=volume,src=decky-grip-cargo-target-${expectedId.slice(7)},dst=/tmp/grip-target`,
@@ -174,27 +186,133 @@ test("persistent target reuse still checks sources and runs the exact validated 
   }
 });
 
-test("the container holds one lock through package-only clean, locked build and copy-out", async () => {
+test("backend fingerprints use complete snapshot contents, names and modes, never mtimes", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "grip-snapshot-hash-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = join(directory, "src/new-untracked.rs");
+  await write(file, "original", { mode: 0o644 });
+  const original = await hashBackendSnapshot(directory);
+  await utimes(file, 1, 1);
+  assert.equal(await hashBackendSnapshot(directory), original);
+  await writeFile(file, "modified");
+  await utimes(file, 1, 1);
+  assert.notEqual(await hashBackendSnapshot(directory), original);
+  await writeFile(file, "original");
+  assert.equal(await hashBackendSnapshot(directory), original);
+  await chmod(file, 0o755);
+  assert.notEqual(await hashBackendSnapshot(directory), original);
+  await chmod(file, 0o644);
+  await rename(file, join(directory, "src/renamed.rs"));
+  assert.notEqual(await hashBackendSnapshot(directory), original);
+  await rename(join(directory, "src/renamed.rs"), file);
+  await mkdir(join(directory, "empty"));
+  assert.notEqual(await hashBackendSnapshot(directory), original);
+  await symlink(file, join(directory, "linked.rs"));
+  await assert.rejects(hashBackendSnapshot(directory), /only regular files/);
+});
+
+test("the real entrypoint reuses only verified artifacts and locks through copy-out", async (t) => {
   const script = await readFile(
     new URL("../../backend/entrypoint.sh", import.meta.url),
     "utf8",
   );
   execFileSync("sh", ["-n"], { input: script });
-  const commands = script
-    .split("\n")
-    .filter((line) => line && !line.startsWith("#"));
-  assert.deepEqual(commands, [
-    "set -eu",
-    "cd /backend",
-    "export CARGO_TARGET_DIR=/tmp/grip-target",
-    'mkdir -p "$CARGO_TARGET_DIR"',
-    'exec 9>"$CARGO_TARGET_DIR/.grip-package.lock"',
-    "flock 9",
-    "cargo clean --locked --release -p grip-sidecar",
-    "cargo build --locked --release",
-    "mkdir -p out",
-    'cp "$CARGO_TARGET_DIR/release/grip-sidecar" out/grip-sidecar',
-  ]);
+  const directory = await mkdtemp(join(tmpdir(), "grip-artifact-reuse-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const target = join(directory, "target");
+  const binary = join(target, "release/grip-sidecar");
+  const receipt = join(target, ".grip-package-receipt");
+  const bin = join(directory, "bin");
+  // macOS has no flock command; Python invokes the same kernel lock on inherited fd 9.
+  await write(
+    join(bin, "flock"),
+    `#!/bin/sh
+exec python3 -c 'import fcntl, sys; fcntl.flock(int(sys.argv[1]), fcntl.LOCK_EX)' "$@"
+`,
+    { mode: 0o755 },
+  );
+  await write(
+    join(bin, "cargo"),
+    `#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$CARGO_TARGET_DIR/cargo-calls"
+case "$*" in
+  'clean --locked --release -p grip-sidecar')
+    rm -f "$CARGO_TARGET_DIR/release/grip-sidecar" ;;
+  'build --locked --release')
+    mkdir "$CARGO_TARGET_DIR/building"
+    trap 'rmdir "$CARGO_TARGET_DIR/building"' EXIT
+    sleep 0.05
+    mkdir -p "$CARGO_TARGET_DIR/release"
+    cp src/main.rs "$CARGO_TARGET_DIR/release/grip-sidecar"
+    chmod +x "$CARGO_TARGET_DIR/release/grip-sidecar"
+    test "$(cat src/main.rs)" != FAIL ;;
+  *) exit 42 ;;
+esac
+`,
+    { mode: 0o755 },
+  );
+  // Relocate only the two container paths; execute the real locking/cache/build/copy logic.
+  const relocated = script
+    .replace("cd /backend", 'cd "$GRIP_TEST_BACKEND"')
+    .replace(
+      "export CARGO_TARGET_DIR=/tmp/grip-target",
+      'export CARGO_TARGET_DIR="$GRIP_TEST_TARGET"',
+    );
+  async function build(content, imageId = "builder-a") {
+    const backend = await mkdtemp(join(directory, "snapshot-"));
+    await write(join(backend, "src/main.rs"), content);
+    // Even modified source gets an old mtime, as happens when copying another snapshot.
+    await utimes(join(backend, "src/main.rs"), 1, 1);
+    const buildKey = createHash("sha256")
+      .update(`${await hashBackendSnapshot(backend)}\n${imageId}\nlinux/amd64`)
+      .digest("hex");
+    const output = await run("sh", ["-c", relocated], {
+      capture: true,
+      env: {
+        PATH: `${bin}:${process.env.PATH}`,
+        GRIP_TEST_BACKEND: backend,
+        GRIP_TEST_TARGET: target,
+        GRIP_BUILD_KEY: buildKey,
+      },
+    });
+    assert.equal(
+      await readFile(join(backend, "out/grip-sidecar"), "utf8"),
+      content,
+    );
+    return output;
+  }
+  const calls = () => readFile(join(target, "cargo-calls"), "utf8");
+  await build("A");
+  const firstCalls = await calls();
+  assert.equal(
+    firstCalls,
+    "clean --locked --release -p grip-sidecar\nbuild --locked --release\n",
+  );
+  assert.match(await build("A"), /verified cache hit/);
+  assert.equal(await calls(), firstCalls);
+  assert.doesNotMatch(await build("B"), /cache hit/);
+  await writeFile(binary, "corrupt");
+  assert.doesNotMatch(await build("B"), /cache hit/);
+  await writeFile(receipt, "corrupt receipt");
+  assert.doesNotMatch(await build("B"), /cache hit/);
+  await rm(receipt);
+  assert.doesNotMatch(await build("B"), /cache hit/);
+  await rm(binary);
+  assert.doesNotMatch(await build("B"), /cache hit/);
+  await assert.rejects(build("FAIL"), /sh failed/);
+  await assert.rejects(readFile(receipt), { code: "ENOENT" });
+  assert.doesNotMatch(await build("B"), /cache hit/);
+  assert.doesNotMatch(await build("B", "builder-b"), /cache hit/);
+  // Different concurrent sources must each copy their own output while holding the lock.
+  await Promise.all([build("C"), build("D")]);
+  assert.equal((await calls()).split("\n").filter(Boolean).length, 22);
+  const concurrent = await Promise.all([build("E"), build("E")]);
+  assert.equal(
+    concurrent.filter((output) => output.includes("cache hit")).length,
+    1,
+  );
+  assert.equal((await calls()).split("\n").filter(Boolean).length, 24);
 });
 
 const elf = () => {

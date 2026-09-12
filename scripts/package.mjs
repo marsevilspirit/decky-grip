@@ -8,6 +8,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   writeFile,
 } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
@@ -63,6 +64,30 @@ export function snapshotBackend(source, destination) {
     filter: (path) =>
       !["out", "target"].includes(relative(source, path).split(sep)[0]),
   });
+}
+
+export async function hashBackendSnapshot(directory) {
+  const hash = createHash("sha256");
+  async function visit(parent) {
+    for (const name of (await readdir(parent)).sort()) {
+      const path = join(parent, name);
+      const info = await lstat(path);
+      if (!info.isFile() && !info.isDirectory())
+        throw new Error(
+          `Backend snapshot must contain only regular files: ${path}`,
+        );
+      hash.update(
+        JSON.stringify([
+          relative(directory, path),
+          info.mode & 0o7777,
+          info.isDirectory() ? "directory" : digest(await readFile(path)),
+        ]),
+      );
+      if (info.isDirectory()) await visit(path);
+    }
+  }
+  await visit(directory);
+  return hash.digest("hex");
 }
 
 export async function assemblePackage(directory, { signal } = {}) {
@@ -165,6 +190,7 @@ export async function buildPackage({ signal } = {}) {
   console.log(`GRIP package workspace: ${directory}`);
   const backend = join(directory, "backend");
   await snapshotBackend(join(repository, "backend"), backend);
+  const backendSha256 = await hashBackendSnapshot(backend);
   for (const name of PACKAGE_FILES.filter(
     (name) => name !== "bin/grip-sidecar",
   )) {
@@ -184,6 +210,7 @@ export async function buildPackage({ signal } = {}) {
           signal,
         }),
         backendSnapshot: backend,
+        backendSha256,
         dockerfileSha256: digest(await readFile(join(backend, "Dockerfile"))),
         cargoLockSha256: digest(await readFile(join(backend, "Cargo.lock"))),
         platform: "linux/amd64",
@@ -231,6 +258,7 @@ export async function buildPackage({ signal } = {}) {
   }
   // Isolate compiler/linker/sysroot changes, and run the image we built even if the tag moves.
   const targetVolume = `decky-grip-cargo-target-${imageId.slice(7)}`;
+  const buildKey = digest(`${backendSha256}\n${imageId}\nlinux/amd64`);
   await run(
     "docker",
     [
@@ -238,6 +266,8 @@ export async function buildPackage({ signal } = {}) {
       "--rm",
       "--platform",
       "linux/amd64",
+      "--env",
+      `GRIP_BUILD_KEY=${buildKey}`,
       "--mount",
       `type=bind,src=${backend},dst=/backend`,
       "--mount",

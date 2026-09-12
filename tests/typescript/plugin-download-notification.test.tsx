@@ -426,6 +426,136 @@ describe("plugin download completion notification", () => {
     expectNoDownload();
   });
 
+  it.each(["panel", "L4"])(
+    "reports a local list failure and retries locally from %s without adopting Steam browsing",
+    async (entryPoint) => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      steam.runningAppId = identity.appId;
+      steam.nativeGuide = { ...identity, guideId: "456" };
+      steam.backend.get_guide_library.mockRejectedValue(
+        new Error("local RPC unavailable"),
+      );
+      restart();
+      if (entryPoint === "panel") {
+        await expect(panel().openReader()).rejects.toThrow(
+          "读取本地指南列表失败",
+        );
+      } else {
+        steam.hotkeyListener!("L4");
+        await vi.waitFor(() => expect(steam.toast).toHaveBeenCalled());
+        expect(notification().body).toContain("读取本地指南列表失败");
+        expect(notification().body).not.toContain("还没有可继续");
+      }
+      expect(steam.navigate).not.toHaveBeenCalled();
+      expect(steam.backend.get_cached_guide).not.toHaveBeenCalled();
+      const previousReads = steam.backend.get_guide_library.mock.calls.length;
+      steam.backend.get_guide_library.mockResolvedValue([localEntry]);
+      steam.backend.get_cached_guide.mockResolvedValue(guide);
+      if (entryPoint === "panel") await panel().openReader();
+      else steam.hotkeyListener!("L4");
+      await vi.waitFor(() =>
+        expect(steam.navigate).toHaveBeenCalledExactlyOnceWith(
+          `/decky-grip/reader/${identity.appId}/${identity.guideId}`,
+          true,
+        ),
+      );
+      expect(steam.backend.get_guide_library).toHaveBeenCalledTimes(
+        previousReads + 1,
+      );
+      expect(steam.backend.get_guide_library).toHaveBeenLastCalledWith(
+        identity.appId,
+      );
+      expectNoDownload();
+    },
+  );
+
+  it("distinguishes a successfully read empty local list from an error without repeatedly reading it", async () => {
+    const previousReads = steam.backend.get_guide_library.mock.calls.length;
+    await expect(panel().openReader()).rejects.toThrow(
+      "还没有可继续的本地指南",
+    );
+    await expect(panel().openReader()).rejects.toThrow(
+      "还没有可继续的本地指南",
+    );
+    expect(steam.backend.get_guide_library).toHaveBeenCalledTimes(
+      previousReads,
+    );
+    expectNoDownload();
+  });
+
+  it("does not block a known local guide on a failed list refresh", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    steam.backend.get_guide_library.mockRejectedValue(
+      new Error("local RPC unavailable"),
+    );
+    steam.backend.get_cached_guide.mockResolvedValue(guide);
+    restart();
+    await reader().onSwitchGuide(identity);
+    await vi.waitFor(() => expect(status.getRecentGuide()).toEqual(identity));
+    steam.navigate.mockClear();
+    const previousReads = steam.backend.get_guide_library.mock.calls.length;
+    await panel().openReader();
+    expect(steam.navigate).toHaveBeenCalledExactlyOnceWith(
+      `/decky-grip/reader/${identity.appId}/${identity.guideId}`,
+      true,
+    );
+    expect(steam.backend.get_guide_library).toHaveBeenCalledTimes(
+      previousReads,
+    );
+    expectNoDownload();
+  });
+
+  it("keeps cleanup successful and retryable when reloading the remaining local library fails", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    steam.runningAppId = identity.appId;
+    steam.backend.get_guide_library.mockResolvedValue([localEntry]);
+    restart();
+    await vi.waitFor(() =>
+      expect(status.getRecentGuide(identity.appId)).toEqual(identity),
+    );
+    steam.backend.get_guide_library.mockRejectedValue(
+      new Error("local RPC unavailable"),
+    );
+    const removed = { filesRemoved: 1, bytesRemoved: 100 };
+    steam.backend.remove_offline_guide.mockResolvedValue(removed);
+    await expect(reader().onRemoveOffline(identity.guideId)).resolves.toEqual(
+      removed,
+    );
+    expect(status.getRecentGuide(identity.appId)).toBeNull();
+    await expect(panel().openReader()).rejects.toThrow("读取本地指南列表失败");
+    steam.backend.get_guide_library.mockResolvedValue([]);
+    await expect(panel().openReader()).rejects.toThrow(
+      "当前游戏还没有可继续的本地指南",
+    );
+    expect(steam.navigate).not.toHaveBeenCalled();
+    expectNoDownload();
+  });
+
+  it.each(["unload", "game change"])(
+    "does not open a guide after %s while a local list retry is pending",
+    async (change) => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const library = deferred<(typeof localEntry)[]>();
+      steam.runningAppId = identity.appId;
+      steam.backend.get_guide_library
+        .mockReset()
+        .mockRejectedValueOnce(new Error("local RPC unavailable"))
+        .mockReturnValue(library.promise);
+      restart();
+      const opening = panel().openReader();
+      await vi.waitFor(() =>
+        expect(steam.backend.get_guide_library).toHaveBeenCalledTimes(2),
+      );
+      if (change === "unload") plugin.onDismount?.();
+      else steam.runningAppId = "730";
+      library.resolve([localEntry]);
+      if (change === "unload") await opening;
+      else await expect(opening).rejects.toThrow("运行中的游戏已经改变");
+      expect(steam.navigate).not.toHaveBeenCalled();
+      expectNoDownload();
+    },
+  );
+
   it("asks for a download when the running game has no local guide rather than opening another app or native B", async () => {
     steam.runningAppId = "730";
     steam.nativeGuide = { appId: "730", guideId: "456" };

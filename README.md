@@ -71,7 +71,7 @@ pnpm run build
 ```
 
 The frontend bundle is written to `dist/index.js`, with the fixed browser-only
-extractor in `dist/heybox-render.js`. Both are packaged alongside a freshly built
+extractor in `dist/heybox-render.js`. Both are packaged alongside a verified
 Linux x86_64 `grip-sidecar` in the plugin's `bin/` directory.
 Python tests use only the standard library.
 
@@ -196,9 +196,14 @@ Linux x86_64 toolchain, and validates the package. It never ships an old
 `backend/out` binary. Docker layers, the Cargo registry, and compiled Linux
 dependencies are reused. The target cache lives in a named volume on the
 workstation's Docker host, not on the Deck, and is isolated by the exact builder
-image ID. Every build still rebuilds GRIP itself from the current snapshot;
-a shared lock covers compilation through copying the binary out, so concurrent
-packages cannot pick up each other's output. The local-only builder disables
+image ID. GRIP itself is reused only when the complete backend snapshot's
+paths, permissions and contents, the builder image and platform match, and the
+cached binary's checksum still verifies. Changed sources (even with older
+timestamps), missing or damaged output, and failed builds require a rebuild.
+A shared lock covers validation, compilation and copying the binary out, so
+concurrent packages cannot pick up each other's output. This also lets frontend-only
+changes reuse the verified Rust binary without skipping any checks or adding
+backups on the Deck. The local-only builder disables
 timestamped provenance attestations to keep that image/cache ID stable; the
 pinned toolchain digest and source/package validation receipts remain unchanged.
 `just package`, deployment, and CI share `scripts/package.mjs`; it runs `check`

@@ -368,7 +368,10 @@ describe("GripPanel", () => {
     expect(clearGuides).not.toHaveBeenCalled();
     const canceled = confirmation();
     expect(canceled.bDestructiveWarning).toBe(true);
+    expect(canceled).toHaveProperty("focusButton", "secondary");
     expect(canceled.strDescription).toContain("已下载指南");
+    expect(canceled.strDescription).toContain("手动重新下载或导入指南");
+    expect(canceled.strDescription).toContain("打开不会自动下载");
     expect(canceled.strCancelButtonText).toBe("保留，返回");
     await act(async () => {
       canceled.onCancel?.();
@@ -395,7 +398,10 @@ describe("GripPanel", () => {
       "指南缓存已清除：删除 2 个文件，释放 1.0 KiB",
     );
     await act(async () => button("清除图片缓存").click());
+    expect(confirmation()).toHaveProperty("focusButton", "secondary");
     expect(confirmation().strDescription).toContain("离线下载的图片");
+    expect(confirmation().strDescription).toContain("手动更新或重新下载");
+    expect(confirmation().strDescription).toContain("打开不会自动下载");
     await act(async () => confirmation().onOK?.());
     expect(clearImages).toHaveBeenCalledOnce();
   });
@@ -512,8 +518,11 @@ describe("GripPanel", () => {
       ["重试读取位置", "不会影响已缓存的指南正文"],
       ["备份并重置损坏位置", "仅在校验失败时备份原文件并重置"],
       ["重试读取缓存用量", "仅重新读取统计，不会修改缓存或阅读位置"],
-      ["清除指南正文缓存", "包括已下载正文；保留阅读位置，下次需要联网下载"],
-      ["清除图片缓存", "包括离线图片；正文和阅读位置保留"],
+      [
+        "清除指南正文缓存",
+        "包括已下载正文；保留阅读位置，需手动重新下载或导入",
+      ],
+      ["清除图片缓存", "包括离线图片；保留正文和位置，需手动更新或重新下载"],
     ]);
     const items = [...container!.querySelectorAll("[data-native-button-item]")];
     expect(items).toHaveLength(descriptions.size);

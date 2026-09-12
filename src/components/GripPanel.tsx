@@ -217,12 +217,14 @@ export function GripPanel({
     const title = kind === "guides" ? "清除指南正文缓存" : "清除图片缓存";
     modal = showModal(
       <ConfirmModal
+        // This Steam runtime prop is missing from Decky's declaration.
+        {...{ focusButton: "secondary" }}
         bDestructiveWarning
         strTitle={title}
         strDescription={
           kind === "guides"
-            ? "将移除所有缓存正文，包括已下载指南。阅读位置会保留，但下次打开需要联网重新下载。"
-            : "将移除所有缓存图片，包括离线下载的图片。正文和阅读位置保留，但图片需要联网重新下载。"
+            ? "将移除所有缓存正文，包括已下载指南。阅读位置会保留；恢复时需联网，手动重新下载或导入指南，打开不会自动下载。"
+            : "将移除所有缓存图片，包括离线下载的图片。正文和阅读位置保留；恢复图片需联网后手动更新或重新下载，打开不会自动下载。"
         }
         strOKButtonText="确认清除"
         strCancelButtonText="保留，返回"
@@ -527,7 +529,7 @@ export function GripPanel({
             <PanelSectionRow>
               <ButtonItem
                 disabled={cacheBusy || readerBusy}
-                description="包括已下载正文；保留阅读位置，下次需要联网下载"
+                description="包括已下载正文；保留阅读位置，需手动重新下载或导入"
                 layout="below"
                 onClick={() => confirmCacheAction("guides")}
               >
@@ -541,7 +543,7 @@ export function GripPanel({
             <PanelSectionRow>
               <ButtonItem
                 disabled={cacheBusy || readerBusy}
-                description="包括离线图片；正文和阅读位置保留"
+                description="包括离线图片；保留正文和位置，需手动更新或重新下载"
                 layout="below"
                 onClick={() => confirmCacheAction("images")}
               >

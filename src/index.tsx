@@ -191,7 +191,9 @@ export default definePlugin(() => {
       }
     } catch (error: unknown) {
       console.warn("[GRIP] Could not read GRIP Reader history", error);
+      return errorMessage(error);
     }
+    return null;
   };
   let recentGuidesReady = mergeReaderRecentGuides(
     currentRunningAppId() ?? null,
@@ -289,11 +291,19 @@ export default definePlugin(() => {
     };
 
     try {
-      const identity = await resolveGuideForReaderOpen(
+      const recentGuides = recentGuidesReady;
+      let identity = await resolveGuideForReaderOpen(
         requestedIdentity,
         () => resolveReaderIdentity(targetAppId),
-        recentGuidesReady,
+        recentGuides,
       );
+      let libraryError: string | null = null;
+      // Retry only a failed local list. Known local guides keep the hot-open path.
+      if (!identity && canContinue() && (await recentGuides) !== null) {
+        recentGuidesReady = mergeReaderRecentGuides(targetAppId ?? null);
+        libraryError = await recentGuidesReady;
+        identity = resolveReaderIdentity(targetAppId);
+      }
       if (!canContinue()) {
         if (performanceTrace) {
           readerPerformance.abandon(performanceTrace);
@@ -302,6 +312,11 @@ export default definePlugin(() => {
       }
 
       if (!identity) {
+        if (libraryError !== null) {
+          throw new Error(
+            `读取本地指南列表失败，请再次打开重试（不会下载）：${libraryError}`,
+          );
+        }
         throw new Error(
           targetAppId === undefined
             ? "还没有可继续的本地指南，请先下载指南到 GRIP"
