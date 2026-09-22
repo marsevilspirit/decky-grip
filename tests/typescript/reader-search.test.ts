@@ -90,6 +90,32 @@ describe("guide reader search", () => {
     expect(root.innerHTML).toBe(before);
   });
 
+  it("keeps body matches aligned when failed images add retry buttons", () => {
+    const html =
+      '<img data-grip-image-url="https://example.com/image"><p>查看图片中的路线，继续向前。</p><p>下一张图片标出了终点。</p>';
+    const results = searchGuideIndex(
+      buildGuideSearchIndex(
+        guideFixture([{ id: "route", title: "路线", html }]),
+      ),
+      "图片",
+    ).matches;
+    const root = document.createElement("div");
+    root.innerHTML = html;
+    const host = document.createElement("span");
+    host.style.display = "block";
+    host.innerHTML =
+      '<button data-grip-image-retry="true"><span>图片读取失败，重试此图</span></button>';
+    root.querySelector("img")!.after(host);
+    const paragraphs = root.querySelectorAll("p");
+
+    expect(results).toHaveLength(2);
+    for (const [index, result] of results.entries()) {
+      const range = locateGuideSearchRange(root, "图片", result.occurrence);
+      expect(range?.toString()).toBe("图片");
+      expect(range?.startContainer.parentElement).toBe(paragraphs[index]);
+    }
+  });
+
   it("returns all normal matches and reports the explicit safety limit", () => {
     const complete = searchGuideIndex(
       buildGuideSearchIndex(

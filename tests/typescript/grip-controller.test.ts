@@ -4,6 +4,7 @@ import {
   GripController,
   LIFECYCLE_POLL_MS,
   RESTORE_TIMEOUT_MS,
+  RUNTIME_POLL_MS,
   SAVE_DEBOUNCE_MS,
   ZERO_SCROLL_CONFIRM_MS,
   type GripBackend,
@@ -225,6 +226,75 @@ describe("GRIP controller", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("observes layouts only while a guide is active and resumes on rediscovery", async () => {
+    const harness = makeHarness({
+      [GUIDE_KEY]: { scrollTop: 1_200, updatedAt: 900_000 },
+    });
+    const listenLayout = vi.spyOn(harness.runtime, "listenGuideLayout");
+    const readGuide = vi.spyOn(harness.runtime, "getActiveGuide");
+    await harness.controller.start();
+    expect(listenLayout).not.toHaveBeenCalled();
+    readGuide.mockClear();
+    harness.runtime.emitLayout();
+    expect(readGuide).not.toHaveBeenCalled();
+
+    harness.runtime.selectGuide(GUIDE_ID);
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(listenLayout).toHaveBeenCalledTimes(1);
+    expect(harness.runtime.scrollTop).toBe(1_200);
+    readGuide.mockClear();
+    harness.runtime.emitLayout();
+    expect(readGuide).toHaveBeenCalled();
+
+    harness.runtime.selectGuide(null);
+    await vi.advanceTimersByTimeAsync(0);
+    readGuide.mockClear();
+    harness.runtime.emitLayout();
+    expect(readGuide).not.toHaveBeenCalled();
+
+    // Native Steam can open the guide without a History or selection event.
+    harness.runtime.selectedGuideId = GUIDE_ID;
+    harness.runtime.scrollTop = 0;
+    await vi.advanceTimersByTimeAsync(LIFECYCLE_POLL_MS + 1_500);
+    expect(listenLayout).toHaveBeenCalledTimes(2);
+    expect(harness.runtime.scrollTop).toBe(1_200);
+    expect(harness.status.getSnapshot().lastRestored?.scrollTop).toBe(1_200);
+
+    harness.runtime.location.pathname = "/library";
+    harness.runtime.emitHistory();
+    readGuide.mockClear();
+    harness.runtime.emitLayout();
+    expect(readGuide).not.toHaveBeenCalled();
+    harness.controller.stop();
+    expect(harness.runtime.listenerCount()).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("removes layout listeners when the runtime changes or the controller stops", async () => {
+    const firstRuntime = new FakeRuntime();
+    const secondRuntime = new FakeRuntime();
+    firstRuntime.selectedGuideId = GUIDE_ID;
+    secondRuntime.selectedGuideId = GUIDE_ID;
+    let runtime = firstRuntime;
+    const controller = new GripController({
+      backend: {
+        getPositions: vi.fn().mockResolvedValue({}),
+        savePosition: vi.fn().mockResolvedValue({}),
+      },
+      runtimeFactory: () => runtime,
+      status: new RuntimeStatusStore(),
+    });
+    await controller.start();
+    expect(firstRuntime.listenerCount()).toBe(6);
+    runtime = secondRuntime;
+    await vi.advanceTimersByTimeAsync(RUNTIME_POLL_MS);
+    expect(firstRuntime.listenerCount()).toBe(0);
+    expect(secondRuntime.listenerCount()).toBe(6);
+    controller.stop();
+    expect(secondRuntime.listenerCount()).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("ignores passive pointer movement while waiting to restore", async () => {
@@ -614,8 +684,8 @@ describe("GRIP controller", () => {
 
   it("cleans earlier listeners if a later runtime attachment step fails", async () => {
     const harness = makeHarness({});
-    harness.runtime.listenGuideLayout = () => {
-      throw new Error("observer unavailable");
+    harness.runtime.listenWindowFocus = () => {
+      throw new Error("window unavailable");
     };
 
     await harness.controller.start();
@@ -623,6 +693,25 @@ describe("GRIP controller", () => {
     expect(harness.runtime.listenerCount()).toBe(0);
     expect(harness.status.getSnapshot().phase).toBe("error");
     harness.controller.stop();
+  });
+
+  it("keeps discovery attached if deferred layout observation fails", async () => {
+    const harness = makeHarness({});
+    harness.runtime.listenGuideLayout = () => {
+      throw new Error("observer unavailable");
+    };
+    await harness.controller.start();
+    harness.runtime.selectGuide(GUIDE_ID);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(harness.runtime.listenerCount()).toBe(5);
+    expect(harness.status.getSnapshot()).toMatchObject({
+      phase: "error",
+      message: "Could not watch Steam's guide layout: observer unavailable",
+    });
+    harness.controller.stop();
+    expect(harness.runtime.listenerCount()).toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("leaves no hidden restore timer after synchronous history replacement", async () => {

@@ -2,13 +2,13 @@ import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { GuideLibraryEntry } from "../../src/backend";
 import { GuideReaderPage } from "../../src/components/GuideReaderPage";
+import { readerRouteIdentity } from "../../src/hotkey/reader-toggle";
 import { ReaderImageCacheControl } from "../../src/reader/image-cache-control";
 import { ReaderImageHydrator } from "../../src/reader/image-hydrator";
 import { ReaderPerformanceTracker } from "../../src/reader/performance";
 import { ReaderSessionCache } from "../../src/reader/session-cache";
 import type { DownloadedGuide, ReaderPosition } from "../../src/reader/types";
 import type { GuideIdentity } from "../../src/steam/guide-key";
-import { ReaderRoute } from "./decky-ui";
 import { ImportFixture } from "./import-fixture";
 
 const identity = { appId: "1113000", guideId: "3414883877" };
@@ -185,36 +185,37 @@ function Fixture() {
   }));
   const [open, setOpen] = useState(true);
   return (
-    <ReaderRoute.Provider value={route}>
-      <div data-fixture-route={route.guideId}>
-        {open ? (
-          <GuideReaderPage
-            key={`${route.appId}:${route.guideId}`}
-            cache={cache}
-            imageHydrator={imageHydrator}
-            imageCacheControl={imageCacheControl}
-            loadGuideLibrary={loadGuideLibrary}
-            onClose={() => setOpen(false)}
-            onRepairPositions={async () => ""}
-            onRemoveOffline={removeOfflineGuide}
-            onSwitchGuide={async (target) => {
-              const url = new URL(location.href);
-              url.searchParams.set("guideId", target.guideId);
-              history.replaceState(null, "", url);
-              setRoute(target);
-            }}
-            performance={performance}
-          />
-        ) : (
-          <main aria-label="本地游戏占位页" style={{ padding: 48 }}>
-            <h1>阅读器已关闭</h1>
-            <button autoFocus onClick={() => setOpen(true)}>
-              继续阅读
-            </button>
-          </main>
-        )}
-      </div>
-    </ReaderRoute.Provider>
+    <div data-fixture-route={route.guideId}>
+      {open ? (
+        <GuideReaderPage
+          key={`${route.appId}:${route.guideId}`}
+          identity={readerRouteIdentity(
+            `/decky-grip/reader/${route.appId}/${route.guideId}`,
+          )}
+          cache={cache}
+          imageHydrator={imageHydrator}
+          imageCacheControl={imageCacheControl}
+          loadGuideLibrary={loadGuideLibrary}
+          onClose={() => setOpen(false)}
+          onRepairPositions={async () => ""}
+          onRemoveOffline={removeOfflineGuide}
+          onSwitchGuide={async (target) => {
+            const url = new URL(location.href);
+            url.searchParams.set("guideId", target.guideId);
+            history.replaceState(null, "", url);
+            setRoute(target);
+          }}
+          performance={performance}
+        />
+      ) : (
+        <main aria-label="本地游戏占位页" style={{ padding: 48 }}>
+          <h1>阅读器已关闭</h1>
+          <button autoFocus onClick={() => setOpen(true)}>
+            继续阅读
+          </button>
+        </main>
+      )}
+    </div>
   );
 }
 

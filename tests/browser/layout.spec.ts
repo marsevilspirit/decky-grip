@@ -41,7 +41,7 @@ test("1280×800: native dialog layout stacks the empty reader message and return
   await page.goto("/?guideId=invalid");
   const rows = [
     page.getByText("GRIP Reader", { exact: true }),
-    page.getByText("尚未选择指南。请从 Decky 打开 GRIP，然后选择“继续阅读”。"),
+    page.getByText(/无法识别指南地址/),
     page.getByRole("button", { name: "返回", exact: true }),
   ];
   for (const row of rows) await expect(row).toBeInViewport({ ratio: 1 });

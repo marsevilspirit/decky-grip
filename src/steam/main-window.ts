@@ -1,7 +1,10 @@
 import type { FocusWindow } from "../hotkey/focus-guard";
 
 export interface GripMainWindow extends FocusWindow {
-  History?: { location?: { pathname?: unknown } };
+  History?: {
+    location?: { pathname?: unknown };
+    listen?: (listener: () => void) => () => void;
+  };
   MenuStore?: { CloseSideMenus?: () => void };
   Navigate?: (
     path: string,

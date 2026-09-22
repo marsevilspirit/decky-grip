@@ -14,7 +14,6 @@ import { ReaderPerformanceTracker } from "../../src/reader/performance";
 import { ReaderSessionCache } from "../../src/reader/session-cache";
 import type { DownloadedGuide } from "../../src/reader/types";
 import type { GuideIdentity } from "../../src/steam/guide-key";
-import { ReaderRoute } from "./decky-ui";
 
 const imageUrls = [1, 2, 3].map(
   (number) => `https://images.steamusercontent.com/ugc/import/${number}.png`,
@@ -150,20 +149,20 @@ export function ImportFixture() {
   return (
     <>
       {route && (
-        <ReaderRoute.Provider value={route}>
-          <GuideReaderPage
-            cache={cache}
-            downloads={downloads}
-            imageHydrator={imageHydrator}
-            imageCacheControl={imageCacheControl}
-            performance={performance}
-            loadGuideLibrary={async () => []}
-            onClose={() => setRoute(null)}
-            onSwitchGuide={async (identity) => setRoute(identity)}
-            onRepairPositions={async () => ""}
-            onRemoveOffline={async () => ({ filesRemoved: 0, bytesRemoved: 0 })}
-          />
-        </ReaderRoute.Provider>
+        <GuideReaderPage
+          key={`${route.appId}:${route.guideId}`}
+          identity={route}
+          cache={cache}
+          downloads={downloads}
+          imageHydrator={imageHydrator}
+          imageCacheControl={imageCacheControl}
+          performance={performance}
+          loadGuideLibrary={async () => []}
+          onClose={() => setRoute(null)}
+          onSwitchGuide={async (identity) => setRoute(identity)}
+          onRepairPositions={async () => ""}
+          onRemoveOffline={async () => ({ filesRemoved: 0, bytesRemoved: 0 })}
+        />
       )}
       {!route && <button onClick={() => setModal(true)}>导入公开攻略</button>}
       {modal && (

@@ -140,6 +140,7 @@ export class GripController {
 
   private runtime: SteamGuideRuntime | null = null;
   private runtimeCleanups: Array<() => void> = [];
+  private guideLayoutCleanup: (() => void) | null = null;
   private runtimeMonitor: ReturnType<typeof setInterval> | null = null;
   private lifecycleMonitor: ReturnType<typeof setInterval> | null = null;
   private activeGuide: GuideIdentity | null = null;
@@ -338,9 +339,7 @@ export class GripController {
           this.handleGuideInteraction(scrollIntent),
         ),
       );
-      this.runtimeCleanups.push(
-        runtime.listenGuideLayout(() => this.handleGuideLayout()),
-      );
+      this.runtimeCleanups.push(() => this.guideLayoutCleanup?.());
       this.runtimeCleanups.push(
         runtime.listenWindowFocus((focused) => this.handleWindowFocus(focused)),
       );
@@ -382,6 +381,7 @@ export class GripController {
       }
     }
     this.runtimeCleanups = [];
+    this.guideLayoutCleanup = null;
     this.runtime = null;
     this.activeGuide = null;
     this.lastScrollerElement = null;
@@ -646,6 +646,19 @@ export class GripController {
       this.cancelRestore();
     }
     this.activeGuide = identity;
+    try {
+      if (!identity) {
+        const cleanup = this.guideLayoutCleanup;
+        this.guideLayoutCleanup = null;
+        cleanup?.();
+      } else if (!this.guideLayoutCleanup && this.runtime) {
+        this.guideLayoutCleanup = this.runtime.listenGuideLayout(() =>
+          this.handleGuideLayout(),
+        );
+      }
+    } catch (error) {
+      this.reportError("Could not watch Steam's guide layout", error);
+    }
     this.lastScrollerElement = null;
     this.clearPendingZeroCapture();
     this.clearGuideActivity();

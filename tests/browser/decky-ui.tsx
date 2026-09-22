@@ -1,8 +1,6 @@
 import {
   createElement,
-  createContext,
   forwardRef,
-  useContext,
   useLayoutEffect,
   useState,
   type ChangeEventHandler,
@@ -163,8 +161,6 @@ export const Marquee = ({ children }: Props) => (
 // No installed Steam runtime in the fixture: the reader reports its compatibility fallback.
 export const findModuleExport = () => undefined;
 export const Spinner = () => <span role="status">正在处理…</span>;
-export const ReaderRoute = createContext({ appId: "", guideId: "" });
-export const useParams = () => useContext(ReaderRoute);
 export const TextField = ({
   label,
   onChange,

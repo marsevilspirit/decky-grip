@@ -20,7 +20,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use url::Url;
 
 pub const MAX_DOWNLOAD_BYTES: usize = 16 * 1024 * 1024;
@@ -180,7 +180,16 @@ struct PreparedGuide {
 
 impl GuideReader {
     pub fn new(cache_directory: impl Into<PathBuf>) -> Self {
-        Self::with_fetcher(cache_directory, download, system_now_ms)
+        let agent = ureq::Agent::config_builder()
+            .max_redirects(0)
+            .https_only(true)
+            .build()
+            .into();
+        Self::with_fetcher(
+            cache_directory,
+            move |url, timeout, max_bytes| download(&agent, url, timeout, max_bytes),
+            system_now_ms,
+        )
     }
 
     pub fn with_fetcher<F, N>(cache_directory: impl Into<PathBuf>, fetcher: F, now_ms: N) -> Self
@@ -1366,18 +1375,22 @@ fn redirect_status(status: u16) -> bool {
     matches!(status, 301 | 302 | 303 | 307 | 308)
 }
 
-fn download(url: &str, timeout: Duration, max_bytes: usize) -> Result<Vec<u8>, GuideError> {
+fn download(
+    agent: &ureq::Agent,
+    url: &str,
+    timeout: Duration,
+    max_bytes: usize,
+) -> Result<Vec<u8>, GuideError> {
+    let started = Instant::now();
     let mut current = safe_steam_url(url)
         .ok_or_else(|| GuideError::download("Steam returned an unsafe final URL"))?;
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .max_redirects(0)
-        .https_only(true)
-        .timeout_global(Some(timeout))
-        .build()
-        .into();
     for redirects in 0..=MAX_REDIRECTS {
         let mut response = agent
             .get(current.as_str())
+            // Manual redirects are separate calls; share one end-to-end budget.
+            .config()
+            .timeout_global(Some(timeout.saturating_sub(started.elapsed())))
+            .build()
             .header("Accept", "text/html,application/xhtml+xml")
             .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.5")
             .header("User-Agent", "GRIP/1.0 Steam-Deck local guide reader")
@@ -1451,7 +1464,58 @@ fn download(url: &str, timeout: Duration, max_bytes: usize) -> Result<Vec<u8>, G
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::TestDirectory;
+    use crate::test_support::{TestDirectory, local_http_agent};
+
+    #[test]
+    fn downloads_reuse_connections_and_redirects_share_the_body_deadline() {
+        let guide_url = "https://steamcommunity.com/sharedfiles/filedetails/?id=123";
+        let html_response =
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 4\r\n\r\nhtml";
+        let (agent, server) = local_http_agent(vec![("", Duration::ZERO, html_response); 2]);
+        assert!(download(&agent, guide_url, Duration::ZERO, 4).is_err());
+        for url in [
+            guide_url,
+            "https://steamcommunity.com/sharedfiles/filedetails/?id=456",
+        ] {
+            assert_eq!(
+                download(&agent, url, Duration::from_secs(2), 4).unwrap(),
+                b"html"
+            );
+        }
+        assert_eq!(
+            server.join().unwrap(),
+            1,
+            "downloads must share one connection"
+        );
+
+        let (agent, server) = local_http_agent(vec![
+            (
+                "",
+                Duration::from_millis(200),
+                "HTTP/1.1 302 Found\r\nLocation: /sharedfiles/filedetails/?id=789\r\nContent-Length: 0\r\n\r\n",
+            ),
+            (
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 4\r\n\r\n",
+                Duration::from_millis(200),
+                "html",
+            ),
+        ]);
+        assert!(download(&agent, guide_url, Duration::from_millis(300), 4).is_err());
+        server.join().unwrap();
+
+        let (agent, server) = local_http_agent(vec![(
+            "",
+            Duration::ZERO,
+            "HTTP/1.1 302 Found\r\nLocation: https://example.com/\r\nContent-Length: 0\r\n\r\n",
+        )]);
+        assert_eq!(
+            download(&agent, guide_url, Duration::from_secs(2), 4)
+                .unwrap_err()
+                .message(),
+            "Steam redirected the guide to an unsafe URL"
+        );
+        server.join().unwrap();
+    }
 
     fn summary_fixture(id: &str) -> Value {
         json!({

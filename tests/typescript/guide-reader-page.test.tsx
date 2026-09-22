@@ -3,7 +3,6 @@
 import { act, createElement, type ChangeEventHandler } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import * as DeckyUI from "@decky/ui";
 
 import type { CacheClearResult, GuideLibraryEntry } from "../../src/backend";
 import { GuideReaderPage } from "../../src/components/GuideReaderPage";
@@ -161,7 +160,6 @@ vi.mock("@decky/ui", async () => {
         },
         label as string,
       ),
-    useParams: () => ({ appId: "1113000", guideId: "3414883877" }),
   };
 });
 
@@ -359,6 +357,7 @@ describe("GuideReaderPage position lifecycle", () => {
     fetchImage: GuideImageFetcher,
     scrollHeight: number,
     options: {
+      identity?: GuideIdentity | null;
       imageHydrator?: ReaderImageHydrator;
       downloads?: GuideDownloadTasks;
       loadGuideLibrary?: (appId: string) => Promise<GuideLibraryEntry[]>;
@@ -374,6 +373,9 @@ describe("GuideReaderPage position lifecycle", () => {
     await act(async () => {
       root?.render(
         <GuideReaderPage
+          identity={
+            options.identity === undefined ? identity : options.identity
+          }
           onRemoveOffline={
             options.onRemoveOffline ??
             (async () => ({ filesRemoved: 1, bytesRemoved: 100 }))
@@ -452,6 +454,34 @@ describe("GuideReaderPage position lifecycle", () => {
     element.dispatchEvent(event);
     return event;
   };
+
+  it("shows a clear return action for an unrecognized route without reading a guide", async () => {
+    const getCachedGuide = vi.fn();
+    const getGuide = vi.fn();
+    const getReaderPosition = vi.fn();
+    const loadGuideLibrary = vi.fn();
+    const onClose = vi.fn();
+    const cache = new ReaderSessionCache({
+      getCachedGuide,
+      getGuide,
+      getReaderPosition,
+      saveReaderPosition: async () => savedPosition,
+    });
+    await expect(
+      mount(cache, async () => null, 0, {
+        identity: null,
+        loadGuideLibrary,
+        onClose,
+      }),
+    ).rejects.toThrow("reader scroller did not mount");
+    expect(container!.textContent).toContain("无法识别指南地址");
+    expect(getCachedGuide).not.toHaveBeenCalled();
+    expect(getGuide).not.toHaveBeenCalled();
+    expect(getReaderPosition).not.toHaveBeenCalled();
+    expect(loadGuideLibrary).not.toHaveBeenCalled();
+    await act(async () => buttonNamed("返回").click());
+    expect(onClose).toHaveBeenCalledOnce();
+  });
 
   it("retries a missing local guide without turning the retry into a download", async () => {
     const getGuide = vi.fn().mockRejectedValue(new Error("请先按下载到 GRIP"));
@@ -1904,7 +1934,6 @@ describe("GuideReaderPage position lifecycle", () => {
       appId: "1113000",
       guideId: "heybox-249c72219fed",
     };
-    vi.spyOn(DeckyUI, "useParams").mockReturnValue(heyboxIdentity);
     // Synthetic public DOM and cached image bytes, not a device/browser acceptance test.
     const article = new DOMParser().parseFromString(
       `<div class="post__container">
@@ -1964,6 +1993,7 @@ describe("GuideReaderPage position lifecycle", () => {
     vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(600);
     await cache.preload(heyboxIdentity);
     const scroller = await mount(cache, fetchImage, 3000, {
+      identity: heyboxIdentity,
       downloads,
       imageHydrator: new ReaderImageHydrator(fetchImage),
     });

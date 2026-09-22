@@ -1,7 +1,13 @@
 // @vitest-environment happy-dom
 
 import type { DefinePluginFn, ToastData } from "@decky/api";
-import type { ComponentProps, ReactElement } from "react";
+import {
+  act,
+  createElement,
+  type ComponentProps,
+  type ReactElement,
+} from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import createPlugin from "../../src/index";
@@ -23,6 +29,9 @@ const steam = vi.hoisted(() => ({
   nativeGuide: null as GuideIdentity | null,
   historyListener: null as (() => void) | null,
   hotkeyListener: null as ((payload: unknown) => void) | null,
+  pathname: "/library/home",
+  routeListeners: new Set<() => void>(),
+  readerProps: null as GuideReaderPageProps | null,
   backend: {
     get_positions: vi.fn(),
     get_guide_library: vi.fn(),
@@ -95,14 +104,21 @@ vi.mock("@decky/ui", () => ({
     },
     WindowStore: {
       GamepadUIMainWindowInstance: {
-        History: { location: { pathname: "/library/home" } },
+        History: {
+          get location() {
+            return { pathname: steam.pathname };
+          },
+          listen: (listener: () => void) => {
+            steam.routeListeners.add(listener);
+            return () => steam.routeListeners.delete(listener);
+          },
+        },
         Navigate: steam.navigate,
       },
     },
   },
   showModal: steam.showModal,
   staticClasses: { Title: "title" },
-  useParams: () => ({ appId: "1113000", guideId: "123" }),
   beforePatch: vi.fn(),
   getGamepadNavigationTrees: () => [],
   getReactInstance: () => null,
@@ -132,7 +148,10 @@ vi.mock("../../src/components/GuideDownloadButton", () => ({
   NativeGuideDownloadButton: () => null,
 }));
 vi.mock("../../src/components/GuideReaderPage", () => ({
-  GuideReaderPage: () => null,
+  GuideReaderPage: (props: GuideReaderPageProps) => {
+    steam.readerProps = props;
+    return null;
+  },
 }));
 vi.mock("../../src/components/GripPanel", () => ({ GripPanel: () => null }));
 vi.mock("../../src/components/ImportGuideModal", () => ({
@@ -187,10 +206,21 @@ describe("plugin download completion notification", () => {
   let plugin: ReturnType<typeof createPlugin>;
   let downloads: GuideDownloadTasks;
   let status: RuntimeStatusStore;
+  let routeRoot: Root | null = null;
+  let routeContainer: HTMLDivElement | null = null;
   const notification = () => steam.toast.mock.calls[0][0];
   const panel = () => (plugin.content as ReactElement<GripPanelProps>).props;
-  const reader = () =>
-    steam.addRoute.mock.calls[steam.addRoute.mock.calls.length - 1][1]().props;
+  const reader = () => {
+    if (!routeRoot) {
+      routeContainer = document.createElement("div");
+      document.body.append(routeContainer);
+      routeRoot = createRoot(routeContainer);
+    }
+    const Route =
+      steam.addRoute.mock.calls[steam.addRoute.mock.calls.length - 1][1];
+    act(() => routeRoot!.render(createElement(Route)));
+    return steam.readerProps!;
+  };
   const restart = () => {
     plugin.onDismount?.();
     plugin = createPlugin();
@@ -218,6 +248,10 @@ describe("plugin download completion notification", () => {
     steam.nativeGuide = null;
     steam.historyListener = null;
     steam.hotkeyListener = null;
+    steam.pathname = "/library/home";
+    steam.routeListeners.clear();
+    steam.readerProps = null;
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     vi.spyOn(console, "info").mockImplementation(() => {});
     steam.backend.get_positions.mockResolvedValue({});
     steam.backend.get_guide_library.mockResolvedValue([]);
@@ -237,13 +271,134 @@ describe("plugin download completion notification", () => {
     ({ downloads, status } = steam.addGlobalComponent.mock.calls[0][1]().props);
   });
   afterEach(async () => {
+    if (routeRoot) await act(async () => routeRoot?.unmount());
+    routeRoot = null;
+    routeContainer?.remove();
+    routeContainer = null;
     plugin.onDismount?.();
     await Promise.resolve();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("reads route identity from Steam history and follows changes without a useParams export", async () => {
+    steam.pathname = `/decky-grip/reader/${identity.appId}/${identity.guideId}`;
+    expect(reader().identity).toEqual(identity);
+    expect(steam.routeListeners.size).toBe(1);
+    await act(async () => {
+      steam.pathname = "/decky-grip/reader/730/heybox-249c72219fed";
+      for (const listener of steam.routeListeners) listener();
+    });
+    expect(steam.readerProps?.identity).toEqual({
+      appId: "730",
+      guideId: "heybox-249c72219fed",
+    });
+    await act(async () => {
+      steam.pathname = "/decky-grip/reader/invalid/123";
+      for (const listener of steam.routeListeners) listener();
+    });
+    expect(steam.readerProps?.identity).toBeNull();
+    await act(async () => routeRoot?.unmount());
+    routeRoot = null;
+    expect(steam.routeListeners.size).toBe(0);
+  });
+
+  const navigate = (path: string) => {
+    steam.pathname = path;
+    for (const listener of [...steam.routeListeners]) listener();
+  };
+  const openWithMountCheck = async (entryPoint: string) => {
+    vi.useFakeTimers();
+    steam.runningAppId = identity.appId;
+    status.rememberGuide(identity);
+    steam.backend.get_cached_guide.mockResolvedValue(guide);
+    steam.navigate.mockImplementation(navigate);
+    if (entryPoint === "panel") await panel().openReader();
+    else {
+      steam.hotkeyListener!({
+        version: 1,
+        button: "L4",
+        sequence: 1,
+        detectedAtUnixMs: Date.now(),
+      });
+      await vi.advanceTimersByTimeAsync(0);
+    }
+  };
+
+  it.each(["panel", "L4"])(
+    "reports an unmounted reader from %s without waiting for the first-screen timeout",
+    async (entryPoint) => {
+      await openWithMountCheck(entryPoint);
+      expect(steam.navigate).toHaveBeenCalledExactlyOnceWith(
+        `/decky-grip/reader/${identity.appId}/${identity.guideId}`,
+        true,
+      );
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(steam.toast).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(steam.toast).toHaveBeenCalledOnce();
+      expect(notification()).toMatchObject({
+        title: "GRIP：打开失败",
+        body: expect.stringContaining("Steam 与 Decky 的版本兼容性"),
+      });
+      expect(steam.routeListeners.size).toBe(0);
+      expect(panel().performance.getSnapshot().warmOpenFailureCount).toBe(
+        entryPoint === "L4" ? 1 : 0,
+      );
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(steam.toast).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["panel", "L4"])(
+    "cancels the %s mount check when the registered route commits",
+    async (entryPoint) => {
+      await openWithMountCheck(entryPoint);
+      await vi.advanceTimersByTimeAsync(4_999);
+      reader();
+      // Only the mounted route's History subscription remains.
+      expect(steam.routeListeners.size).toBe(1);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(steam.toast).not.toHaveBeenCalled();
+      await panel().openReader();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(steam.toast).not.toHaveBeenCalled();
+      expect(steam.routeListeners.size).toBe(1);
+    },
+  );
+
+  it.each(["leave", "close", "unload"])(
+    "cancels an unmounted reader check on %s",
+    async (change) => {
+      await openWithMountCheck("panel");
+      if (change === "unload") plugin.onDismount?.();
+      else if (change === "close") steam.hotkeyListener!("L4");
+      else navigate("/library/home");
+      expect(steam.routeListeners.size).toBe(0);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(steam.toast).not.toHaveBeenCalled();
+    },
+  );
+
+  it("cleans up a failed navigation before retrying the mount check", async () => {
+    await openWithMountCheck("panel");
+    steam.navigate.mockImplementationOnce(() => {
+      throw new Error("Steam navigation failed");
+    });
+    await expect(panel().openReader()).rejects.toThrow(
+      "Steam navigation failed",
+    );
+    expect(steam.routeListeners.size).toBe(0);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(steam.toast).not.toHaveBeenCalled();
+    await panel().openReader();
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(steam.toast).toHaveBeenCalledOnce();
   });
 
   it("does not preload a browsed Steam guide and only downloads after an explicit action", async () => {
-    const { cache } = steam.addRoute.mock.calls[0][1]().props;
+    const { cache } = reader();
     await observe(identity);
     expect(steam.backend.get_cached_guide).not.toHaveBeenCalled();
     expect(steam.backend.get_guide).not.toHaveBeenCalled();
@@ -569,7 +724,7 @@ describe("plugin download completion notification", () => {
 
   it("reads stale local guides without downloading and only refreshes on an explicit update", async () => {
     steam.backend.get_cached_guide.mockResolvedValue({ ...guide, stale: true });
-    const { cache } = steam.addRoute.mock.calls[0][1]().props;
+    const { cache } = reader();
     expect((await cache.load(identity)).guide.stale).toBe(true);
     expect(steam.backend.get_guide).not.toHaveBeenCalled();
     expect(steam.backend.prepare_guide).not.toHaveBeenCalled();

@@ -16,7 +16,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use url::Url;
 
 pub const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
@@ -154,9 +154,14 @@ pub(crate) enum OrphanImages {
 
 impl GuideImageCache {
     pub fn new(cache_directory: impl Into<PathBuf>) -> Self {
+        let agent = ureq::Agent::config_builder()
+            .max_redirects(0)
+            .https_only(true)
+            .build()
+            .into();
         Self::build(
             cache_directory.into(),
-            Arc::new(download),
+            Arc::new(move |url, timeout, max_bytes| download(&agent, url, timeout, max_bytes)),
             ImageLimits::default(),
         )
     }
@@ -1137,23 +1142,23 @@ fn skip_gif_sub_blocks(body: &[u8], mut offset: usize) -> Result<usize, ImageErr
 }
 
 fn download(
+    agent: &ureq::Agent,
     url: &str,
     timeout: Duration,
     max_bytes: usize,
 ) -> Result<(String, Vec<u8>), ImageError> {
+    let started = Instant::now();
     let mut current = canonical_image_url(url)?;
     let heybox = Url::parse(&current)
         .ok()
         .is_some_and(|url| url.host_str() == Some("imgheybox.max-c.com"));
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .max_redirects(0)
-        .https_only(true)
-        .timeout_global(Some(timeout))
-        .build()
-        .into();
     for redirects in 0..=MAX_REDIRECTS {
         let mut response = agent
             .get(&current)
+            // Manual redirects are separate calls; share one end-to-end budget.
+            .config()
+            .timeout_global(Some(timeout.saturating_sub(started.elapsed())))
+            .build()
             .header("Accept", "image/webp,image/png,image/jpeg,image/gif;q=0.8")
             .header("Accept-Encoding", "identity")
             .header("User-Agent", "GRIP/1.0 Steam-Deck local guide reader")
@@ -1374,6 +1379,58 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod offline_tests {
     use super::*;
+    use crate::test_support::local_http_agent;
+
+    #[test]
+    fn downloads_reuse_connections_and_redirects_share_the_body_deadline() {
+        let image_url = "https://images.steamusercontent.com/ugc/example/image.png";
+        let image_response =
+            "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 3\r\n\r\npng";
+        let (agent, server) = local_http_agent(vec![("", Duration::ZERO, image_response); 2]);
+        assert!(download(&agent, image_url, Duration::ZERO, 3).is_err());
+        for url in [
+            image_url,
+            "https://images.steamusercontent.com/ugc/example/second.png",
+        ] {
+            assert_eq!(
+                download(&agent, url, Duration::from_secs(2), 3).unwrap().1,
+                b"png"
+            );
+        }
+        assert_eq!(
+            server.join().unwrap(),
+            1,
+            "downloads must share one connection"
+        );
+
+        let (agent, server) = local_http_agent(vec![
+            (
+                "",
+                Duration::from_millis(200),
+                "HTTP/1.1 302 Found\r\nLocation: /ugc/example/final.png\r\nContent-Length: 0\r\n\r\n",
+            ),
+            (
+                "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 3\r\n\r\n",
+                Duration::from_millis(200),
+                "png",
+            ),
+        ]);
+        assert!(download(&agent, image_url, Duration::from_millis(300), 3).is_err());
+        server.join().unwrap();
+
+        let (agent, server) = local_http_agent(vec![(
+            "",
+            Duration::ZERO,
+            "HTTP/1.1 302 Found\r\nLocation: https://imgheybox.max-c.com/example.png\r\nContent-Length: 0\r\n\r\n",
+        )]);
+        assert_eq!(
+            download(&agent, image_url, Duration::from_secs(2), 3)
+                .unwrap_err()
+                .message(),
+            "图片重定向超出来源允许范围"
+        );
+        server.join().unwrap();
+    }
 
     #[test]
     fn memory_hits_share_the_original_payload_and_clear_drops_only_cache_ownership() {

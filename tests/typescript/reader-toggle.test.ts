@@ -4,6 +4,7 @@ import {
   isReaderRoute,
   readerBelongsToStoppedApp,
   readerRouteAppId,
+  readerRouteIdentity,
   ReaderHotkeyToggle,
 } from "../../src/hotkey/reader-toggle";
 
@@ -12,6 +13,29 @@ describe("L4 reader hotkey", () => {
     expect(isReaderRoute("/decky-grip/reader/1113000/3414883877")).toBe(true);
     expect(isReaderRoute("/apprunning")).toBe(false);
     expect(isReaderRoute(null)).toBe(false);
+  });
+
+  it("parses Steam and imported reader identities and rejects incomplete or malformed paths", () => {
+    expect(
+      readerRouteIdentity("/decky-grip/reader/1113000/3414883877"),
+    ).toEqual({
+      appId: "1113000",
+      guideId: "3414883877",
+    });
+    expect(
+      readerRouteIdentity("/decky-grip/reader/730/heybox-249c72219fed/"),
+    ).toEqual({
+      appId: "730",
+      guideId: "heybox-249c72219fed",
+    });
+    for (const path of [
+      null,
+      "/apprunning",
+      "/decky-grip/reader/730",
+      "/decky-grip/reader/0/123",
+      "/decky-grip/reader/730/123/extra",
+    ])
+      expect(readerRouteIdentity(path)).toBeNull();
   });
 
   it("matches game-exit notifications only to their reader owner", () => {

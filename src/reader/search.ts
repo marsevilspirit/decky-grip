@@ -65,6 +65,12 @@ function visitVisibleText(node: Node, visitor: VisibleTextVisitor): boolean {
   if (node.nodeType === Node.TEXT_NODE) {
     return visitor(node.textContent ?? "", node as Text) !== false;
   }
+  if (
+    node.nodeType === Node.ELEMENT_NODE &&
+    (node as Element).hasAttribute("data-grip-image-retry")
+  ) {
+    return true;
+  }
   const separatesText =
     node.nodeType === Node.ELEMENT_NODE &&
     TEXT_BOUNDARY_TAGS.has((node as Element).tagName);

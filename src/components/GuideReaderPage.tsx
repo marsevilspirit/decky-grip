@@ -7,7 +7,6 @@ import {
   Marquee,
   Spinner,
   TextField,
-  useParams,
   type GamepadEvent,
 } from "@decky/ui";
 import {
@@ -92,23 +91,8 @@ function selectionMatchesRange(selection: Selection, range: Range): boolean {
   );
 }
 
-function readIdentity(
-  appId: string | undefined,
-  guideId: string | undefined,
-): GuideIdentity | null {
-  if (!appId || !guideId) {
-    return null;
-  }
-  const identity = { appId, guideId };
-  try {
-    makeGuideKey(identity);
-    return identity;
-  } catch {
-    return null;
-  }
-}
-
 export interface GuideReaderPageProps {
+  identity: GuideIdentity | null;
   cache: ReaderSessionCache;
   downloads?: GuideDownloadTasks;
   imageHydrator: ReaderImageHydrator;
@@ -129,6 +113,7 @@ interface SectionRenderState {
 const noDownloadSubscription = () => () => {};
 
 export function GuideReaderPage({
+  identity,
   cache,
   downloads,
   imageHydrator,
@@ -140,8 +125,6 @@ export function GuideReaderPage({
   onSwitchGuide,
   performance,
 }: GuideReaderPageProps) {
-  const params = useParams<{ appId?: string; guideId?: string }>();
-  const identity = readIdentity(params.appId, params.guideId);
   const downloadTask = useSyncExternalStore(
     downloads?.subscribe ?? noDownloadSubscription,
     () =>
@@ -1260,7 +1243,8 @@ export function GuideReaderPage({
       >
         <DialogHeader>GRIP Reader</DialogHeader>
         <DialogBodyText>
-          尚未选择指南。请从 Decky 打开 GRIP，然后选择“继续阅读”。
+          无法识别指南地址。请返回 Decky 的 GRIP
+          面板，选择“继续当前或最近指南”。
         </DialogBodyText>
         <DialogButton onClick={onClose}>返回</DialogButton>
       </div>

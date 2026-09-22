@@ -5,7 +5,8 @@ import {
   routerHook,
   toaster,
 } from "@decky/api";
-import { Router, showModal, staticClasses, useParams } from "@decky/ui";
+import { Router, showModal, staticClasses } from "@decky/ui";
+import { useLayoutEffect, useSyncExternalStore } from "react";
 
 import {
   clearGuideCache,
@@ -37,6 +38,7 @@ import {
   isReaderRoute,
   readerBelongsToStoppedApp,
   readerRouteAppId,
+  readerRouteIdentity,
   ReaderHotkeyToggle,
 } from "./hotkey/reader-toggle";
 import { resolveGuideForReaderOpen } from "./reader/recent-guide";
@@ -68,9 +70,18 @@ import { createSteamGuideRuntime } from "./steam/runtime";
 
 const READER_ROUTE = "/decky-grip/reader/:appId/:guideId";
 const GUIDE_DOWNLOAD_COMPONENT = "decky-grip-guide-download";
+const READER_MOUNT_TIMEOUT_MS = 5_000;
 
 function currentMainPath(): string | null {
   return mainWindowPath(getMainWindow());
+}
+
+function subscribeMainPath(listener: () => void): () => void {
+  try {
+    return getMainWindow()?.History?.listen?.(listener) ?? (() => {});
+  } catch {
+    return () => {};
+  }
 }
 
 function currentRunningAppId(): string | undefined {
@@ -100,6 +111,12 @@ export default definePlugin(() => {
   let mounted = true;
   const status = new RuntimeStatusStore(currentRunningAppId() ?? null);
   const readerPerformance = new ReaderPerformanceTracker();
+  let mountedReaderKey: string | null = null;
+  let readerMountCheck: { guideKey: string; cancel: () => void } | null = null;
+  const cancelReaderMountCheck = () => {
+    readerMountCheck?.cancel();
+    readerMountCheck = null;
+  };
   const imageCacheControl = new ReaderImageCacheControl();
   const imageHydrator = new ReaderImageHydrator(getGuideImage);
   let guideCacheMutationActive = false;
@@ -149,6 +166,7 @@ export default definePlugin(() => {
     }
     guideCacheMutationActive = true;
     readerOpenGeneration += 1;
+    cancelReaderMountCheck();
     imageHydrator.cancelPreload();
     try {
       return await action();
@@ -272,6 +290,7 @@ export default definePlugin(() => {
     requestedIdentity?: GuideIdentity,
   ): Promise<void> => {
     imageHydrator.cancelPreload();
+    cancelReaderMountCheck();
     const openGeneration = ++readerOpenGeneration;
     const performanceTrace = hotkeyPress
       ? readerPerformance.begin(hotkeyPress)
@@ -351,11 +370,46 @@ export default definePlugin(() => {
       if (performanceTrace) {
         readerPerformance.markRouteRequested(performanceTrace);
       }
-      navigateMainWindow(
-        getMainWindow(),
-        `/decky-grip/reader/${identity.appId}/${identity.guideId}`,
-        true,
-      );
+      const mainWindow = getMainWindow();
+      if (typeof mainWindow?.History?.listen !== "function") {
+        throw new Error(
+          "无法监听 Steam 页面切换，请检查 Steam 与 Decky 的版本兼容性",
+        );
+      }
+      const guideKey = makeGuideKey(identity);
+      const readerPath = `/decky-grip/reader/${identity.appId}/${identity.guideId}`;
+      if (mountedReaderKey !== guideKey) {
+        let stopHistory = () => {};
+        const timer = setTimeout(() => {
+          cancelReaderMountCheck();
+          if (
+            !mounted ||
+            openGeneration !== readerOpenGeneration ||
+            currentRunningAppId() !== targetAppId
+          )
+            return;
+          const message =
+            "阅读器页面未能打开，请返回 GRIP 重试；若仍为空白，请检查 Steam 与 Decky 的版本兼容性。";
+          if (performanceTrace)
+            readerPerformance.fail(performanceTrace, message);
+          toaster.toast({
+            title: "GRIP：打开失败",
+            body: message,
+            duration: 8_000,
+          });
+        }, READER_MOUNT_TIMEOUT_MS);
+        readerMountCheck = {
+          guideKey,
+          cancel: () => {
+            clearTimeout(timer);
+            stopHistory();
+          },
+        };
+        stopHistory = mainWindow.History.listen(() => {
+          if (currentMainPath() !== readerPath) cancelReaderMountCheck();
+        });
+      }
+      navigateMainWindow(mainWindow, readerPath, true);
       void readerCache
         .load(identity)
         .then((snapshot) => {
@@ -395,6 +449,7 @@ export default definePlugin(() => {
           console.warn("[GRIP] Reader content load failed", error);
         });
     } catch (error: unknown) {
+      if (openGeneration === readerOpenGeneration) cancelReaderMountCheck();
       if (performanceTrace) {
         readerPerformance.fail(performanceTrace, errorMessage(error));
       }
@@ -592,6 +647,7 @@ export default definePlugin(() => {
     options: { forceLibrary?: boolean; ownerAppId?: string } = {},
   ): void => {
     readerOpenGeneration += 1;
+    cancelReaderMountCheck();
     const mainWindow = getMainWindow();
     const ownerAppId =
       options.ownerAppId ?? readerRouteAppId(currentMainPath());
@@ -607,14 +663,25 @@ export default definePlugin(() => {
   };
 
   const ReaderRoute = () => {
-    const params = useParams<{ appId?: string; guideId?: string }>();
+    // Decky's route wrapper does not pass match props to plugin components.
+    const path = useSyncExternalStore(subscribeMainPath, currentMainPath);
+    const identity = readerRouteIdentity(path);
+    const guideKey = identity ? makeGuideKey(identity) : null;
+    useLayoutEffect(() => {
+      mountedReaderKey = guideKey;
+      if (readerMountCheck?.guideKey === guideKey) cancelReaderMountCheck();
+      return () => {
+        if (mountedReaderKey === guideKey) mountedReaderKey = null;
+      };
+    }, [guideKey]);
     return (
       <GuideReaderPage
+        identity={identity}
         cache={readerCache}
         downloads={downloads}
         imageHydrator={imageHydrator}
         imageCacheControl={imageCacheControl}
-        key={`${params.appId ?? ""}:${params.guideId ?? ""}`}
+        key={guideKey ?? "invalid-route"}
         loadGuideLibrary={getGuideLibrary}
         onClose={closeReader}
         onRepairPositions={repairPositions}
@@ -729,6 +796,7 @@ export default definePlugin(() => {
     icon: <BookmarkIcon />,
     onDismount() {
       mounted = false;
+      cancelReaderMountCheck();
       downloads.dispose();
       importModal?.Close();
       importModal = null;
