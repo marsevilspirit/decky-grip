@@ -124,7 +124,7 @@ export default definePlugin(() => {
   let recentGuidesGeneration = 0;
   const readerCache = new ReaderSessionCache(
     {
-      getCachedGuide,
+      getCachedGuide: (guideId) => getCachedGuide(guideId, true),
       getGuide: async (identity, forceRefresh) => {
         if (!forceRefresh) {
           const guide = await getCachedGuide(identity.guideId);
@@ -324,8 +324,11 @@ export default definePlugin(() => {
         identity = resolveReaderIdentity(targetAppId);
       }
       if (!canContinue()) {
-        if (performanceTrace) {
-          readerPerformance.abandon(performanceTrace);
+        if (mounted && performanceTrace) {
+          readerPerformance.fail(
+            performanceTrace,
+            "阅读器首屏完成前被取消或取代",
+          );
         }
         return;
       }
@@ -362,8 +365,11 @@ export default definePlugin(() => {
       }
 
       if (!canContinue()) {
-        if (performanceTrace) {
-          readerPerformance.abandon(performanceTrace);
+        if (mounted && performanceTrace) {
+          readerPerformance.fail(
+            performanceTrace,
+            "阅读器首屏完成前被取消或取代",
+          );
         }
         return;
       }
@@ -414,8 +420,11 @@ export default definePlugin(() => {
         .load(identity)
         .then((snapshot) => {
           if (!mounted || openGeneration !== readerOpenGeneration) {
-            if (performanceTrace) {
-              readerPerformance.abandon(performanceTrace);
+            if (mounted && performanceTrace) {
+              readerPerformance.fail(
+                performanceTrace,
+                "阅读器首屏完成前被取消或取代",
+              );
             }
             return;
           }
@@ -437,8 +446,11 @@ export default definePlugin(() => {
         })
         .catch((error: unknown) => {
           if (!mounted || openGeneration !== readerOpenGeneration) {
-            if (performanceTrace) {
-              readerPerformance.abandon(performanceTrace);
+            if (mounted && performanceTrace) {
+              readerPerformance.fail(
+                performanceTrace,
+                "阅读器首屏完成前被取消或取代",
+              );
             }
             return;
           }

@@ -266,14 +266,6 @@ export class ReaderPerformanceTracker {
     this.finishIfComplete(identity);
   }
 
-  abandon(traceHandle: ReaderPerformanceTrace): void {
-    const trace = this.traces.get(traceHandle.token);
-    if (!trace) {
-      return;
-    }
-    this.removeTrace(trace);
-  }
-
   fail(traceHandle: ReaderPerformanceTrace, reason: string): void {
     this.failToken(traceHandle.token, reason);
   }

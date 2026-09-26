@@ -174,6 +174,9 @@ warm L4 open renders immediately; expired content remains visible until the user
 requests an update. Background preloading is cache-only and reads an atomically
 stable file snapshot without taking the foreground lock; network and write I/O
 is serialized per guide id, so one slow Steam request cannot block another guide.
+The Python bridge reserves its single preload worker for background reads;
+explicit cache-only opens use the default executor so they do not queue behind
+another guide's preload.
 Remote image URLs are removed from returned HTML. Only allowed Steam/Heybox HTTPS
 static PNG/JPEG/GIF/WebP content with bounded encoded bytes and decoded
 dimensions can enter the bounded Rust cache. The image decoder validates actual

@@ -421,6 +421,24 @@ describe("plugin download completion notification", () => {
     expect(steam.backend.get_guide).not.toHaveBeenCalled();
   });
 
+  it("marks only cache preloads as background requests", async () => {
+    steam.backend.get_cached_guide.mockResolvedValue(guide);
+    const { cache } = reader();
+    await cache.preload(identity);
+    expect(steam.backend.get_cached_guide).toHaveBeenCalledExactlyOnceWith(
+      identity.guideId,
+      true,
+    );
+
+    cache.clear();
+    await cache.load(identity);
+    expect(steam.backend.get_cached_guide).toHaveBeenCalledTimes(2);
+    expect(steam.backend.get_cached_guide).toHaveBeenLastCalledWith(
+      identity.guideId,
+    );
+    expectNoDownload();
+  });
+
   it.each([identity.appId, "730"])(
     "keeps locally opened A for the panel and L4 after browsing B from app %s",
     async (appId) => {
@@ -580,6 +598,52 @@ describe("plugin download completion notification", () => {
     );
     expectNoDownload();
   });
+
+  it.each(["reopen", "unload"])(
+    "accounts for a physical L4 canceled by %s while the local list is pending",
+    async (change) => {
+      vi.useFakeTimers();
+      const library = deferred<(typeof localEntry)[]>();
+      steam.runningAppId = identity.appId;
+      steam.backend.get_guide_library.mockReturnValue(library.promise);
+      steam.backend.get_cached_guide.mockResolvedValue(guide);
+      restart();
+      const performance = panel().performance;
+      steam.hotkeyListener!({
+        version: 1,
+        button: "L4",
+        sequence: 1,
+        detectedAtUnixMs: Date.now(),
+      });
+      expect(steam.navigate).not.toHaveBeenCalled();
+      const reopened = change === "reopen" ? panel().openReader() : null;
+      if (change === "unload") plugin.onDismount?.();
+      library.resolve([localEntry]);
+      await reopened;
+      await vi.advanceTimersByTimeAsync(0);
+
+      if (change === "reopen") {
+        expect(performance.getSnapshot()).toMatchObject({
+          warmAttempts: 1,
+          warmOpenFailureCount: 1,
+          latestFailure: { reason: "阅读器首屏完成前被取消或取代" },
+        });
+        expect(steam.navigate).toHaveBeenCalledExactlyOnceWith(
+          `/decky-grip/reader/${identity.appId}/${identity.guideId}`,
+          true,
+        );
+      } else {
+        expect(performance.getSnapshot()).toMatchObject({
+          warmAttempts: 0,
+          warmOpenFailureCount: 0,
+          latestFailure: null,
+        });
+        expect(steam.navigate).not.toHaveBeenCalled();
+      }
+      expect(steam.toast).not.toHaveBeenCalled();
+      expectNoDownload();
+    },
+  );
 
   it.each(["panel", "L4"])(
     "reports a local list failure and retries locally from %s without adopting Steam browsing",

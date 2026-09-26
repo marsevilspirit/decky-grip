@@ -101,7 +101,7 @@ export const getGuide = callable<
 >("get_guide");
 
 export const getCachedGuide = callable<
-  [guideId: string],
+  [guideId: string, background?: boolean],
   DownloadedGuide | null
 >("get_cached_guide");
 

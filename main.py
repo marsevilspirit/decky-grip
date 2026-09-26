@@ -15,6 +15,13 @@ class _ExecutorUnavailable(RuntimeError):
     """Raised only when work cannot be submitted to an executor."""
 
 
+async def _wait_for_result(operation: asyncio.Future) -> Any:
+    # The caller owns cancellation cleanup; shield would log already-collected errors on Python 3.14.
+    if not operation.done():
+        await asyncio.wait((operation,))
+    return operation.result()
+
+
 class Plugin:
     def __init__(self) -> None:
         settings_directory = Path(decky.DECKY_PLUGIN_SETTINGS_DIR)
@@ -55,12 +62,12 @@ class Plugin:
                 raise _ExecutorUnavailable from error
             operation = asyncio.wrap_future(source, loop=loop)
         try:
-            return await asyncio.shield(operation)
+            return await _wait_for_result(operation)
         except asyncio.CancelledError as cancellation:
             if wait_on_cancel:
                 while not operation.done():
                     try:
-                        await asyncio.shield(operation)
+                        await _wait_for_result(operation)
                     except asyncio.CancelledError:
                         continue
                     except Exception:
@@ -178,11 +185,10 @@ class Plugin:
             timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
         )
 
-    async def get_cached_guide(self, guide_id: str):
-        # Cache-only warming has its own single worker, so even a large cache
-        # validation cannot occupy the executor needed by an L4 foreground open.
+    async def get_cached_guide(self, guide_id: str, background: bool = False):
+        # Only warming uses the single worker; foreground opens bypass its queue.
         executor = self._preload_executor
-        if executor is None:
+        if self._closing or executor is None:
             return None
         try:
             return await self._run_executor_io(
@@ -190,7 +196,7 @@ class Plugin:
                 "guides.get_cached",
                 {"guide_id": guide_id},
                 timeout=RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS,
-                executor=executor,
+                executor=executor if background else None,
             )
         except _ExecutorUnavailable:
             return None
@@ -218,7 +224,7 @@ class Plugin:
             if not sent.done():
                 sent.set_result(None)
 
-        # Shield the queued worker: cancel must not overtake its request write.
+        # Keep the queued worker alive: cancel must not overtake its request write.
         operation = asyncio.create_task(self._run_executor_io(
             self._sidecar.request, "imports.capture", {"source_url": source_url, "marker": marker},
             timeout=130, on_sent=lambda: loop.call_soon_threadsafe(mark_sent),
@@ -226,7 +232,7 @@ class Plugin:
         # A failed executor submission or write must also release the barrier.
         operation.add_done_callback(lambda _task: mark_sent())
         try:
-            return await asyncio.shield(operation)
+            return await _wait_for_result(operation)
         except asyncio.CancelledError:
             try:
                 await self._finish_task(asyncio.create_task(self.cancel_heybox_capture(marker)))
@@ -245,7 +251,7 @@ class Plugin:
         # A second cancel must not interrupt cleanup of a request already sent.
         while not task.done():
             try:
-                await asyncio.shield(task)
+                await _wait_for_result(task)
             except asyncio.CancelledError:
                 continue
         return task.result()
@@ -267,7 +273,7 @@ class Plugin:
                 self._sidecar.request, "imports.phone_start", {}
             ))
             try:
-                return await asyncio.shield(operation)
+                return await _wait_for_result(operation)
             except asyncio.CancelledError:
                 try:
                     session = await self._finish_task(operation)

@@ -320,9 +320,9 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
             return None
 
         self.sidecar.request.side_effect = request
-        first = asyncio.create_task(plugin.get_cached_guide("1"))
+        first = asyncio.create_task(plugin.get_cached_guide("1", background=True))
         self.assertTrue(await asyncio.to_thread(started.wait, 1))
-        second = asyncio.create_task(plugin.get_cached_guide("2"))
+        second = asyncio.create_task(plugin.get_cached_guide("2", background=True))
         await asyncio.sleep(0)
         second.cancel()
         await asyncio.sleep(0)
@@ -333,7 +333,48 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, ["1"])
 
         plugin._stop_preloading()
-        self.assertIsNone(await plugin.get_cached_guide("3"))
+        for background in (False, True):
+            self.assertIsNone(await plugin.get_cached_guide("3", background=background))
+
+    async def test_foreground_cache_read_bypasses_serial_background_warming(self):
+        plugin = self.plugin()
+        started, release = threading.Event(), threading.Event()
+        calls = []
+
+        def request(method, params, *, timeout=None):
+            self.assertEqual(method, "guides.get_cached")
+            self.assertEqual(timeout, RustSidecar.LONG_RESPONSE_TIMEOUT_SECONDS)
+            guide_id = params["guide_id"]
+            calls.append(guide_id)
+            if guide_id == "1":
+                started.set()
+                if not release.wait(2):
+                    raise TimeoutError("test release timed out")
+            return {"guideId": guide_id}
+
+        self.sidecar.request.side_effect = request
+        first = asyncio.create_task(plugin.get_cached_guide("1", background=True))
+        second = None
+        try:
+            self.assertTrue(await asyncio.to_thread(started.wait, 1))
+            second = asyncio.create_task(plugin.get_cached_guide("2", background=True))
+            self.assertEqual(
+                await asyncio.wait_for(plugin.get_cached_guide("3"), timeout=1),
+                {"guideId": "3"},
+            )
+            self.assertFalse(second.done())
+            self.assertEqual(calls, ["1", "3"])
+        finally:
+            release.set()
+            await asyncio.gather(first, *([second] if second else []), return_exceptions=True)
+        self.assertEqual(await second, {"guideId": "2"})
+        self.assertEqual(calls, ["1", "3", "2"])
+
+        plugin._closing = True
+        self.sidecar.request.reset_mock()
+        for background in (False, True):
+            self.assertIsNone(await plugin.get_cached_guide("5", background=background))
+        self.sidecar.request.assert_not_called()
 
     async def test_guide_library_is_a_bounded_cache_only_sidecar_query(self):
         plugin = self.plugin()
@@ -536,6 +577,10 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
         ])
 
     async def test_capture_cancellation_waits_for_queued_request_write_or_failure(self):
+        loop = asyncio.get_running_loop()
+        loop_errors = []
+        self.addCleanup(loop.set_exception_handler, loop.get_exception_handler())
+        loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
         for explicit, fail_write in ((True, False), (False, False), (False, True)):
             with self.subTest(explicit=explicit, fail_write=fail_write):
                 plugin = self.plugin()
@@ -581,8 +626,25 @@ class PluginBridgeTests(unittest.IsolatedAsyncioTestCase):
                         self.assertIsInstance(results[0], RustSidecarError if explicit else asyncio.CancelledError)
                         self.assertEqual(calls, ["imports.capture", "imports.cancel_capture"])
                         self.assertFalse(plugin._capture_sends)
+                        await asyncio.sleep(0)
+                        self.assertEqual(loop_errors, [])
                     finally:
                         finish_capture.set()
+
+    async def test_owned_operations_propagate_real_errors(self):
+        plugin = self.plugin()
+        for method, call in (
+            ("positions.snapshot", plugin.get_positions),
+            ("imports.capture", lambda: plugin.capture_heybox("source", "a" * 32)),
+            ("imports.phone_start", plugin.start_phone_import),
+        ):
+            for error in (ValueError("invalid input"), RustSidecarError("transport failed")):
+                with self.subTest(method=method, error=error):
+                    self.sidecar.responses[method] = error
+                    with self.assertRaises(type(error)) as raised:
+                        await call()
+                    self.assertIs(raised.exception, error)
+        self.assertFalse(plugin._capture_sends)
 
     async def test_unload_rejects_new_receivers_and_captures_before_sidecar_closes(self):
         plugin = self.plugin()
