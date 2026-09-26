@@ -100,10 +100,11 @@ impl PhoneImportSession {
                 "Steam Deck 主机名无效",
             ));
         }
-        let id = random_bytes::<12>()?
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let mut id = String::with_capacity(24);
+        for byte in random_bytes::<12>()? {
+            use std::fmt::Write as _;
+            let _ = write!(id, "{byte:02x}");
+        }
         let token = URL_SAFE_NO_PAD.encode(random_bytes::<32>()?);
         let nonce = URL_SAFE_NO_PAD.encode(random_bytes::<16>()?);
         let listener = TcpListener::bind(address)?;

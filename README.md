@@ -55,7 +55,7 @@ Requirements follow the current official Decky template:
 - Node.js 20.19+, 22.12+, or 24+
 - pnpm 9
 - Python 3.9 or newer
-- Rust 1.85 or newer
+- Rust via rustup (local checks and CI use the version pinned in `rust-toolchain.toml`)
 
 ```bash
 pnpm install
