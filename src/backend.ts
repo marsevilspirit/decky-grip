@@ -27,6 +27,7 @@ export interface GuideImagePayload {
   fromCache: boolean;
   width: number;
   height: number;
+  frameCount?: number;
 }
 
 export interface GuideDownloadStatus {

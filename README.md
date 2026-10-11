@@ -421,7 +421,10 @@ frontend image residency. The reader reuses this bounded image cache across
 reader opens and guide switches. Closing
 the reader releases its page nodes and cancels pending hydration; explicit image
 cache cleanup and plugin unload also release the retained Blob URLs.
-Animated image payloads are rejected. The browser observes all image nodes within
+GIF animations retain their original bytes after every frame is decoded successfully.
+They are limited to 256 frames and 16 megapixels across all frame canvases; the
+frontend counts every frame against its decoded memory budget. Animated PNG and
+WebP payloads remain unsupported. The browser observes all image nodes within
 the validated guide's existing size/node limits; the reader chooses at most 512
 active hydration candidates with visible images first, while staging no more than
 48 distinct image URLs at once. This budget never permanently excludes images

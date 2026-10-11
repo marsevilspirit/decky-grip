@@ -3,7 +3,7 @@ use crate::storage::{
     FileSignature, KeyLockPool, atomic_replace, lock, read_bounded_regular_file, signature,
 };
 use base64::Engine as _;
-use image::{ImageDecoder, ImageFormat, ImageReader, Limits};
+use image::{AnimationDecoder, ImageDecoder, ImageFormat, ImageReader, Limits};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -24,6 +24,7 @@ pub const MAX_DISK_BYTES: usize = 128 * 1024 * 1024;
 pub const MAX_MEMORY_BYTES: usize = 24 * 1024 * 1024;
 pub const MAX_IMAGE_DIMENSION: u32 = 8_192;
 pub const MAX_IMAGE_PIXELS: u64 = 16_777_216;
+const MAX_GIF_FRAMES: usize = 256;
 const MAX_DECODE_BYTES: u64 = MAX_IMAGE_PIXELS * 8; // RGBA16, allocated only while validating.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 
@@ -107,6 +108,7 @@ struct ImageData {
     body: Vec<u8>,
     width: u32,
     height: u32,
+    frame_count: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -114,6 +116,7 @@ struct ValidatedImage {
     signature: FileSignature,
     width: u32,
     height: u32,
+    frame_count: usize,
 }
 
 #[derive(Default)]
@@ -287,6 +290,7 @@ impl GuideImageCache {
                 signature,
                 width: value.width,
                 height: value.height,
+                frame_count: value.frame_count,
             },
         );
     }
@@ -561,6 +565,7 @@ impl GuideImageCache {
                     body,
                     width: known.width,
                     height: known.height,
+                    frame_count: known.frame_count,
                 })
             } else {
                 self.validate(mime_type, body)
@@ -907,7 +912,7 @@ fn validate_image(
             "Guide image content does not match its type",
         ));
     }
-    reject_animated_image(&mime_type, &body)?;
+    let frame_count = validate_image_container(&mime_type, &body)?;
     let format = ImageFormat::from_mime_type(&mime_type).expect("validated MIME type");
     let mut limits = Limits::default();
     limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
@@ -919,7 +924,10 @@ fn validate_image(
         .into_decoder()
         .map_err(|_| ImageError::download("Image source returned an invalid image"))?;
     let (width, height) = decoder.dimensions();
-    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
+    if width == 0
+        || height == 0
+        || u64::from(width) * u64::from(height) * frame_count as u64 > MAX_IMAGE_PIXELS
+    {
         return Err(ImageError::download(
             "Guide image exceeds the decoded pixel limit",
         ));
@@ -931,21 +939,41 @@ fn validate_image(
     // Account for our output buffer before allowing the decoder its remaining working budget.
     limits
         .reserve(bytes as u64)
-        .and_then(|()| decoder.set_limits(limits))
         .map_err(|_| ImageError::download("Guide image exceeds the decode memory limit"))?;
-    let mut pixels = Vec::new();
-    pixels
-        .try_reserve_exact(bytes)
-        .map_err(|_| ImageError::download("Not enough memory to validate the guide image"))?;
-    pixels.resize(bytes, 0);
-    decoder
-        .read_image(&mut pixels)
-        .map_err(|_| ImageError::download("Incomplete or corrupt guide image"))?;
+    if format == ImageFormat::Gif && frame_count > 1 {
+        drop(decoder);
+        let mut animation = image::codecs::gif::GifDecoder::new(Cursor::new(&body))
+            .map_err(|_| ImageError::download("Image source returned an invalid image"))?;
+        animation
+            .set_limits(limits)
+            .map_err(|_| ImageError::download("Guide image exceeds the decode memory limit"))?;
+        let mut decoded = 0;
+        for frame in animation.into_frames() {
+            frame.map_err(|_| ImageError::download("Incomplete or corrupt guide image"))?;
+            decoded += 1;
+        }
+        if decoded != frame_count {
+            return Err(ImageError::download("Incomplete or corrupt guide image"));
+        }
+    } else {
+        decoder
+            .set_limits(limits)
+            .map_err(|_| ImageError::download("Guide image exceeds the decode memory limit"))?;
+        let mut pixels = Vec::new();
+        pixels
+            .try_reserve_exact(bytes)
+            .map_err(|_| ImageError::download("Not enough memory to validate the guide image"))?;
+        pixels.resize(bytes, 0);
+        decoder
+            .read_image(&mut pixels)
+            .map_err(|_| ImageError::download("Incomplete or corrupt guide image"))?;
+    }
     Ok(ImageData {
         mime_type,
         body,
         width,
         height,
+        frame_count,
     })
 }
 
@@ -959,10 +987,12 @@ fn image_type_matches(mime_type: &str, body: &[u8]) -> bool {
     }
 }
 
-fn reject_animated_image(mime_type: &str, body: &[u8]) -> Result<(), ImageError> {
+fn validate_image_container(mime_type: &str, body: &[u8]) -> Result<usize, ImageError> {
+    if mime_type == "image/gif" {
+        return gif_frame_count(body);
+    }
     let invalid = || ImageError::download("Image source returned an incomplete image container");
     let animated = match mime_type {
-        "image/gif" => gif_frame_count(body)? > 1,
         "image/png" | "image/webp" => {
             let png = mime_type == "image/png";
             let body = if png {
@@ -1020,7 +1050,7 @@ fn reject_animated_image(mime_type: &str, body: &[u8]) -> Result<(), ImageError>
             "animated guide images are not supported",
         ))
     } else {
-        Ok(())
+        Ok(1)
     }
 }
 
@@ -1107,8 +1137,8 @@ fn gif_frame_count(body: &[u8]) -> Result<usize, ImageError> {
                 cursor += 1;
                 cursor = skip_gif_sub_blocks(body, cursor)?;
                 frames += 1;
-                if frames > 1 {
-                    return Ok(frames);
+                if frames > MAX_GIF_FRAMES {
+                    return Err(ImageError::download("Guide GIF exceeds the frame limit"));
                 }
             }
             _ => {
@@ -1249,13 +1279,17 @@ fn download(
 }
 
 fn response(value: &ImageData, from_cache: bool) -> Value {
-    json!({
+    let mut response = json!({
         "base64": base64::engine::general_purpose::STANDARD.encode(&value.body),
         "fromCache": from_cache,
         "height": value.height,
         "mimeType": value.mime_type,
         "width": value.width,
-    })
+    });
+    if value.frame_count > 1 {
+        response["frameCount"] = json!(value.frame_count);
+    }
+    response
 }
 
 fn redirect_status(status: u16) -> bool {

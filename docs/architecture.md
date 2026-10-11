@@ -178,8 +178,10 @@ The Python bridge reserves its single preload worker for background reads;
 explicit cache-only opens use the default executor so they do not queue behind
 another guide's preload.
 Remote image URLs are removed from returned HTML. Only allowed Steam/Heybox HTTPS
-static PNG/JPEG/GIF/WebP content with bounded encoded bytes and decoded
-dimensions can enter the bounded Rust cache. The image decoder validates actual
+PNG/JPEG/GIF/WebP content with bounded encoded bytes and decoded
+dimensions can enter the bounded Rust cache. GIF animations are fully decoded
+with at most 256 frames and 16 megapixels across all frames; their frame count
+also contributes to the frontend residency budget. Animated PNG/WebP are rejected. The image decoder validates actual
 pixels before a download or changed disk file counts as complete; unchanged
 validated signatures reuse the result. Animation checks inspect format structure,
 not arbitrary bytes inside metadata or compressed content. Rust memory-cache

@@ -468,6 +468,35 @@ describe("reader image hydration", () => {
     expect(target.dataset.gripImageState).toBe("unavailable");
   });
 
+  it.each([
+    [2, 8, true],
+    [2, 6, false],
+    [256, 1024, true],
+    [0, 8, false],
+    [1.5, 8, false],
+    [257, 2048, false],
+  ])(
+    "accounts for GIF frames in the byte quota (%s frames, %s bytes)",
+    async (frameCount, quota, accepted) => {
+      const target = image("https://a/animated");
+      const makeObjectUrl = vi.fn(() => "blob:animated");
+      const hydrator = new ReaderImageHydrator(
+        vi.fn(async () => ({ ...cached, mimeType: "image/gif", frameCount })),
+        1,
+        makeObjectUrl,
+        vi.fn(),
+        quota,
+      );
+      hydrator.hydrateImages([target]);
+      await vi.waitFor(() => {
+        if (accepted) expect(target.src).toBe("blob:animated");
+        else expect(target.dataset.gripImageState).toBe("unavailable");
+      });
+      expect(makeObjectUrl).toHaveBeenCalledTimes(accepted ? 1 : 0);
+      hydrator.clear();
+    },
+  );
+
   it("displays the largest backend-accepted image and preserves dimensions after eviction", async () => {
     const target = image("https://a/large");
     const other = image("https://a/other");

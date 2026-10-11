@@ -138,6 +138,7 @@ fn incomplete_payloads_never_become_offline_downloads() {
         ),
         ("jpeg", "image/jpeg", jpeg(2, 3)),
         ("gif", "image/gif", gif(1)),
+        ("animated-gif", "image/gif", gif(2)),
         ("webp", "image/webp", webp(false)),
     ] {
         for cut in 0..body.len() {
@@ -364,7 +365,82 @@ fn offline_quota_persists_and_rejects_shrinking_below_downloaded_usage() {
 }
 
 #[test]
-fn download_result_requires_matching_static_bounded_raster() {
+fn animated_gifs_keep_all_frames_and_cached_frame_metadata() {
+    let directory = TestDirectory::new();
+    let image_dir = directory.0.join("animated-gif");
+    let body = gif(3);
+    let expected = body.clone();
+    let cache = GuideImageCache::with_fetcher(
+        &image_dir,
+        move |_, _, _| Ok(("image/gif".into(), body.clone())),
+        limits(1024 * 1024, 1024 * 1024, 0),
+    )
+    .unwrap();
+    assert!(cache.download(IMAGE_URL).unwrap());
+    let cached = cache.get(IMAGE_URL, false).unwrap().unwrap();
+    assert_eq!(cached["frameCount"], 3);
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(cached["base64"].as_str().unwrap())
+            .unwrap(),
+        expected
+    );
+    drop(cache);
+    let reopened = GuideImageCache::with_fetcher(
+        &image_dir,
+        |_, _, _| panic!("offline GIF must not use the network"),
+        limits(1024 * 1024, 1024 * 1024, 0),
+    )
+    .unwrap();
+    assert!(reopened.is_downloaded(IMAGE_URL).unwrap());
+    assert_eq!(
+        reopened.get(IMAGE_URL, false).unwrap().unwrap()["frameCount"],
+        3
+    );
+}
+
+#[test]
+fn animated_gifs_reject_corrupt_later_frames_and_excessive_decode_work() {
+    let directory = TestDirectory::new();
+    let mut corrupt = gif(2);
+    let descriptor = corrupt
+        .windows(9)
+        .rposition(|bytes| bytes == [0x2c, 0, 0, 0, 0, 1, 0, 1, 0])
+        .unwrap();
+    let packed = corrupt[descriptor + 9];
+    let palette = if packed & 0x80 != 0 {
+        3 * (1 << ((packed & 0x07) + 1))
+    } else {
+        0
+    };
+    corrupt[descriptor + 10 + palette] = 12; // Invalid LZW code size in the second frame.
+    let mut large_canvas = gif(2);
+    large_canvas[6..8].copy_from_slice(&4096u16.to_le_bytes());
+    large_canvas[8..10].copy_from_slice(&4096u16.to_le_bytes());
+    for (name, body, error) in [
+        ("corrupt-second-frame", corrupt, "corrupt"),
+        ("total-pixels", large_canvas, "pixel limit"),
+        ("too-many-frames", gif(257), "frame limit"),
+    ] {
+        let cache = GuideImageCache::with_fetcher(
+            directory.0.join(name),
+            move |_, _, _| Ok(("image/gif".into(), body.clone())),
+            ImageLimits::default(),
+        )
+        .unwrap();
+        assert!(
+            cache
+                .download(IMAGE_URL)
+                .unwrap_err()
+                .message()
+                .contains(error)
+        );
+        assert!(!cache.is_downloaded(IMAGE_URL).unwrap());
+    }
+}
+
+#[test]
+fn download_result_requires_matching_bounded_raster() {
     let directory = TestDirectory::new();
     let bodies = [
         ("image/png", png(b'p', 1, 1), true),
@@ -379,8 +455,8 @@ fn download_result_requires_matching_static_bounded_raster() {
             b"<html>not an image</html>".to_vec(),
             false,
         ),
-        ("application/octet-stream", gif(2), false),
-        ("image/gif", gif(2), false),
+        ("application/octet-stream", gif(2), true),
+        ("image/gif", gif(2), true),
         ("image/webp", webp(true), false),
         ("image/png", png(b'p', 8_193, 1), false),
         ("image/png", b"not a png".to_vec(), false),

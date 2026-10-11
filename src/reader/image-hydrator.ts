@@ -7,6 +7,7 @@ export interface CachedGuideImage {
   fromCache: boolean;
   width: number;
   height: number;
+  frameCount?: number;
 }
 
 export type GuideImageFetcher = (
@@ -78,7 +79,11 @@ function residentImageBytes(image: CachedGuideImage): number {
   ) {
     throw new TypeError("backend returned invalid image dimensions");
   }
-  const decodedBytes = image.width * image.height * 4;
+  const frameCount = image.frameCount ?? 1;
+  if (!Number.isSafeInteger(frameCount) || frameCount < 1 || frameCount > 256) {
+    throw new TypeError("backend returned invalid image frame count");
+  }
+  const decodedBytes = image.width * image.height * frameCount * 4;
   if (!Number.isSafeInteger(decodedBytes)) {
     throw new TypeError("backend returned excessive image dimensions");
   }
